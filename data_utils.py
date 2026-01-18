@@ -7,6 +7,7 @@ from transformers import DistilBertTokenizer, MobileNetV2, MobileNet_V2_Weights
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from config import config
+import tqdm
 
 
 # 固定随机种子

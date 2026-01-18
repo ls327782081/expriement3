@@ -1,4 +1,6 @@
 import os
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -13,7 +15,7 @@ from metrics import calculate_metrics
 from models import PMAT, get_pmat_ablation_model
 from baseline_models.pctx import Pctx
 from baseline_models.mmq import MMQ
-from utils import save_checkpoint, load_checkpoint, save_results
+from .util import save_checkpoint, load_checkpoint, save_results
 
 # 混合精度训练初始化
 scaler = GradScaler()
