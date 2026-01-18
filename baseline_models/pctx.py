@@ -17,7 +17,7 @@ class Pctx(nn.Module):
         self.context_attention = nn.MultiheadAttention(
             embed_dim=config.hidden_dim, num_heads=config.attention_heads, batch_first=True
         )
-        self.fc = nn.Linear(config.hidden_dim, config.codebook_size)
+        self.fc = nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
 
     def forward(self, batch):
         user_emb = self.user_emb(batch["user_id"])
@@ -32,4 +32,5 @@ class Pctx(nn.Module):
 
         # 生成语义ID
         logits = self.fc(attn_output.squeeze(1))
+        logits = logits.reshape(-1, config.id_length, config.codebook_size)
         return logits

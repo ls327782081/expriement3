@@ -15,7 +15,7 @@ class MMQ(nn.Module):
 
         # 混合量化层（轻量化）
         self.quantize = nn.Embedding(config.codebook_size, config.hidden_dim)
-        self.fc = nn.Linear(config.hidden_dim, config.codebook_size)
+        self.fc = nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
 
     def forward(self, batch):
         # 多模态特征编码
@@ -27,6 +27,6 @@ class MMQ(nn.Module):
         fusion_emb = gate[:, 0:1] * text_emb + gate[:, 1:2] * vision_emb
 
         # 量化生成ID
-        quant_emb = self.quantize.weight
-        logits = torch.matmul(fusion_emb, quant_emb.t())
+        logits = self.fc(fusion_emb)
+        logits = logits.reshape(-1, config.id_length, config.codebook_size)
         return logits
