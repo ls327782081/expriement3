@@ -1,5 +1,6 @@
 import logging
 import os
+import pickle
 import re
 import time
 import gc
@@ -35,24 +36,21 @@ set_seed(config.seed)
 # 离线提取多模态特征（适配L4，避免实时编码）
 class AmazonBooksProcessor:
     def __init__(self,
-                 data_dir: str,
+                 category: str,
                  quick_mode: bool = False,
-                 min_interactions: int = 5,
+                 min_interactions: int = 3,
                  min_items: int = 5,
                  max_users: Optional[int] = None,
                  max_items: Optional[int] = None,
                  bert_model: str = "bert-base-uncased",
                  clip_model: str = "openai/clip-vit-base-patch32",
                  device: str = "auto",
-                 use_cache: bool = True,
-                 cache_dir: Optional[str] = None,
                  logger: Optional[logging.Logger] = None,
                  **kwargs):
         """
         初始化Amazon Books数据集处理器
         
         Args:
-            data_dir: 数据目录路径
             quick_mode: 是否使用快速模式（减少数据量）
             min_interactions: 用户最小交互次数
             min_items: 商品最小交互次数
@@ -61,8 +59,6 @@ class AmazonBooksProcessor:
             bert_model: BERT模型名称
             clip_model: CLIP模型名称
             device: 计算设备
-            use_cache: 是否使用缓存
-            cache_dir: 缓存目录
             logger: 日志记录器
             **kwargs: 其他参数
         """
@@ -70,7 +66,9 @@ class AmazonBooksProcessor:
         self.logger = logger if logger is not None else logging.getLogger(__name__)
         
         # 基本配置
-        self.data_dir = Path(data_dir)
+
+        self.category=category
+
         self.quick_mode = quick_mode
         self.min_interactions = min_interactions
         self.min_items = min_items
@@ -78,8 +76,7 @@ class AmazonBooksProcessor:
         self.max_items = max_items
         self.bert_model_name = bert_model
         self.clip_model_name = clip_model
-        self.use_cache = use_cache
-        
+
         # 设置设备
         if device == "auto":
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -88,9 +85,7 @@ class AmazonBooksProcessor:
             
         self.logger.info(f"Using device: {self.device}")
         
-        # 初始化缓存管理器
-        self.cache_dir = Path(cache_dir) if cache_dir else self.data_dir / "cache"
-        self.cache_manager = None  # 可以根据需要实现缓存管理器
+
         
         # 初始化预训练模型
         self._init_pretrained_models()
@@ -104,24 +99,33 @@ class AmazonBooksProcessor:
         
         # 初始化BERT模型和分词器
         self.logger.info(f"Loading BERT model: {self.bert_model_name}")
-        self.bert_tokenizer = AutoTokenizer.from_pretrained(self.bert_model_name)
-        self.bert_model = AutoModel.from_pretrained(self.bert_model_name).to(self.device)
+        self.bert_tokenizer = AutoTokenizer.from_pretrained(self.bert_model_name, cache_dir="./pre-trained_models/")
+        self.bert_model = AutoModel.from_pretrained(self.bert_model_name, cache_dir="./pre-trained_models/").to(self.device)
         self.bert_model.eval()
         
         # 初始化CLIP模型和处理器
         self.logger.info(f"Loading CLIP model: {self.clip_model_name}")
-        self.clip_processor = CLIPProcessor.from_pretrained(self.clip_model_name)
-        self.clip_model = CLIPModel.from_pretrained(self.clip_model_name).to(self.device)
+        self.clip_processor = CLIPProcessor.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/")
+        self.clip_model = CLIPModel.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/").to(self.device)
         self.clip_model.eval()
         
         self.logger.info("Pre-trained models initialized successfully")
         
     def _log_memory_usage(self, context: str = ""):
         """记录内存使用情况"""
-        if torch.cuda.is_available():
-            allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-            cached = torch.cuda.memory_reserved() / 1024**3   # GB
-            self.logger.info(f"{context} - GPU Memory: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
+        try:
+            import psutil
+            process = psutil.Process()
+            cpu_mem_mb = process.memory_info().rss / 1024 / 1024
+
+            if torch.cuda.is_available():
+                gpu_mem_mb = torch.cuda.memory_allocated() / 1024 / 1024
+                gpu_mem_max_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+                self.logger.info(f"[{context}] CPU内存: {cpu_mem_mb:.1f}MB, GPU内存: {gpu_mem_mb:.1f}MB (峰值: {gpu_mem_max_mb:.1f}MB)")
+            else:
+                self.logger.info(f"[{context}] CPU内存: {cpu_mem_mb:.1f}MB")
+        except ImportError:
+            pass  # psutil未安装，跳过内存监控
     
     def load_reviews(self) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, int]]:
         """加载评论数据"""
@@ -131,7 +135,7 @@ class AmazonBooksProcessor:
         self.logger.info("Loading reviews from HuggingFace...")
         review_dataset = load_dataset(
             "McAuley-Lab/Amazon-Reviews-2023",
-            name="raw_review_Books",
+            name=f"raw_review_{self.category}",
             split="full",
             trust_remote_code=True
         )
@@ -140,10 +144,10 @@ class AmazonBooksProcessor:
         reviews = []
         for review in review_dataset:
             reviews.append({
-                'user_id': review.get('reviewerID', ''),
-                'item_id': review.get('asin', ''),
-                'rating': review.get('overall', 0),
-                'timestamp': review.get('timestamp', 0),
+                'user_id': review.get('user_id'),
+                'item_id': review.get('parent_asin'),
+                'rating': float(review.get('rating', 0)),
+                'timestamp': int(review.get('timestamp', 0)),
                 'title': review.get('title', ''),
                 'text': review.get('text', ''),
                 'verified_purchase': review.get('verified_purchase', False),
@@ -192,12 +196,13 @@ class AmazonBooksProcessor:
         if self.max_items:
             top_items = item_counts.head(self.max_items).index
             df = df[df['item_id'].isin(top_items)]
+
+        # 重新编码用户和商品ID
+        # 重要：先排序再创建映射，确保映射顺序一致
+        unique_users = sorted(df['user_id'].unique())
+        unique_items = sorted(df['item_id'].unique())
         
-        # 创建用户和商品的连续ID映射
-        unique_users = df['user_id'].unique()
-        unique_items = df['item_id'].unique()
-        
-        user_mapping = {user_id: i+1 for i, user_id in enumerate(unique_users)}  # 从1开始，0保留给padding
+        user_mapping = {user_id: i for i, user_id in enumerate(unique_users)}  # 从0开始
         item_mapping = {item_id: i+1 for i, item_id in enumerate(unique_items)}  # 从1开始，0保留给padding
         
         # 应用映射
@@ -223,7 +228,7 @@ class AmazonBooksProcessor:
         self.logger.info("Loading meta data from HuggingFace...")
         meta_dataset = load_dataset(
             "McAuley-Lab/Amazon-Reviews-2023",
-            name="raw_meta_Books",
+            name=f"raw_meta_{self.category}",
             split="full",
             trust_remote_code=True
         )
@@ -231,13 +236,25 @@ class AmazonBooksProcessor:
         # 转换为DataFrame
         meta_data = []
         for item in meta_dataset:
+            images = item.get('images', [])
+            image_urls = []
+            if images:
+                for img in images:
+                    if isinstance(img, dict) and 'large' in img:
+                        image_urls.append(img['large'])
             meta_data.append({
-                'item_id': item.get('asin', ''),
+                'item_id': item.get('parent_asin', ''),
                 'title': item.get('title', ''),
-                'description': item.get('description', []),
-                'features': item.get('features', []),
+                'main_category': item.get('main_category', ''),
                 'categories': item.get('categories', []),
-                'image_url': item.get('imageURLHighRes', [])
+                'average_rating': float(item.get('average_rating', 0)),
+                'rating_number': int(item.get('rating_number', 0)),
+                'price': item.get('price'),
+                'features': item.get('features', []),
+                'description': item.get('description', []),
+                'image_urls': image_urls,
+                'store': item.get('store', ''),
+                'details': item.get('details', {})
             })
             
         df = pd.DataFrame(meta_data)
@@ -249,8 +266,7 @@ class AmazonBooksProcessor:
         """使用BERT生成文本特征"""
         self.logger.info("Generating BERT text features...")
         
-        text_features = {}
-        batch_size = 32  # 增加批处理大小以提高效率
+        batch_size = 100  # 增加批处理大小以提高效率
         
         # 准备文本数据
         texts_to_process = []
@@ -336,6 +352,8 @@ class AmazonBooksProcessor:
                 # 输出进度日志
                 if (i // batch_size + 1) % 10 == 0:
                     self.logger.info(f"Processed {i + len(batch_texts)}/{len(texts)} BERT texts")
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     
         return text_features
     
@@ -344,7 +362,7 @@ class AmazonBooksProcessor:
         self.logger.info("Generating CLIP image features...")
         
         image_features = {}
-        batch_size = 8  # 图像处理批次较小
+        batch_size = 50  # 图像处理批次较小
         
         # 准备图像URL数据
         image_urls = []
@@ -358,7 +376,7 @@ class AmazonBooksProcessor:
             item_idx = item_mapping[item_id]
             
             # 获取图像URL
-            urls = row['image_url']
+            urls = row['image_urls']
             if urls and len(urls) > 0:
                 image_urls.append(urls[0])  # 使用第一张图像
                 item_indices.append(item_idx)
@@ -377,9 +395,7 @@ class AmazonBooksProcessor:
         valid_items = set(item_indices)
         all_items = set(item_mapping.values())
         missing_items = all_items - valid_items
-        
-        for item_idx in missing_items:
-            image_features[item_idx] = torch.zeros(512, dtype=torch.float16)
+
             
         if missing_items:
             self.logger.warning(f"Created zero features for {len(missing_items)} items with missing images")
@@ -443,13 +459,14 @@ class AmazonBooksProcessor:
         """下载并预处理图像"""
         for attempt in range(max_retries):
             try:
-                response = requests.get(url, timeout=10)
+                response = requests.get(url, timeout=60)
                 response.raise_for_status()
                 
                 # 打开图像
                 image = Image.open(BytesIO(response.content)).convert("RGB")
                 
                 # 简单的预处理（CLIP处理器会处理调整大小等）
+
                 return image
                 
             except Exception as e:
@@ -464,30 +481,9 @@ class AmazonBooksProcessor:
         return None
     
     def load_dataset(self) -> Dict[str, Any]:
-        """加载完整数据集（支持缓存）"""
-        self.logger.info("Loading Amazon Books dataset...")
-        
-        # 尝试从缓存加载
-        if self.use_cache and self.cache_manager is not None:
-            self.logger.info("🔍 Checking feature cache...")
-            cache_config = {
-                'quick_mode': self.quick_mode,
-                'min_interactions': self.min_interactions,
-                'min_items': self.min_items,
-                'max_users': self.max_users,
-                'max_items': self.max_items,
-                'bert_model': self.bert_model_name,
-                'clip_model': self.clip_model_name,
-            }
-            
-            cached_data = self.cache_manager.load(cache_config)
-            
-            if cached_data is not None:
-                self.logger.info("✅ Loaded features from cache! Skipping BERT/CLIP extraction.")
-                return cached_data
-            else:
-                self.logger.info("❌ Cache not found. Will extract features and save to cache.")
-        
+        """加载完整数据集"""
+        self.logger.info(f"Loading {self.category} dataset...")
+
         # 缓存未命中，正常加载数据
         start_time = time.time()
         
@@ -497,13 +493,18 @@ class AmazonBooksProcessor:
         
         # 提取文本特征
         text_features = self._generate_bert_text_features(meta_df, item_mapping)
-        
+
+        # 清理GPU内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # 提取图像特征
         image_features = self._generate_clip_image_features(meta_df, item_mapping)
         
         # 准备数据集字典
         num_users = len(user_mapping)
         num_items = len(item_mapping)
+
         
         dataset = {
             'reviews_df': reviews_df,
@@ -515,31 +516,7 @@ class AmazonBooksProcessor:
             'text_features': text_features,
             'image_features': image_features
         }
-        
-        # 保存到缓存
-        if self.use_cache and self.cache_manager is not None:
-            features_to_cache = {
-                'text_features': text_features,
-                'image_features': image_features,
-                'user_mapping': user_mapping,
-                'item_mapping': item_mapping,
-                'meta_df': meta_df,
-                'reviews_df': reviews_df,
-            }
-            
-            metadata = {
-                'num_users': num_users,
-                'num_items': num_items,
-                'num_interactions': len(reviews_df),
-                'created_at': datetime.now().isoformat(),
-                **cache_config
-            }
-            
-            try:
-                self.cache_manager.save(cache_config, features_to_cache, metadata)
-            except Exception as e:
-                self.logger.warning(f"Failed to save cache: {e}")
-                self.logger.warning("Continuing without cache...")
+
         
         elapsed_time = time.time() - start_time
         self.logger.info(f"Dataset loaded successfully in {elapsed_time:.2f} seconds")
@@ -548,8 +525,6 @@ class AmazonBooksProcessor:
     
     def load_dataset_for_experiment(
         self,
-        build_sequences: bool = True,
-        min_seq_len: int = 3,
         test_ratio: float = 0.2,
         val_ratio: float = 0.1,
         add_padding_item: bool = True
@@ -558,8 +533,6 @@ class AmazonBooksProcessor:
         加载数据集用于实验（包括序列构建、数据分割等）
         
         Args:
-            build_sequences: 是否构建用户序列
-            min_seq_len: 最小序列长度
             test_ratio: 测试集比例
             val_ratio: 验证集比例
             add_padding_item: 是否为padding item 0预留位置
@@ -575,33 +548,33 @@ class AmazonBooksProcessor:
         dataset = self.load_dataset()
         
         # 构建用户序列
-        if build_sequences:
-            self.logger.info("Building user sequences...")
-            from util import build_user_sequences, split_user_sequences
-            
-            user_sequences = build_user_sequences(
-                dataset['reviews_df'],
-                min_seq_len=min_seq_len
-            )
-            
-            # 分割序列
-            train_sequences, val_sequences, test_sequences = split_user_sequences(
-                user_sequences,
-                test_ratio=test_ratio,
-                val_ratio=val_ratio
-            )
-            
-            # 添加到数据集
-            data = {
-                **dataset,
-                'train_sequences': train_sequences,
-                'val_sequences': val_sequences,
-                'test_sequences': test_sequences,
-                'user_sequences': user_sequences
-            }
-            
-            # 验证数据范围
-            self._validate_data_ranges(data)
+        self.logger.info("Building user sequences...")
+        from util import build_user_sequences, split_user_sequences
+
+        user_sequences = build_user_sequences(
+            dataset['reviews_df'], logger=self.logger
+        )
+
+        # 分割序列
+        train_sequences, val_sequences, test_sequences = split_user_sequences(
+            user_sequences,
+            test_ratio=test_ratio,
+            val_ratio=val_ratio
+        )
+        self.logger.info(
+            f"Train users: {len(train_sequences)}, Val users: {len(val_sequences)}, Test users: {len(test_sequences)}")
+
+        # 添加到数据集
+        data = {
+            **dataset,
+            'train_sequences': train_sequences,
+            'val_sequences': val_sequences,
+            'test_sequences': test_sequences,
+            'user_sequences': user_sequences
+        }
+
+        # 验证数据范围
+        # self._validate_data_ranges(data)
         
         # 转换特征格式（添加padding item）
         if add_padding_item:
@@ -728,8 +701,8 @@ class AmazonBooksProcessor:
         
         return data
 
-class BooksDataset(Dataset):
-    def __init__(self, data: Dict[str, Any], feature_type: str = "text"):
+class AmazonDataset(Dataset):
+    def __init__(self, data: Dict[str, Any], sequence_key:str, feature_type: str = "text", logger: logging.logger=None):
         """
         初始化数据集
         
@@ -737,11 +710,10 @@ class BooksDataset(Dataset):
             data: 包含所有数据的字典
             feature_type: 特征类型，"text"或"image"或"multimodal"
         """
-        self.data = data
         self.feature_type = feature_type
         
         # 获取序列数据
-        self.sequences = data.get('train_sequences', {})
+        self.sequences = data.get(sequence_key, {})
         
         # 获取特征
         self.text_features = data.get('text_features')
@@ -751,7 +723,7 @@ class BooksDataset(Dataset):
         self.user_ids = list(self.sequences.keys())
         self.num_users = len(self.user_ids)
         
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
         self.logger.info(f"Initialized dataset with {self.num_users} users, feature_type={feature_type}")
         
     def __len__(self):
@@ -785,17 +757,19 @@ class BooksDataset(Dataset):
         }
 
 
-def get_dataloader(data: Dict[str, Any], 
-                  feature_type: str = "text",
+def get_dataloader(cache_dir: str,
+                   category: str = "Video_Games",
+                  feature_type: str = "multimodal",
                   batch_size: int = 32,
                   shuffle: bool = True,
                   num_workers: int = 0,
-                  logger=None):
+                  logger: logging.logger=None):
     """
     创建数据加载器
     
     Args:
         data: 包含所有数据的字典
+        category: 亚马逊数据集类别
         feature_type: 特征类型，"text"或"image"或"multimodal"
         batch_size: 批大小
         shuffle: 是否打乱数据
@@ -807,20 +781,65 @@ def get_dataloader(data: Dict[str, Any],
     """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
-        
-    dataset = BooksDataset(data, feature_type)
+
+    cache_file_name = f"{cache_dir}/{category}.pkl"
+    if os.path.exists(cache_file_name):
+        with open(cache_file_name, "rb") as f:
+            data = pickle.load(f)
+
+    if data is None:
+        processor = AmazonBooksProcessor(category=category, logger=logger)
+        data = processor.load_dataset_for_experiment(
+            test_ratio=0.2,
+            val_ratio=0.1,
+            add_padding_item=True
+        )
+        with open(cache_file_name, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    """
+       data的格式
+       {
+            'reviews_df': reviews_df,
+            'meta_df': meta_df,
+            'user_mapping': user_mapping,
+            'item_mapping': item_mapping,
+            'num_users': num_users,
+            'num_items': num_items,
+            'text_features': text_features,
+            'image_features': image_features,
+            'train_sequences': train_sequences,
+            'val_sequences': val_sequences,
+            'test_sequences': test_sequences,
+            'user_sequences': user_sequences
+       }
+    """
+    train_dataset = AmazonDataset(data, "train_sequences", feature_type, logger)
+    val_dataset = AmazonDataset(data, "val_sequences", feature_type, logger)
+    test_dataset = AmazonDataset(data, "test_sequences", feature_type, logger)
     
-    return DataLoader(
-        dataset,
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available()
     )
 
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available()
+    )
 
-# 初始化数据处理器（首次运行执行）
-if __name__ == "__main__" and not os.path.exists("./data/train.pkl"):
-    logger = logging.getLogger("PMAT_Experiment")
-    processor = AmazonBooksProcessor(category="Video_Games", logger=logger)
-    processor.run()
+    test_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    return train_dataloader, val_dataloader, test_dataloader

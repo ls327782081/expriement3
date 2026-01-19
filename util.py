@@ -6,7 +6,7 @@ import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 from config import config
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 
 # 检查点保存/加载
@@ -110,7 +110,7 @@ def plot_results(df, experiment_type, logger=None):
 def build_user_sequences(
     reviews_df: pd.DataFrame,
     min_seq_len: int = 3,
-    sort_by_time: bool = True
+    logger: Optional[logging.Logger] = None
 ) -> Dict[int, Dict[str, Any]]:
     """
     构建用户交互序列
@@ -123,12 +123,8 @@ def build_user_sequences(
     Returns:
         Dict[int, Dict[str, Any]]: 用户序列字典，键为user_id，值为包含序列信息的字典
     """
-    logger = logging.getLogger(__name__)
     logger.info(f"Building user sequences with min_seq_len={min_seq_len}...")
-    
-    # 如果需要按时间排序
-    if sort_by_time and 'timestamp' in reviews_df.columns:
-        reviews_df = reviews_df.sort_values(['user_id', 'timestamp'])
+
     
     # 按用户分组
     grouped = reviews_df.groupby('user_id')
@@ -136,11 +132,12 @@ def build_user_sequences(
     user_sequences = {}
     
     for user_id, group in grouped:
+        # 按时间戳排序
+        group = group.sort_values("timestamp")
         # 获取物品ID和评分
         item_ids = group['item_id'].tolist()
         ratings = group['rating'].tolist() if 'rating' in group.columns else [0] * len(item_ids)
-        timestamps = group['timestamp'].tolist() if 'timestamp' in group.columns else [0] * len(item_ids)
-        
+
         # 过滤短序列
         if len(item_ids) < min_seq_len:
             continue
@@ -149,7 +146,7 @@ def build_user_sequences(
         user_sequences[user_id] = {
             'item_indices': item_ids,
             'ratings': ratings,
-            'timestamps': timestamps,
+            'timestamps': group["timestamp"].tolist(),
             'length': len(item_ids)
         }
     

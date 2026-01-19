@@ -11,7 +11,7 @@ import pandas as pd
 
 # 导入自定义模块
 from config import config
-from data_utils import get_dataloader, AmazonBooksProcessor
+from data_utils import get_dataloader
 from metrics import calculate_metrics
 from models import PMAT, get_pmat_ablation_model
 from baseline_models.pctx import Pctx
@@ -26,16 +26,15 @@ from util import save_checkpoint, load_checkpoint, save_results
 def setup_logger():
     """设置日志系统"""
     logger = logging.getLogger("PMAT_Experiment")
-    logger.setLevel(logging.INFO)
     
     # 创建控制台处理器
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+
     
     # 创建文件处理器
     os.makedirs("./logs", exist_ok=True)
     file_handler = logging.FileHandler("./logs/experiment.log")
-    file_handler.setLevel(logging.INFO)
+
     
     # 创建格式化器
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -53,6 +52,8 @@ logger = setup_logger()
 
 # 混合精度训练初始化
 scaler = GradScaler()
+
+NUM_WORKS = os.cpu_count()
 
 
 def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None):
@@ -156,9 +157,7 @@ def run_baseline_experiment(logger=None):
         logger = logging.getLogger("PMAT_Experiment")
         
     logger.info("===== 开始基线实验 =====")
-    train_loader = get_dataloader("./data/train.pkl", shuffle=True, logger=logger)
-    val_loader = get_dataloader("./data/val.pkl", shuffle=False, logger=logger)
-    test_loader = get_dataloader("./data/test.pkl", shuffle=False, logger=logger)
+    train_loader,val_loader, test_loader  = get_dataloader("./data/train.pkl", shuffle=True, logger=logger, num_workers=NUM_WORKS)
 
     results = []
     # 训练并评估基线模型
@@ -200,9 +199,8 @@ def run_ablation_experiment(logger=None):
         logger = logging.getLogger("PMAT_Experiment")
         
     logger.info("\n===== 开始消融实验 =====")
-    train_loader = get_dataloader("./data/train.pkl", shuffle=True, logger=logger)
-    val_loader = get_dataloader("./data/val.pkl", shuffle=False, logger=logger)
-    test_loader = get_dataloader("./data/test.pkl", shuffle=False, logger=logger)
+    train_loader, val_loader, test_loader = get_dataloader("./data/train.pkl", shuffle=True, logger=logger,
+                                                           num_workers=NUM_WORKS)
 
     results = []
     # 完整模型
@@ -233,9 +231,8 @@ def run_hyper_param_experiment(logger=None):
         logger = logging.getLogger("PMAT_Experiment")
         
     logger.info("\n===== 开始超参实验 =====")
-    train_loader = get_dataloader("./data/train.pkl", shuffle=True, logger=logger)
-    val_loader = get_dataloader("./data/val.pkl", shuffle=False, logger=logger)
-    test_loader = get_dataloader("./data/test.pkl", shuffle=False, logger=logger)
+    train_loader,val_loader, test_loader  = get_dataloader("./data/train.pkl", shuffle=True, logger=logger, num_workers=NUM_WORKS)
+
 
     results = []
     # 遍历超参组合
