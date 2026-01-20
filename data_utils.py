@@ -11,6 +11,7 @@ import torch
 import requests
 from PIL import Image
 from io import BytesIO
+import datasets
 from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModel, CLIPProcessor, CLIPModel
 from torch.utils.data import Dataset, DataLoader
@@ -134,10 +135,12 @@ class AmazonBooksProcessor:
         # 从HuggingFace加载数据
         self.logger.info("Loading reviews from HuggingFace...")
         review_dataset = load_dataset(
-            "McAuley-Lab/Amazon-Reviews-2023",
-            name=f"raw_review_{self.category}",
-            split="full",
-            trust_remote_code=True
+            "json",
+            # name=f"raw_review_{self.category}",
+            data_files='./data/Video_Games.jsonl',
+            cache_dir='./data/cache/',
+            split=datasets.Split.ALL,
+            # trust_remote_code=True
         )
         
         # 转换为DataFrame
@@ -227,10 +230,12 @@ class AmazonBooksProcessor:
         # 从HuggingFace加载数据
         self.logger.info("Loading meta data from HuggingFace...")
         meta_dataset = load_dataset(
-            "McAuley-Lab/Amazon-Reviews-2023",
-            name=f"raw_meta_{self.category}",
-            split="full",
-            trust_remote_code=True
+            "json",
+            # name=f"raw_meta_{self.category}",
+            data_files='./data/meta_Video_Games.jsonl',
+            cache_dir='./data/cache',
+            split=datasets.Split.ALL,
+            # trust_remote_code=True
         )
         
         # 转换为DataFrame
