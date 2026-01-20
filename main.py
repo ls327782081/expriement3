@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import pandas as pd
 
 # 导入自定义模块
@@ -151,10 +151,8 @@ def evaluate_model(model, test_loader, model_name, logger=None):
 
 
 # 1. 基线实验
-def run_baseline_experiment(logger=None):
+def run_baseline_experiment(logger:logging.Logger):
     """运行基线模型实验"""
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
         
     logger.info("===== 开始基线实验 =====")
     train_loader,val_loader, test_loader  = get_dataloader("./data/train.pkl", shuffle=True, logger=logger, num_workers=NUM_WORKS)

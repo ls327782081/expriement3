@@ -106,7 +106,7 @@ class AmazonBooksProcessor:
         # 初始化CLIP模型和处理器
         self.logger.info(f"Loading CLIP model: {self.clip_model_name}")
         self.clip_processor = CLIPProcessor.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/")
-        self.clip_model = CLIPModel.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/").to(self.device)
+        self.clip_model = CLIPModel.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/", use_fast=True).to(self.device)
         self.clip_model.eval()
         
         self.logger.info("Pre-trained models initialized successfully")
@@ -702,7 +702,7 @@ class AmazonBooksProcessor:
         return data
 
 class AmazonDataset(Dataset):
-    def __init__(self, data: Dict[str, Any], sequence_key:str, feature_type: str = "text", logger: logging.logger=None):
+    def __init__(self, data: Dict[str, Any], sequence_key:str, feature_type: str = "text", logger: logging.Logger=None):
         """
         初始化数据集
         
@@ -763,12 +763,12 @@ def get_dataloader(cache_dir: str,
                   batch_size: int = 32,
                   shuffle: bool = True,
                   num_workers: int = 0,
-                  logger: logging.logger=None):
+                  logger: logging.Logger=None):
     """
     创建数据加载器
     
     Args:
-        data: 包含所有数据的字典
+        cache_dir: 缓存文件夹
         category: 亚马逊数据集类别
         feature_type: 特征类型，"text"或"image"或"multimodal"
         batch_size: 批大小
@@ -782,6 +782,7 @@ def get_dataloader(cache_dir: str,
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
 
+    data = None
     cache_file_name = f"{cache_dir}/{category}.pkl"
     if os.path.exists(cache_file_name):
         with open(cache_file_name, "rb") as f:
@@ -835,7 +836,7 @@ def get_dataloader(cache_dir: str,
     )
 
     test_dataloader = DataLoader(
-        train_dataset,
+        test_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
