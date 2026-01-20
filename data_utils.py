@@ -106,7 +106,7 @@ class AmazonBooksProcessor:
         # 初始化CLIP模型和处理器
         self.logger.info(f"Loading CLIP model: {self.clip_model_name}")
         self.clip_processor = CLIPProcessor.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/")
-        self.clip_model = CLIPModel.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/", use_fast=True).to(self.device)
+        self.clip_model = CLIPModel.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/").to(self.device)
         self.clip_model.eval()
         
         self.logger.info("Pre-trained models initialized successfully")
