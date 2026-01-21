@@ -1,5 +1,6 @@
 import os
 import logging
+import argparse
 
 import numpy as np
 import torch
@@ -13,13 +14,13 @@ import pandas as pd
 from config import config
 from data_utils import get_dataloader
 from metrics import calculate_metrics
-from models import PMAT, get_pmat_ablation_model
+# Updated imports: our models are now in our_models package
+from our_models.pmat import PMAT, get_pmat_ablation_model
+from our_models.mcrl import MCRL, PMATWithMCRL
 from baseline_models.pctx import Pctx
 from baseline_models.mmq import MMQ
 from baseline_models.fusid import FusID
 from baseline_models.rpg import RPG
-from baseline_models.pctx import Pctx
-from baseline_models.mmq import MMQ
 from util import save_checkpoint, load_checkpoint, save_results
 
 # 配置日志系统
@@ -260,9 +261,109 @@ def run_hyper_param_experiment(logger=None):
     save_results(results, "hyper_param", logger=logger)
 
 
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='PMAT/MCRL 推荐系统实验')
+
+    # 实验模式
+    parser.add_argument('--mode', type=str, default='quick',
+                        choices=['quick', 'full', 'baseline', 'ablation', 'hyper'],
+                        help='实验模式: quick(快速测试), full(完整实验), baseline(基线对比), ablation(消融实验), hyper(超参搜索)')
+
+    # 数据集选择
+    parser.add_argument('--dataset', type=str, default='mock',
+                        choices=['mock', 'amazon', 'movielens'],
+                        help='数据集: mock(模拟数据), amazon(Amazon Books), movielens(MovieLens-25M)')
+
+    # 训练参数
+    parser.add_argument('--epochs', type=int, default=None,
+                        help='训练轮数 (默认: quick=2, full=10)')
+    parser.add_argument('--batch_size', type=int, default=None,
+                        help='批大小 (默认: quick=64, full=32)')
+    parser.add_argument('--lr', type=float, default=None,
+                        help='学习率 (默认: 1e-4)')
+
+    # 模型选择
+    parser.add_argument('--model', type=str, default='pmat',
+                        choices=['pmat', 'mcrl', 'pmat_mcrl', 'pctx', 'mmq', 'fusid', 'rpg'],
+                        help='模型选择')
+
+    # 设备
+    parser.add_argument('--device', type=str, default=None,
+                        choices=['cpu', 'cuda'],
+                        help='设备 (默认: 自动检测)')
+
+    # 其他
+    parser.add_argument('--seed', type=int, default=42,
+                        help='随机种子')
+    parser.add_argument('--save_dir', type=str, default='./results',
+                        help='结果保存目录')
+    parser.add_argument('--log_dir', type=str, default='./logs',
+                        help='日志保存目录')
+
+    return parser.parse_args()
+
+
+def apply_args_to_config(args):
+    """将命令行参数应用到config"""
+    # 根据模式设置默认参数
+    if args.mode == 'quick':
+        config.epochs = args.epochs if args.epochs is not None else 2
+        config.batch_size = args.batch_size if args.batch_size is not None else 64
+    elif args.mode == 'full':
+        config.epochs = args.epochs if args.epochs is not None else 10
+        config.batch_size = args.batch_size if args.batch_size is not None else 32
+    else:
+        if args.epochs is not None:
+            config.epochs = args.epochs
+        if args.batch_size is not None:
+            config.batch_size = args.batch_size
+
+    # 学习率
+    if args.lr is not None:
+        config.lr = args.lr
+
+    # 设备
+    if args.device is not None:
+        config.device = torch.device(args.device)
+
+    # 随机种子
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    logger.info(f"配置已更新: epochs={config.epochs}, batch_size={config.batch_size}, lr={config.lr}, device={config.device}")
+
+
 if __name__ == "__main__":
-    # 依次运行所有实验
-    run_baseline_experiment(logger=logger)
-    run_ablation_experiment(logger=logger)
-    run_hyper_param_experiment(logger=logger)
-    logger.info("所有实验完成！结果已保存至 ./results 目录")
+    # 解析命令行参数
+    args = parse_args()
+
+    # 应用参数到config
+    apply_args_to_config(args)
+
+    logger.info("="*70)
+    logger.info(f"实验模式: {args.mode}")
+    logger.info(f"数据集: {args.dataset}")
+    logger.info(f"模型: {args.model}")
+    logger.info("="*70)
+
+    # 根据模式运行实验
+    if args.mode == 'quick':
+        logger.info("快速测试模式 - 运行基线实验")
+        run_baseline_experiment(logger=logger)
+    elif args.mode == 'full':
+        logger.info("完整实验模式 - 运行所有实验")
+        run_baseline_experiment(logger=logger)
+        run_ablation_experiment(logger=logger)
+        run_hyper_param_experiment(logger=logger)
+    elif args.mode == 'baseline':
+        logger.info("基线对比实验")
+        run_baseline_experiment(logger=logger)
+    elif args.mode == 'ablation':
+        logger.info("消融实验")
+        run_ablation_experiment(logger=logger)
+    elif args.mode == 'hyper':
+        logger.info("超参数搜索实验")
+        run_hyper_param_experiment(logger=logger)
+
+    logger.info("实验完成！结果已保存至 ./results 目录")

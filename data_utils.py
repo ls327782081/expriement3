@@ -11,9 +11,21 @@ import torch
 import requests
 from PIL import Image
 from io import BytesIO
-import datasets
-from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModel, CLIPProcessor, CLIPModel
+try:
+    import datasets
+    from datasets import load_dataset
+    HAS_DATASETS = True
+except ImportError:
+    HAS_DATASETS = False
+    print("Warning: 'datasets' library not found. Only mock dataset mode is available.")
+
+try:
+    from transformers import AutoTokenizer, AutoModel, CLIPProcessor, CLIPModel
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+    print("Warning: 'transformers' library not found. Feature extraction will be limited.")
+
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from config import config
@@ -849,3 +861,137 @@ def get_dataloader(cache_dir: str,
     )
 
     return train_dataloader, val_dataloader, test_dataloader
+
+
+class MockDataset(Dataset):
+    """模拟数据集（用于快速测试）"""
+
+    def __init__(self, interactions, item_features, user_histories, indices):
+        """
+        Args:
+            interactions: 交互数据字典
+            item_features: 物品特征字典
+            user_histories: 用户历史字典
+            indices: 数据索引（train/val/test）
+        """
+        self.interactions = interactions
+        self.item_features = item_features
+        self.user_histories = user_histories
+        self.indices = indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        # 获取真实索引
+        real_idx = self.indices[idx]
+
+        user_id = self.interactions['user_id'][real_idx]
+        item_id = self.interactions['item_id'][real_idx]
+
+        # 获取物品的多模态特征
+        visual_feat = torch.from_numpy(self.item_features['visual'][item_id])
+        text_feat = torch.from_numpy(self.item_features['text'][item_id])
+
+        # 获取用户历史
+        history = self.user_histories.get(user_id, [])
+        if len(history) == 0:
+            history = [0]  # 默认历史
+
+        # 截断或填充历史到固定长度
+        max_history_len = 20
+        if len(history) > max_history_len:
+            history = history[-max_history_len:]
+        else:
+            history = history + [0] * (max_history_len - len(history))
+
+        history_tensor = torch.LongTensor(history)
+
+        # 构建batch
+        batch = {
+            'user_id': torch.LongTensor([user_id]),
+            'item_id': torch.LongTensor([item_id]),
+            'text_feat': text_feat,
+            'vision_feat': visual_feat,
+            'user_history': history_tensor,
+        }
+
+        # 如果有音频特征
+        if 'audio' in self.item_features:
+            audio_feat = torch.from_numpy(self.item_features['audio'][item_id])
+            batch['audio_feat'] = audio_feat
+
+        return batch
+
+
+def get_mock_dataloader(
+    data_dir='data/mock',
+    batch_size=32,
+    shuffle=True,
+    num_workers=0
+):
+    """加载模拟数据集
+
+    Args:
+        data_dir: 数据目录
+        batch_size: 批大小
+        shuffle: 是否打乱
+        num_workers: 工作进程数
+
+    Returns:
+        train_loader, val_loader, test_loader
+    """
+    from pathlib import Path
+
+    data_path = Path(data_dir)
+
+    # 加载数据
+    with open(data_path / 'interactions.pkl', 'rb') as f:
+        interactions = pickle.load(f)
+
+    with open(data_path / 'item_features.pkl', 'rb') as f:
+        item_features = pickle.load(f)
+
+    with open(data_path / 'user_histories.pkl', 'rb') as f:
+        user_histories = pickle.load(f)
+
+    with open(data_path / 'splits.pkl', 'rb') as f:
+        splits = pickle.load(f)
+
+    # 创建数据集
+    train_dataset = MockDataset(
+        interactions, item_features, user_histories, splits['train']
+    )
+    val_dataset = MockDataset(
+        interactions, item_features, user_histories, splits['val']
+    )
+    test_dataset = MockDataset(
+        interactions, item_features, user_histories, splits['test']
+    )
+
+    # 创建数据加载器
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    return train_loader, val_loader, test_loader
