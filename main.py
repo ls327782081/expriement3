@@ -24,7 +24,7 @@ from baseline_models.rpg import RPG
 from baseline_models.prism import PRISM
 from baseline_models.dgmrec import DGMRec
 from baseline_models.rearm import REARM
-from util import save_checkpoint, load_checkpoint, save_results
+from util import save_checkpoint, load_checkpoint, save_results, item_id_to_semantic_id, semantic_id_to_item_id
 
 # 配置日志系统
 def setup_logger():
@@ -84,10 +84,11 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
             # 数据移至GPU
             batch = {k: v.to(config.device) for k, v in batch.items()}
 
-            with autocast():  # 混合精度训练（适配L4）
+            with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):  # 混合精度训练（适配L4）
                 logits = model(batch)
-                # 构造标签（使用语义ID）
-                target = batch["item_id"].repeat(config.id_length).reshape(-1, config.id_length)
+                # 构造标签（将item_id转换为语义ID序列）
+                # target shape: (batch_size, id_length)
+                target = item_id_to_semantic_id(batch["item_id"], config.id_length, config.codebook_size)
                 loss = criterion(logits.reshape(-1, config.codebook_size), target.reshape(-1))
                 loss = loss / config.gradient_accumulation_steps  # 梯度累积
 
@@ -142,13 +143,13 @@ def evaluate_model(model, test_loader, model_name, logger=None):
 
             # 收集用户ID
             all_user_ids.extend(batch["user_id"].cpu().numpy())
-            
-            # 获取预测的物品ID（取每个token的最高概率）
-            pred_ids = torch.argmax(logits, dim=-1)  # (batch, id_length)
-            # 将多token ID转换为单一物品ID（简化：取第一个token）
-            predictions = pred_ids[:, 0].cpu().numpy()
-            all_predictions.extend(predictions)
-            
+
+            # 获取预测的语义ID序列（取每个token的最高概率）
+            pred_semantic_ids = torch.argmax(logits, dim=-1)  # (batch, id_length)
+            # 将语义ID序列转换回item_id
+            pred_item_ids = semantic_id_to_item_id(pred_semantic_ids, config.codebook_size)
+            all_predictions.extend(pred_item_ids.cpu().numpy())
+
             # 收集真实物品ID
             all_ground_truth.extend(batch["item_id"].cpu().numpy())
 
@@ -159,11 +160,12 @@ def evaluate_model(model, test_loader, model_name, logger=None):
 
 
 # 1. 基线实验
-def run_baseline_experiment(logger:logging.Logger):
+def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
     """运行基线模型实验"""
 
     logger.info("===== 开始基线实验 =====")
-    train_loader,val_loader, test_loader  = get_dataloader("./data", category=config.category, shuffle=True, logger=logger, num_workers=NUM_WORKS)
+    # Windows下使用num_workers=0避免多进程问题
+    train_loader,val_loader, test_loader  = get_dataloader("./data", category=config.category, shuffle=True, quick_mode=quick_mode, logger=logger, num_workers=0)
 
     results = []
     # 训练并评估基线模型
@@ -180,9 +182,31 @@ def run_baseline_experiment(logger:logging.Logger):
         elif baseline_name == "PRISM":
             model = PRISM(config).to(config.device)
         elif baseline_name == "DGMRec":
-            model = DGMRec(config).to(config.device)
+            base_model = DGMRec(config).to(config.device)
+            # Wrapper for DGMRec to accept batch dict
+            class DGMRecWrapper(torch.nn.Module):
+                def __init__(self, model):
+                    super().__init__()
+                    self.model = model
+                    self.fc = torch.nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
+                def forward(self, batch):
+                    result = self.model(batch["user_id"], batch["item_id"], batch["vision_feat"].float(), batch["text_feat"].float())
+                    logits = self.fc(result['user_embeddings'])
+                    return logits.reshape(-1, config.id_length, config.codebook_size)
+            model = DGMRecWrapper(base_model).to(config.device)
         elif baseline_name == "REARM":
-            model = REARM(config).to(config.device)
+            base_model = REARM(config).to(config.device)
+            # Wrapper for REARM to accept batch dict
+            class REARMWrapper(torch.nn.Module):
+                def __init__(self, model):
+                    super().__init__()
+                    self.model = model
+                    self.fc = torch.nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
+                def forward(self, batch):
+                    result = self.model(batch["user_id"], batch["item_id"], batch["vision_feat"].float(), batch["text_feat"].float())
+                    logits = self.fc(result['user_embeddings'])
+                    return logits.reshape(-1, config.id_length, config.codebook_size)
+            model = REARMWrapper(base_model).to(config.device)
         else:
             logger.warning(f"未知基线模型: {baseline_name}，跳过")
             continue
@@ -321,11 +345,10 @@ def apply_args_to_config(args):
     """将命令行参数应用到config"""
     # 根据模式设置默认参数
     if args.mode == 'quick':
-        config.epochs = args.epochs if args.epochs is not None else 2
-        config.batch_size = args.batch_size if args.batch_size is not None else 64
-        # quick模式使用mock数据
-        config.category = "mock"
-        args.dataset = "mock"
+        config.epochs = args.epochs if args.epochs is not None else 1
+        config.batch_size = args.batch_size if args.batch_size is not None else 32
+        # quick模式使用真实数据集，但会抽样
+        config.category = "Video_Games"
     elif args.mode == 'full':
         config.epochs = args.epochs if args.epochs is not None else 10
         config.batch_size = args.batch_size if args.batch_size is not None else 32
@@ -365,16 +388,16 @@ if __name__ == "__main__":
 
     # 根据模式运行实验
     if args.mode == 'quick':
-        logger.info("快速测试模式 - 运行基线实验")
-        run_baseline_experiment(logger=logger)
+        logger.info("快速测试模式 - 运行基线实验（抽样数据）")
+        run_baseline_experiment(logger=logger, quick_mode=True)
     elif args.mode == 'full':
         logger.info("完整实验模式 - 运行所有实验")
-        run_baseline_experiment(logger=logger)
+        run_baseline_experiment(logger=logger, quick_mode=False)
         run_ablation_experiment(logger=logger)
         run_hyper_param_experiment(logger=logger)
     elif args.mode == 'baseline':
         logger.info("基线对比实验")
-        run_baseline_experiment(logger=logger)
+        run_baseline_experiment(logger=logger, quick_mode=False)
     elif args.mode == 'ablation':
         logger.info("消融实验")
         run_ablation_experiment(logger=logger)

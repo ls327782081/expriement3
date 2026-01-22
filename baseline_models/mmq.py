@@ -9,8 +9,8 @@ class MMQ(nn.Module):
     def __init__(self):
         super(MMQ, self).__init__()
         # 多模态专家（轻量化：2个专家替代4个）
-        self.text_expert = nn.Linear(768, config.hidden_dim)
-        self.vision_expert = nn.Linear(1280, config.hidden_dim)
+        self.text_expert = nn.Linear(768, config.hidden_dim)  # BERT输出维度
+        self.vision_expert = nn.Linear(512, config.hidden_dim)  # CLIP输出维度
         self.gate = nn.Linear(config.hidden_dim, 2)  # 门控网络
 
         # 混合量化层（轻量化）

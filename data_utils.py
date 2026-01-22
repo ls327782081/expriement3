@@ -162,8 +162,16 @@ class AmazonBooksProcessor:
         if not os.path.exists(jsonl_path):
             raise FileNotFoundError(f"Review data file not found: {jsonl_path}")
 
+        # Quick模式下只加载前N条数据
+        max_lines = 10000 if self.quick_mode else None
+        line_count = 0
+
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
+                if max_lines and line_count >= max_lines:
+                    self.logger.info(f"Quick mode: stopped at {max_lines} lines")
+                    break
+
                 try:
                     review = json.loads(line.strip())
                     reviews.append({
@@ -176,6 +184,7 @@ class AmazonBooksProcessor:
                         'verified_purchase': review.get('verified_purchase', False),
                         'helpful_vote': review.get('helpful_vote', 0)
                     })
+                    line_count += 1
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Failed to parse line: {e}")
                     continue
@@ -267,8 +276,16 @@ class AmazonBooksProcessor:
         if not os.path.exists(jsonl_path):
             raise FileNotFoundError(f"Meta data file not found: {jsonl_path}")
 
+        # Quick模式下只加载前N条数据
+        max_lines = 5000 if self.quick_mode else None
+        line_count = 0
+
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
+                if max_lines and line_count >= max_lines:
+                    self.logger.info(f"Quick mode: stopped at {max_lines} meta items")
+                    break
+
                 try:
                     item = json.loads(line.strip())
                     images = item.get('images', [])
@@ -291,6 +308,7 @@ class AmazonBooksProcessor:
                         'store': item.get('store', ''),
                         'details': item.get('details', {})
                     })
+                    line_count += 1
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Failed to parse line: {e}")
                     continue
@@ -739,28 +757,56 @@ class AmazonBooksProcessor:
         
         return data
 
+def collate_fn_pad(batch):
+    """
+    自定义collate函数，处理变长序列
+    对于基线模型，只使用最后一个物品的特征（目标物品）
+    """
+    user_ids = []
+    item_id_list = []
+    text_feat_list = []
+    vision_feat_list = []
+
+    for item in batch:
+        user_ids.append(item['user_id'])
+
+        # 取最后一个物品作为目标
+        item_id_list.append(item['item_indices'][-1])
+
+        # 取最后一个物品的特征
+        text_feat_list.append(item['text_feat'][-1])
+        vision_feat_list.append(item['vision_feat'][-1])
+
+    return {
+        'user_id': torch.stack(user_ids),
+        'item_id': torch.stack(item_id_list),
+        'text_feat': torch.stack(text_feat_list),
+        'vision_feat': torch.stack(vision_feat_list)
+    }
+
+
 class AmazonDataset(Dataset):
     def __init__(self, data: Dict[str, Any], sequence_key:str, feature_type: str = "text", logger: logging.Logger=None):
         """
         初始化数据集
-        
+
         Args:
             data: 包含所有数据的字典
             feature_type: 特征类型，"text"或"image"或"multimodal"
         """
         self.feature_type = feature_type
-        
+
         # 获取序列数据
         self.sequences = data.get(sequence_key, {})
-        
+
         # 获取特征
         self.text_features = data.get('text_features')
         self.image_features = data.get('image_features')
-        
+
         # 创建用户序列列表
         self.user_ids = list(self.sequences.keys())
         self.num_users = len(self.user_ids)
-        
+
         self.logger = logger
         self.logger.info(f"Initialized dataset with {self.num_users} users, feature_type={feature_type}")
         
@@ -770,27 +816,19 @@ class AmazonDataset(Dataset):
     def __getitem__(self, idx):
         user_id = self.user_ids[idx]
         seq = self.sequences[user_id]
-        
+
         # 获取物品序列
         item_indices = seq['item_indices']
-        
-        # 根据特征类型获取特征
-        if self.feature_type == "text":
-            features = self.text_features[item_indices]
-        elif self.feature_type == "image":
-            features = self.image_features[item_indices]
-        elif self.feature_type == "multimodal":
-            # 多模态：拼接文本和图像特征
-            text_feat = self.text_features[item_indices]
-            image_feat = self.image_features[item_indices]
-            features = torch.cat([text_feat, image_feat], dim=1)
-        else:
-            raise ValueError(f"Unknown feature type: {self.feature_type}")
-        
+
+        # 获取文本和图像特征（分开返回，供模型使用）
+        text_feat = self.text_features[item_indices]
+        vision_feat = self.image_features[item_indices]
+
         return {
             'user_id': torch.tensor(user_id, dtype=torch.long),
             'item_indices': torch.tensor(item_indices, dtype=torch.long),
-            'features': features,
+            'text_feat': text_feat,
+            'vision_feat': vision_feat,
             'ratings': torch.tensor(seq.get('ratings', [0] * len(item_indices)), dtype=torch.float)
         }
 
@@ -801,10 +839,11 @@ def get_dataloader(cache_dir: str,
                   batch_size: int = 32,
                   shuffle: bool = True,
                   num_workers: int = 0,
+                  quick_mode: bool = False,
                   logger: logging.Logger=None):
     """
     创建数据加载器
-    
+
     Args:
         cache_dir: 缓存文件夹
         category: 亚马逊数据集类别
@@ -812,8 +851,9 @@ def get_dataloader(cache_dir: str,
         batch_size: 批大小
         shuffle: 是否打乱数据
         num_workers: 工作进程数
+        quick_mode: 是否快速模式（抽样数据）
         logger: 日志记录器
-        
+
     Returns:
         DataLoader: 数据加载器
     """
@@ -821,13 +861,16 @@ def get_dataloader(cache_dir: str,
         logger = logging.getLogger("PMAT_Experiment")
 
     data = None
-    cache_file_name = f"{cache_dir}/{category}.pkl"
+    # Quick模式使用单独的缓存文件
+    cache_suffix = "_quick" if quick_mode else ""
+    cache_file_name = f"{cache_dir}/{category}{cache_suffix}.pkl"
     if os.path.exists(cache_file_name):
+        logger.info(f"Loading cached data from {cache_file_name}")
         with open(cache_file_name, "rb") as f:
             data = pickle.load(f)
 
     if data is None:
-        processor = AmazonBooksProcessor(category=category, logger=logger)
+        processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)
         data = processor.load_dataset_for_experiment(
             test_ratio=0.2,
             val_ratio=0.1,
@@ -862,6 +905,7 @@ def get_dataloader(cache_dir: str,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        collate_fn=collate_fn_pad,
         pin_memory=torch.cuda.is_available()
     )
 
@@ -870,6 +914,7 @@ def get_dataloader(cache_dir: str,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        collate_fn=collate_fn_pad,
         pin_memory=torch.cuda.is_available()
     )
 
@@ -878,6 +923,7 @@ def get_dataloader(cache_dir: str,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
+        collate_fn=collate_fn_pad,
         pin_memory=torch.cuda.is_available()
     )
 

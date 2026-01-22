@@ -27,8 +27,8 @@ class FusID(nn.Module):
 
     def forward(self, batch):
         # 基础特征编码
-        text_emb = nn.Linear(768, config.hidden_dim).to(config.device)(batch["text_feat"].float())
-        vision_emb = nn.Linear(1280, config.hidden_dim).to(config.device)(batch["vision_feat"].float())
+        text_emb = nn.Linear(768, config.hidden_dim).to(config.device)(batch["text_feat"].float())  # BERT
+        vision_emb = nn.Linear(512, config.hidden_dim).to(config.device)(batch["vision_feat"].float())  # CLIP
 
         # 专家特征提取
         shared_feat = self.shared_expert(text_emb + vision_emb)

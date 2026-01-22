@@ -10,8 +10,8 @@ class Pctx(nn.Module):
         super(Pctx, self).__init__()
         self.user_emb = nn.Embedding(config.item_vocab_size, config.hidden_dim)
         self.item_emb = nn.Embedding(config.item_vocab_size, config.hidden_dim)
-        self.text_encoder = nn.Linear(768, config.hidden_dim)  # DistilBERT输出维度
-        self.vision_encoder = nn.Linear(1280, config.hidden_dim)  # MobileNetV2输出维度
+        self.text_encoder = nn.Linear(768, config.hidden_dim)  # BERT输出维度
+        self.vision_encoder = nn.Linear(512, config.hidden_dim)  # CLIP输出维度
 
         # 上下文感知Tokenzier（轻量化）
         self.context_attention = nn.MultiheadAttention(

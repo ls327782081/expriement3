@@ -11,7 +11,7 @@ class RPG(nn.Module):
         super(RPG, self).__init__()
         # 特征编码器（轻量化）
         self.encoder = nn.Sequential(
-            nn.Linear(768 + 1280, config.hidden_dim),  # 文本+视觉特征拼接
+            nn.Linear(768 + 512, config.hidden_dim),  # BERT(768) + CLIP(512)特征拼接
             nn.ReLU(),
             nn.Linear(config.hidden_dim, config.hidden_dim)
         )
@@ -29,7 +29,7 @@ class RPG(nn.Module):
 
         # 语义ID生成
         self.codebook = nn.Embedding(config.codebook_size, config.hidden_dim)
-        self.fc = nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
+        self.fc = nn.Linear(config.hidden_dim, config.codebook_size)
 
     def forward(self, batch):
         # 特征拼接

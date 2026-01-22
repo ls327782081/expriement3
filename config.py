@@ -38,8 +38,8 @@ class BaseConfig:
 
     # 多模态配置
     num_modalities: int = 3  # 默认：视觉+文本+音频
-    visual_dim: int = 1280  # 视觉特征维度
-    text_dim: int = 768     # 文本特征维度
+    visual_dim: int = 512   # 视觉特征维度 (CLIP ViT-B/32)
+    text_dim: int = 768     # 文本特征维度 (BERT-base)
     audio_dim: int = 128    # 音频特征维度
 
     # PMAT特定配置

@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from copy import deepcopy
 from typing import Dict, Tuple
+from config import config
 
 
 class Expert(nn.Module):
@@ -283,19 +284,32 @@ class PRISM(nn.Module):
 
         # 物品嵌入
         self.item_embedding = nn.Embedding(config.item_vocab_size, self.hidden_dim)
+
+        # 输出层 - 生成语义ID
+        self.fc = nn.Linear(self.hidden_dim, config.codebook_size * config.id_length)
+
         nn.init.xavier_uniform_(self.item_embedding.weight)
         nn.init.xavier_uniform_(self.visual_encoder.weight)
         nn.init.xavier_uniform_(self.text_encoder.weight)
         
-    def forward(self, visual_features, text_features, item_ids):
+    def forward(self, batch_or_visual, text_features=None, item_ids=None):
         """
         Args:
-            visual_features: (batch, visual_dim)
-            text_features: (batch, text_dim)
-            item_ids: (batch,)
+            batch_or_visual: batch字典或visual_features
+            text_features: (batch, text_dim) - 可选
+            item_ids: (batch,) - 可选
         Returns:
-            dict: 包含嵌入和损失
+            dict或logits: 包含嵌入和损失，或直接返回logits
         """
+        # 兼容两种调用方式
+        if isinstance(batch_or_visual, dict):
+            batch = batch_or_visual
+            visual_features = batch["vision_feat"].float()
+            text_features = batch["text_feat"].float()
+            item_ids = batch["item_id"]
+        else:
+            visual_features = batch_or_visual
+
         # 编码模态特征到统一维度
         visual_emb = self.visual_encoder(visual_features)
         text_emb = self.text_encoder(text_features)
@@ -309,8 +323,9 @@ class PRISM(nn.Module):
         # 自适应融合
         final_emb = self.adaptive_fusion_layer(item_emb, fusion_results)
 
-        return {
-            'embeddings': final_emb,
-            'interaction_loss': fusion_results['interaction_loss']
-        }
+        # 生成语义ID logits
+        logits = self.fc(final_emb)
+        logits = logits.reshape(-1, config.id_length, config.codebook_size)
+
+        return logits
 

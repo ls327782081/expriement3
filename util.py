@@ -3,10 +3,78 @@ import json
 import logging
 import pandas as pd
 import torch
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from config import config
 from typing import Dict, List, Tuple, Any, Optional
+
+
+# ============ 语义ID转换函数 ============
+def item_id_to_semantic_id(item_ids, id_length, codebook_size):
+    """
+    将item_id转换为语义ID序列（使用基数分解）
+
+    Args:
+        item_ids: torch.Tensor, shape (batch_size,) 或 int
+        id_length: int, 语义ID长度
+        codebook_size: int, 码本大小
+
+    Returns:
+        torch.Tensor, shape (batch_size, id_length)
+    """
+    if isinstance(item_ids, int):
+        item_ids = torch.tensor([item_ids])
+
+    batch_size = item_ids.size(0)
+    device = item_ids.device
+    semantic_ids = torch.zeros(batch_size, id_length, dtype=torch.long, device=device)
+
+    # 使用Python int避免溢出，然后转回tensor
+    for b in range(batch_size):
+        item_id_val = int(item_ids[b].item())
+        for i in range(id_length):
+            semantic_ids[b, i] = item_id_val % codebook_size
+            item_id_val = item_id_val // codebook_size
+
+    return semantic_ids
+
+
+def semantic_id_to_item_id(semantic_ids, codebook_size, max_item_id=None):
+    """
+    将语义ID序列转换回item_id
+
+    Args:
+        semantic_ids: torch.Tensor, shape (batch_size, id_length)
+        codebook_size: int, 码本大小
+        max_item_id: int, 最大item_id（用于限制范围，避免溢出）
+
+    Returns:
+        torch.Tensor, shape (batch_size,)
+    """
+    from config import config
+    if max_item_id is None:
+        max_item_id = config.item_vocab_size
+
+    batch_size, id_length = semantic_ids.shape
+    device = semantic_ids.device
+    item_ids = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+    # 使用Python int避免溢出，并限制在合理范围内
+    for b in range(batch_size):
+        item_id_val = 0
+        multiplier = 1
+        for i in range(id_length):
+            token_val = int(semantic_ids[b, i].item())
+            item_id_val += token_val * multiplier
+            multiplier *= codebook_size
+            # 限制在合理范围内避免溢出
+            if item_id_val > max_item_id * 1000:  # 给一些余量
+                item_id_val = item_id_val % (max_item_id * 10)
+        # 最终限制在item_vocab_size范围内
+        item_ids[b] = item_id_val % max_item_id
+
+    return item_ids
 
 
 # 检查点保存/加载
