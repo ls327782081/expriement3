@@ -1,7 +1,7 @@
 # 基于个性化多模态语义ID的生成式推荐系统研究
 
-> **研究生大论文实验项目**  
-> **更新日期**: 2026-01-21  
+> **研究生大论文实验项目**
+> **更新日期**: 2026-01-22
 > **方案版本**: 方案A（保守修改版）
 
 ---
@@ -226,25 +226,30 @@ D(ID_i^u, ID_i^v) ≤ C · ||α_u - α_v||_2 · sim(u, v)
 - RPG (循环个性化生成)
 
 **2025年最新基线（GitHub源码适配）**：
-- **PRISM** (WWW 2026) - 个性化多模态融合 ✅
+- **PRISM** (WWW 2026) - 个性化多模态融合 ✅ **已实现并测试**
   - 来源: https://github.com/YutongLi2024/PRISM
   - 参数量: 4.04M
   - 核心: 交互专家层 + 自适应融合
+  - 状态: 已完成快速测试（2 epochs）
 
-- **DGMRec** (SIGIR 2025) - 解耦和生成模态 ✅
+- **DGMRec** (SIGIR 2025) - 解耦和生成模态 ✅ **已实现并测试**
   - 来源: https://github.com/ptkjw1997/DGMRec
   - 参数量: 6.66M
   - 核心: 模态解耦 + 缺失模态生成
+  - 状态: 已完成快速测试（2 epochs）
 
-- **REARM** (MM 2025) - 关系增强自适应表示 ✅
+- **REARM** (MM 2025) - 关系增强自适应表示 ✅ **已实现并测试**
   - 来源: https://github.com/MrShouxingMa/REARM
   - 参数量: 6.27M
   - 核心: 元网络学习 + 同态关系 + 正交约束
+  - 状态: 已完成快速测试（2 epochs）
 
-**待实现基线**：
-- AMMRM (自适应多模态推荐)
-- CoFiRec (粗细粒度token化)
-- LETTER (可学习token化)
+**待实现基线（可选）**：
+- AMMRM (自适应多模态推荐) - 优先级：中
+- CoFiRec (粗细粒度token化) - 优先级：低
+- LETTER (可学习token化) - 优先级：低
+
+**说明**：已实现3个2025年最新基线，足够进行对比实验。其他基线可根据需要选择性实现。
 
 ### 评估指标
 
@@ -359,13 +364,16 @@ python main.py --mode ablation --dataset amazon --epochs 10 --device cuda
 
 # 仅运行超参数搜索
 python main.py --mode hyper --dataset amazon --device cuda
+
+# 🆕 运行MCRL完整实验（三层对比学习）
+python main.py --mode mcrl --dataset amazon --epochs 10 --batch_size 32 --device cuda
 ```
 
 #### 3. 命令行参数说明
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--mode` | str | `quick` | 实验模式: `quick`(快速测试), `full`(完整实验), `baseline`(基线对比), `ablation`(消融实验), `hyper`(超参搜索) |
+| `--mode` | str | `quick` | 实验模式: `quick`(快速测试), `full`(完整实验), `baseline`(基线对比), `ablation`(消融实验), `hyper`(超参搜索), **`mcrl`(MCRL完整实验)** 🆕 |
 | `--dataset` | str | `mock` | 数据集: `mock`(模拟数据), `amazon`(Amazon Books), `movielens`(MovieLens-25M) |
 | `--model` | str | `pmat` | 模型: `pmat`, `mcrl`, `pmat_mcrl`, `pctx`, `mmq`, `fusid`, `rpg`, `prism`, `dgmrec`, `rearm` |
 | `--epochs` | int | 自动 | 训练轮数 (quick默认2, full默认10) |
@@ -385,11 +393,44 @@ python main.py --mode quick --model pmat --epochs 2 --device cpu
 # 示例2: 服务器GPU完整实验
 python main.py --mode full --dataset amazon --epochs 10 --batch_size 32 --device cuda
 
-# 示例3: 测试MCRL模型
+# 示例3: 🆕 运行MCRL完整实验（推荐）
+python main.py --mode mcrl --dataset amazon --epochs 10 --batch_size 32 --device cuda
+
+# 示例4: 测试MCRL模型（快速版本）
 python main.py --mode quick --model mcrl --epochs 3 --lr 5e-5
 
-# 示例4: 自定义配置
+# 示例5: 自定义配置
 python main.py --mode baseline --dataset movielens --epochs 15 --batch_size 128 --lr 2e-4 --seed 2024
+```
+
+#### 5. MCRL训练流程说明 🆕
+
+MCRL完整实验包含以下步骤：
+
+1. **PMAT单独训练**（作为基线）
+   - 训练个性化语义ID生成器
+   - 保存检查点：`checkpoints/MCRL_Exp_PMAT_only_*.pth`
+
+2. **PMAT+MCRL联合训练**
+   - 端到端训练三层对比学习
+   - Layer 1: 用户偏好对比学习
+   - Layer 2: 模态内对比学习
+   - Layer 3: 模态间对比学习
+   - 保存检查点：`checkpoints/MCRL_Exp_PMAT_MCRL_joint_*.pth`
+
+3. **评估与对比**
+   - 对比PMAT单独 vs PMAT+MCRL联合
+   - 保存结果：`results/mcrl_experiment_*.json`
+
+**训练监控**：
+```bash
+# 查看训练日志
+tail -f logs/experiment.log
+
+# 查看损失分解
+# - PMAT损失: ID生成损失 + 语义一致性损失
+# - MCRL损失: 用户偏好损失 + 模态内损失 + 模态间损失
+# - 总损失: λ_pmat * L_pmat + λ_mcrl * L_mcrl
 ```
 
 ### 导入示例
@@ -454,6 +495,51 @@ python main.py --mode quick --model rearm --epochs 2
 
 ## 📝 更新日志
 
+### 2026-01-22 (下午) - MCRL完整训练流程实现 ✅
+- ✅ **实现MCRL完整训练流程**
+  - 新增 `train_mcrl_model()` 函数：支持三层对比学习的端到端训练
+  - 新增 `run_mcrl_experiment()` 函数：完整的MCRL实验流程
+  - 新增 `sample_positive_negative_ids()` 函数：正负样本采样
+  - 支持PMAT单独训练、PMAT+MCRL联合训练
+- ✅ **修复PMATWithMCRL模型**
+  - 修复forward方法参数兼容性问题
+  - 修复PMAT输出缺少modal_features的问题
+  - 添加MCRL参数可选支持（向后兼容）
+- ✅ **完整测试验证**
+  - 创建 `test_mcrl_training.py` 测试脚本
+  - 4/4 测试全部通过：
+    - ✓ MCRL模型初始化 (1.05M参数)
+    - ✓ MCRL前向传播（三层对比损失正常计算）
+    - ✓ MCRL反向传播（梯度计算正常）
+    - ✓ PMAT+MCRL联合模型（6.15M参数，端到端训练）
+- ✅ **命令行支持**
+  - 新增 `--mode mcrl` 参数：运行MCRL完整实验
+  - 使用方法：`python main.py --mode mcrl --epochs 10`
+
+**技术细节**：
+- MCRL三层对比学习损失：
+  - Layer 1: 用户偏好对比学习 (User Preference CL)
+  - Layer 2: 模态内对比学习 (Intra-modal CL)
+  - Layer 3: 模态间对比学习 (Inter-modal CL)
+- 联合训练损失：`L_total = λ_pmat * L_pmat + λ_mcrl * L_mcrl`
+- 支持混合精度训练、梯度裁剪、学习率调度
+
+### 2026-01-22 (上午) - 基线模型实现 + 对比实验完成
+- ✅ **实现3个2025年最新基线模型**（从GitHub官方源码适配）
+  - PRISM (WWW 2026) - 4.04M参数
+  - DGMRec (SIGIR 2025) - 6.66M参数
+  - REARM (MM 2025) - 6.27M参数
+- ✅ **完成基线对比实验**（快速测试版本）
+  - 运行8个模型：Pctx, MMQ, FusID, RPG, PRISM, DGMRec, REARM, PMAT
+  - 结果保存：results/baseline_results.csv, baseline_results.json
+  - 生成对比图表：baseline_top10_metrics.png
+- ✅ **理论分析文档完整**
+  - theory_analysis.md (351行)
+  - 包含PMAT和MCRL的完整理论证明
+- ✅ **创建基线模型总结文档**
+  - BASELINE_MODELS_SUMMARY.md
+  - 详细记录3个基线模型的实现和测试情况
+
 ### 2026-01-21 - 方案A实施 + 命令行参数支持
 - ✅ 创建PMAT完整代码框架 (pmat.py)
 - ✅ 创建MCRL完整代码框架 (mcrl.py)
@@ -465,10 +551,37 @@ python main.py --mode quick --model rearm --epochs 2
 - ✅ 更新README，添加详细的命令行参数说明
 
 ### 下一步计划
-- [ ] 实现PRISM和AMMRM基线
-- [ ] 运行创新点1对比实验
-- [ ] 完成理论证明的数学推导
-- [ ] 设计可视化方案
+
+**高优先级**：
+- [ ] **运行MCRL完整实验**（10+ epochs，在服务器GPU上）
+  ```bash
+  python main.py --mode mcrl --epochs 10 --batch_size 32
+  ```
+- [ ] **运行完整的基线对比实验**（10+ epochs，在服务器GPU上）
+  ```bash
+  python main.py --mode baseline --epochs 10
+  ```
+- [ ] **运行消融实验**
+  - PMAT消融：个性化权重 vs 动态更新
+  - MCRL消融：三层对比学习的贡献
+  ```bash
+  python main.py --mode ablation --epochs 10
+  ```
+
+**中优先级**：
+- [ ] **设计并实现可视化方案**
+  - ID空间可视化（t-SNE/UMAP）
+  - 模态权重分布可视化
+  - 性能对比图表
+  - MCRL三层损失曲线
+- [ ] **运行超参数搜索实验**
+  ```bash
+  python main.py --mode hyper
+  ```
+
+**低优先级**：
+- [ ] **实现AMMRM基线**（可选，已有3个2025基线）
+- [ ] **撰写实验分析报告**
 
 ---
 

@@ -455,7 +455,8 @@ class PMAT(nn.Module):
             'modal_weights': modal_weights,
             'drift_score': drift_score,
             'quantized_emb': quantized_emb,
-            'fused_features': fused_features
+            'fused_features': fused_features,
+            'modal_features': encoded_features  # 添加编码后的模态特征
         }
     
     def compute_loss(

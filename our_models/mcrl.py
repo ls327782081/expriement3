@@ -387,17 +387,17 @@ class MCRL(nn.Module):
 
 class PMATWithMCRL(nn.Module):
     """PMAT + MCRL 联合模型
-    
+
     端到端训练个性化语义ID生成与表征优化
     """
-    
+
     def __init__(self, config):
         super().__init__()
         self.config = config
-        
+
         # 导入PMAT
-        from pmat import PMAT
-        
+        from our_models.pmat import PMAT
+
         self.pmat = PMAT(config)
         self.mcrl = MCRL(
             config=config,
@@ -405,25 +405,25 @@ class PMATWithMCRL(nn.Module):
             beta=config.mcrl_beta,
             temperature=config.mcrl_temperature
         )
-        
+
         # 损失权重
         self.pmat_weight = config.pmat_loss_weight
         self.mcrl_weight = config.mcrl_loss_weight
         
     def forward(
         self,
-        item_features: Dict[str, torch.Tensor],
-        user_history: torch.Tensor,
-        user_embeddings: torch.Tensor,
-        positive_ids: torch.Tensor,
-        negative_ids: torch.Tensor,
+        batch_or_features,
+        user_history: Optional[torch.Tensor] = None,
+        user_embeddings: Optional[torch.Tensor] = None,
+        positive_ids: Optional[torch.Tensor] = None,
+        negative_ids: Optional[torch.Tensor] = None,
         short_history: Optional[torch.Tensor] = None,
         long_history: Optional[torch.Tensor] = None,
         previous_id_emb: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Args:
-            item_features: 物品多模态特征
+            batch_or_features: batch字典或item_features字典（与PMAT兼容）
             user_history: 用户历史
             user_embeddings: 用户嵌入
             positive_ids: 正样本ID
@@ -431,36 +431,43 @@ class PMATWithMCRL(nn.Module):
             short_history: 短期历史
             long_history: 长期历史
             previous_id_emb: 之前的ID嵌入
-            
+
         Returns:
             outputs: 完整输出
         """
         # Step 1: PMAT生成个性化语义ID
         pmat_outputs = self.pmat(
-            item_features=item_features,
+            batch_or_features=batch_or_features,
             user_history=user_history,
             short_history=short_history,
             long_history=long_history,
             previous_id_emb=previous_id_emb
         )
-        
-        # Step 2: MCRL优化ID表征
-        mcrl_outputs = self.mcrl(
-            id_embeddings=pmat_outputs['quantized_emb'],
-            user_embeddings=user_embeddings,
-            modal_features=self.pmat.multimodal_encoder(item_features),
-            modal_weights=pmat_outputs['modal_weights'],
-            positive_ids=positive_ids,
-            negative_ids=negative_ids
-        )
-        
-        # 合并输出
-        outputs = {
-            **pmat_outputs,
-            **mcrl_outputs,
-            'final_ids': mcrl_outputs['optimized_ids']
-        }
-        
+
+        # Step 2: MCRL优化ID表征（如果提供了必要参数）
+        if user_embeddings is not None and positive_ids is not None and negative_ids is not None:
+            # 从pmat_outputs中提取modal_features
+            modal_features = pmat_outputs.get('modal_features', {})
+
+            mcrl_outputs = self.mcrl(
+                id_embeddings=pmat_outputs['quantized_emb'],
+                user_embeddings=user_embeddings,
+                modal_features=modal_features,
+                modal_weights=pmat_outputs['modal_weights'],
+                positive_ids=positive_ids,
+                negative_ids=negative_ids
+            )
+
+            # 合并输出
+            outputs = {
+                **pmat_outputs,
+                **mcrl_outputs,
+                'final_ids': mcrl_outputs['optimized_ids']
+            }
+        else:
+            # 如果没有MCRL参数，只返回PMAT输出
+            outputs = pmat_outputs
+
         return outputs
     
     def compute_total_loss(
