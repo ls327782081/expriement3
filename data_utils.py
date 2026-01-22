@@ -143,38 +143,49 @@ class AmazonBooksProcessor:
     def load_reviews(self) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, int]]:
         """加载评论数据"""
         self.logger.info("Loading reviews data...")
-        
-        # 从HuggingFace加载数据
-        self.logger.info("Loading reviews from HuggingFace...")
-        review_dataset = load_dataset(
-            "json",
-            # name=f"raw_review_{self.category}",
-            data_files='./data/Video_Games.jsonl',
-            cache_dir='./data/cache/',
-            split=datasets.Split.ALL,
-            # trust_remote_code=True
-        )
-        
-        # 转换为DataFrame
+
+        # 如果是mock数据，从pkl文件加载
+        if self.category == "mock":
+            self.logger.info("Loading mock reviews from pkl file...")
+            mock_path = './data/mock/interactions.pkl'
+            if os.path.exists(mock_path):
+                with open(mock_path, 'rb') as f:
+                    mock_data = pickle.load(f)
+                # mock_data应该包含reviews_df, user_mapping, item_mapping
+                return mock_data['reviews_df'], mock_data['user_mapping'], mock_data['item_mapping']
+
+        # 直接从JSONL文件加载数据（不依赖datasets库）
+        self.logger.info("Loading reviews from JSONL file...")
         reviews = []
-        for review in review_dataset:
-            reviews.append({
-                'user_id': review.get('user_id'),
-                'item_id': review.get('parent_asin'),
-                'rating': float(review.get('rating', 0)),
-                'timestamp': int(review.get('timestamp', 0)),
-                'title': review.get('title', ''),
-                'text': review.get('text', ''),
-                'verified_purchase': review.get('verified_purchase', False),
-                'helpful_vote': review.get('helpful_vote', 0)
-            })
-            
+
+        jsonl_path = f'./data/{self.category}.jsonl'
+        if not os.path.exists(jsonl_path):
+            raise FileNotFoundError(f"Review data file not found: {jsonl_path}")
+
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    review = json.loads(line.strip())
+                    reviews.append({
+                        'user_id': review.get('user_id'),
+                        'item_id': review.get('parent_asin'),
+                        'rating': float(review.get('rating', 0)),
+                        'timestamp': int(review.get('timestamp', 0)),
+                        'title': review.get('title', ''),
+                        'text': review.get('text', ''),
+                        'verified_purchase': review.get('verified_purchase', False),
+                        'helpful_vote': review.get('helpful_vote', 0)
+                    })
+                except json.JSONDecodeError as e:
+                    self.logger.warning(f"Failed to parse line: {e}")
+                    continue
+
         df = pd.DataFrame(reviews)
         self.logger.info(f"Loaded {len(df)} reviews")
-        
+
         # 数据清洗（返回df和mappings）
         df, user_mapping, item_mapping = self._clean_reviews_data(df)
-        
+
         return df, user_mapping, item_mapping
     
     def _clean_reviews_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, int]]:
@@ -238,42 +249,52 @@ class AmazonBooksProcessor:
     def load_meta(self) -> pd.DataFrame:
         """加载商品元数据"""
         self.logger.info("Loading meta data...")
-        
-        # 从HuggingFace加载数据
-        self.logger.info("Loading meta data from HuggingFace...")
-        meta_dataset = load_dataset(
-            "json",
-            # name=f"raw_meta_{self.category}",
-            data_files='./data/meta_Video_Games.jsonl',
-            cache_dir='./data/cache',
-            split=datasets.Split.ALL,
-            # trust_remote_code=True
-        )
-        
-        # 转换为DataFrame
+
+        # 如果是mock数据，从pkl文件加载
+        if self.category == "mock":
+            self.logger.info("Loading mock meta data from pkl file...")
+            mock_path = './data/mock/metadata.pkl'
+            if os.path.exists(mock_path):
+                with open(mock_path, 'rb') as f:
+                    meta_df = pickle.load(f)
+                return meta_df
+
+        # 直接从JSONL文件加载数据（不依赖datasets库）
+        self.logger.info("Loading meta data from JSONL file...")
         meta_data = []
-        for item in meta_dataset:
-            images = item.get('images', [])
-            image_urls = []
-            if images:
-                for img in images:
-                    if isinstance(img, dict) and 'large' in img:
-                        image_urls.append(img['large'])
-            meta_data.append({
-                'item_id': item.get('parent_asin', ''),
-                'title': item.get('title', ''),
-                'main_category': item.get('main_category', ''),
-                'categories': item.get('categories', []),
-                'average_rating': float(item.get('average_rating', 0)),
-                'rating_number': int(item.get('rating_number', 0)),
-                'price': item.get('price'),
-                'features': item.get('features', []),
-                'description': item.get('description', []),
-                'image_urls': image_urls,
-                'store': item.get('store', ''),
-                'details': item.get('details', {})
-            })
-            
+
+        jsonl_path = f'./data/meta_{self.category}.jsonl'
+        if not os.path.exists(jsonl_path):
+            raise FileNotFoundError(f"Meta data file not found: {jsonl_path}")
+
+        with open(jsonl_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    item = json.loads(line.strip())
+                    images = item.get('images', [])
+                    image_urls = []
+                    if images:
+                        for img in images:
+                            if isinstance(img, dict) and 'large' in img:
+                                image_urls.append(img['large'])
+                    meta_data.append({
+                        'item_id': item.get('parent_asin', ''),
+                        'title': item.get('title', ''),
+                        'main_category': item.get('main_category', ''),
+                        'categories': item.get('categories', []),
+                        'average_rating': float(item.get('average_rating', 0)),
+                        'rating_number': int(item.get('rating_number', 0)),
+                        'price': item.get('price'),
+                        'features': item.get('features', []),
+                        'description': item.get('description', []),
+                        'image_urls': image_urls,
+                        'store': item.get('store', ''),
+                        'details': item.get('details', {})
+                    })
+                except json.JSONDecodeError as e:
+                    self.logger.warning(f"Failed to parse line: {e}")
+                    continue
+
         df = pd.DataFrame(meta_data)
         self.logger.info(f"Loaded {len(df)} meta items")
         

@@ -21,31 +21,38 @@ from baseline_models.pctx import Pctx
 from baseline_models.mmq import MMQ
 from baseline_models.fusid import FusID
 from baseline_models.rpg import RPG
+from baseline_models.prism import PRISM
+from baseline_models.dgmrec import DGMRec
+from baseline_models.rearm import REARM
 from util import save_checkpoint, load_checkpoint, save_results
 
 # 配置日志系统
 def setup_logger():
     """设置日志系统"""
     logger = logging.getLogger("PMAT_Experiment")
-    
+    logger.setLevel(logging.INFO)  # 设置日志级别
+
+    # 清除已有的处理器
+    logger.handlers.clear()
+
     # 创建控制台处理器
     console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
 
-    
     # 创建文件处理器
     os.makedirs("./logs", exist_ok=True)
-    file_handler = logging.FileHandler("./logs/experiment.log")
+    file_handler = logging.FileHandler("./logs/experiment.log", mode='w')  # 每次运行清空日志
+    file_handler.setLevel(logging.INFO)
 
-    
     # 创建格式化器
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     file_handler.setFormatter(formatter)
-    
+
     # 添加处理器到logger
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-    
+
     return logger
 
 # 全局logger
@@ -154,9 +161,9 @@ def evaluate_model(model, test_loader, model_name, logger=None):
 # 1. 基线实验
 def run_baseline_experiment(logger:logging.Logger):
     """运行基线模型实验"""
-        
+
     logger.info("===== 开始基线实验 =====")
-    train_loader,val_loader, test_loader  = get_dataloader("./data/train.pkl", shuffle=True, logger=logger, num_workers=NUM_WORKS)
+    train_loader,val_loader, test_loader  = get_dataloader("./data", category=config.category, shuffle=True, logger=logger, num_workers=NUM_WORKS)
 
     results = []
     # 训练并评估基线模型
@@ -170,6 +177,12 @@ def run_baseline_experiment(logger:logging.Logger):
             model = FusID().to(config.device)
         elif baseline_name == "RPG":
             model = RPG().to(config.device)
+        elif baseline_name == "PRISM":
+            model = PRISM(config).to(config.device)
+        elif baseline_name == "DGMRec":
+            model = DGMRec(config).to(config.device)
+        elif baseline_name == "REARM":
+            model = REARM(config).to(config.device)
         else:
             logger.warning(f"未知基线模型: {baseline_name}，跳过")
             continue
@@ -182,7 +195,7 @@ def run_baseline_experiment(logger:logging.Logger):
 
     # 训练并评估原创模型PMAT
     logger.info("\n训练原创模型：PMAT")
-    pmat_model = PMAT().to(config.device)
+    pmat_model = PMAT(config).to(config.device)
     pmat_model = train_model(pmat_model, train_loader, val_loader, "PMAT", logger=logger)
     pmat_metrics = evaluate_model(pmat_model, test_loader, "PMAT", logger=logger)
     results.append(pmat_metrics)
@@ -198,13 +211,13 @@ def run_ablation_experiment(logger=None):
         logger = logging.getLogger("PMAT_Experiment")
         
     logger.info("\n===== 开始消融实验 =====")
-    train_loader, val_loader, test_loader = get_dataloader("./data/train.pkl", shuffle=True, logger=logger,
+    train_loader, val_loader, test_loader = get_dataloader("./data", category=config.category, shuffle=True, logger=logger,
                                                            num_workers=NUM_WORKS)
 
     results = []
     # 完整模型
     logger.info("训练完整PMAT模型")
-    full_model = PMAT().to(config.device)
+    full_model = PMAT(config).to(config.device)
     full_model = train_model(full_model, train_loader, val_loader, "PMAT_full", logger=logger)
     full_metrics = evaluate_model(full_model, test_loader, "PMAT_full", logger=logger)
     results.append(full_metrics)
@@ -230,7 +243,7 @@ def run_hyper_param_experiment(logger=None):
         logger = logging.getLogger("PMAT_Experiment")
         
     logger.info("\n===== 开始超参实验 =====")
-    train_loader,val_loader, test_loader  = get_dataloader("./data/train.pkl", shuffle=True, logger=logger, num_workers=NUM_WORKS)
+    train_loader,val_loader, test_loader  = get_dataloader("./data", category=config.category, shuffle=True, logger=logger, num_workers=NUM_WORKS)
 
 
     results = []
@@ -245,7 +258,7 @@ def run_hyper_param_experiment(logger=None):
                 config.codebook_size = codebook_size
 
                 # 训练模型
-                model = PMAT().to(config.device)
+                model = PMAT(config).to(config.device)
                 exp_name = f"PMAT_hyper_id{id_length}_lr{lr}_cb{codebook_size}"
                 model = train_model(model, train_loader, val_loader, exp_name, logger=logger)
 
@@ -285,7 +298,7 @@ def parse_args():
 
     # 模型选择
     parser.add_argument('--model', type=str, default='pmat',
-                        choices=['pmat', 'mcrl', 'pmat_mcrl', 'pctx', 'mmq', 'fusid', 'rpg'],
+                        choices=['pmat', 'mcrl', 'pmat_mcrl', 'pctx', 'mmq', 'fusid', 'rpg', 'prism', 'dgmrec', 'rearm'],
                         help='模型选择')
 
     # 设备
@@ -310,6 +323,9 @@ def apply_args_to_config(args):
     if args.mode == 'quick':
         config.epochs = args.epochs if args.epochs is not None else 2
         config.batch_size = args.batch_size if args.batch_size is not None else 64
+        # quick模式使用mock数据
+        config.category = "mock"
+        args.dataset = "mock"
     elif args.mode == 'full':
         config.epochs = args.epochs if args.epochs is not None else 10
         config.batch_size = args.batch_size if args.batch_size is not None else 32

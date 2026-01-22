@@ -12,6 +12,7 @@ class BaseConfig:
     num_workers: int = 4
 
     # 数据配置
+    category: str = "Video_Games"  # 数据集类别
     max_samples: int = 50000  # 控制样本量
     item_vocab_size: int = 5000  # 物品库规模
     user_vocab_size: int = 10000  # 用户库规模
@@ -65,16 +66,16 @@ class BaseConfig:
     log_dir: str = "./logs"
     save_interval: int = 1  # 每N个epoch保存一次
 
-    # 基线模型（更新为2025年最新）
+    # 基线模型（已实现的模型）
     baseline_models: List[str] = field(default_factory=lambda: [
         "Pctx",      # 上下文感知
         "MMQ",       # 多模态量化
         "FusID",     # 融合ID
         "RPG",       # 检索增强生成
-        "PRISM",     # 2025: 个性化多模态融合
-        "AMMRM",     # 2025: 自适应多模态推荐
-        "CoFiRec",   # 2025: 粗细粒度token化
-        "LETTER"     # 2024: 可学习token化
+        "PRISM",     # 2025: 个性化多模态融合 (WWW 2026)
+        "DGMRec",    # 2025: 解耦和生成模态 (SIGIR 2025)
+        "REARM"      # 2025: 关系增强自适应表示 (MM 2025)
+        # 待实现: AMMRM, CoFiRec, LETTER
     ])
 
     # 消融实验模块
