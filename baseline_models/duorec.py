@@ -3,17 +3,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from base_model import BaseModel  # 导入抽象基类
+from base_model import AbstractTrainableModel  # 导入抽象基类
 from config import config
 
 
-class DuoRec(BaseModel):
+class DuoRec(AbstractTrainableModel):
     """
     DuoRec: Dual-Channel Recommendation Framework
     基于原始论文的双通道推荐模型
     """
-    def __init__(self):
-        super(DuoRec, self).__init__()  # 调用父类初始化
+    def __init__(self, device="cuda" if torch.cuda.is_available() else "cpu"):
+        super(DuoRec, self).__init__(device)  # 调用父类初始化
         # 用户和物品嵌入
         self.user_emb = nn.Embedding(config.user_vocab_size, config.hidden_dim)
         self.item_emb = nn.Embedding(config.item_vocab_size, config.hidden_dim)
@@ -51,6 +51,8 @@ class DuoRec(BaseModel):
             nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
         )
         
+        # 优化器缓存
+        self._optimizers = {}
         # 初始化权重
         self._init_weights()
     
@@ -63,125 +65,97 @@ class DuoRec(BaseModel):
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0, std=0.1)
-    
-    def forward(self, batch):
+
+    def _get_optimizer(self, stage_id: int, stage_kwargs: dict) -> torch.optim.Optimizer:
+        """获取指定阶段的优化器"""
+        lr = stage_kwargs.get('lr', 0.001)
+        return torch.optim.Adam(self.parameters(), lr=lr)
+
+    def _get_optimizer_state_dict(self) -> dict:
+        """获取当前阶段优化器的状态字典"""
+        optimizer_states = {}
+        for stage_id, optimizer in self._optimizers.items():
+            optimizer_states[stage_id] = optimizer.state_dict()
+        return optimizer_states
+
+    def _load_optimizer_state_dict(self, state_dict: dict):
+        """加载当前阶段优化器的状态字典"""
+        for stage_id, opt_state in state_dict.items():
+            if stage_id in self._optimizers:
+                self._optimizers[stage_id].load_state_dict(opt_state)
+
+    def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
         """
-        前向传播
-        
-        Args:
-            batch: 包含以下键的字典
-                - user_id: 用户ID张量
-                - item_id: 物品ID张量
-                - user_seq: 用户历史序列 (batch_size, seq_len)
-                - text_feat: 文本特征 (batch_size, 768)
-                - vision_feat: 视觉特征 (batch_size, 512)
-                
-        Returns:
-            logits: 语义ID的logits (batch_size, id_length, codebook_size)
-            user_repr: 用户表示 (batch_size, hidden_dim)
-            item_repr: 物品表示 (batch_size, hidden_dim)
-        """
-        # 获取基础嵌入
-        user_emb = self.user_emb(batch["user_id"])  # (batch_size, hidden_dim)
-        item_emb = self.item_emb(batch["item_id"])  # (batch_size, hidden_dim)
-        
-        # 多模态特征编码
-        text_emb = self.text_encoder(batch["text_feat"].float())  # (batch_size, hidden_dim)
-        vision_emb = self.vision_encoder(batch["vision_feat"].float())  # (batch_size, hidden_dim)
-        
-        # 融合物品表示
-        item_repr = item_emb + text_emb + vision_emb  # (batch_size, hidden_dim)
-        
-        # 用户序列建模
-        if "user_seq" in batch:
-            # 获取序列中的物品嵌入
-            seq_item_emb = self.item_emb(batch["user_seq"])  # (batch_size, seq_len, hidden_dim)
-            
-            # 通过Transformer编码用户序列
-            user_seq_repr = self.user_transformer(seq_item_emb)  # (batch_size, seq_len, hidden_dim)
-            
-            # 池化得到用户表示 (使用平均池化)
-            user_repr = torch.mean(user_seq_repr, dim=1)  # (batch_size, hidden_dim)
-        else:
-            # 如果没有序列信息，直接使用用户嵌入
-            user_repr = user_emb
-        
-        # 生成个性化语义ID
-        user_item_concat = torch.cat([user_repr, item_repr], dim=1)  # (batch_size, hidden_dim*2)
-        logits = self.semantic_id_generator(user_item_concat)  # (batch_size, id_length*codebook_size)
-        logits = logits.reshape(-1, config.id_length, config.codebook_size)  # (batch_size, id_length, codebook_size)
-        
-        return logits, user_repr, item_repr
-    
-    def train_step(self, batch, optimizer, criterion, device):
-        """
-        单步训练方法
-        
+        单batch训练逻辑
         Args:
             batch: 训练批次数据
-            optimizer: 优化器
-            criterion: 损失函数
-            device: 计算设备
-            
+            stage_id: 阶段ID
+            stage_kwargs: 该阶段的自定义参数
         Returns:
-            loss: 损失值
+            (batch_loss, batch_metrics)
         """
         # 移动数据到设备
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(device)
-        
-        # 清零梯度
-        optimizer.zero_grad()
+                batch[key] = batch[key].to(self.device)
         
         # 前向传播
         logits, _, _ = self.forward(batch)
         
+        # 生成目标语义ID
+        target = torch.randint(0, config.codebook_size, (logits.size(0), config.id_length)).to(self.device)
+        
         # 计算损失
-        target = torch.randint(0, config.codebook_size, (logits.size(0), config.id_length)).to(device)
+        criterion = torch.nn.CrossEntropyLoss()
         loss = 0
         for i in range(config.id_length):
             loss += criterion(logits[:, i, :], target[:, i])
         loss /= config.id_length
         
-        # 反向传播
-        loss.backward()
-        optimizer.step()
+        # 计算指标
+        predictions = torch.argmax(logits, dim=-1)
+        correct = (predictions == target).float().sum()
+        accuracy = correct / (target.size(0) * target.size(1))
+        metrics = {'accuracy': accuracy}
         
-        return loss.item()
-    
-    def predict(self, batch, **kwargs):
-        """
-        预测方法
-        
-        Args:
-            batch: 预测批次数据
-            **kwargs: 其他参数
-            
-        Returns:
-            predictions: 预测结果
-        """
-        # 生成语义ID
-        semantic_ids, _, _ = self.forward(batch)
-        
-        # 获取最可能的ID
-        predictions = torch.argmax(semantic_ids, dim=-1)  # (batch_size, id_length)
-        
-        return predictions
-    
-    def generate_semantic_ids(self, batch):
-        """
-        为物品生成个性化语义ID
-        
-        Args:
-            batch: 包含用户和物品信息的字典
-            
-        Returns:
-            semantic_ids: 生成的语义ID (batch_size, id_length)
-        """
-        logits, _, _ = self.forward(batch)
-        
-        # 使用argmax获取每个位置的token
-        semantic_ids = torch.argmax(logits, dim=-1)  # (batch_size, id_length)
-        
-        return semantic_ids
+        return loss, metrics
+
+    def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int, stage_kwargs: dict) -> dict:
+        """单轮验证逻辑"""
+        self.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for batch in val_dataloader:
+                # 移动数据到设备
+                for key in batch:
+                    if isinstance(batch[key], torch.Tensor):
+                        batch[key] = batch[key].to(self.device)
+
+                # 前向传播
+                logits, _, _ = self.forward(batch)
+
+                # 生成目标语义ID
+                target = torch.randint(0, config.codebook_size, (logits.size(0), config.id_length)).to(self.device)
+
+                # 计算损失
+                criterion = torch.nn.CrossEntropyLoss()
+                loss = 0
+                for i in range(config.id_length):
+                    loss += criterion(logits[:, i, :], target[:, i])
+                loss /= config.id_length
+
+                total_loss += loss.item()
+
+                # 计算准确率
+                predictions = torch.argmax(logits, dim=-1)
+                correct = (predictions == target).float().sum()
+                total_correct += correct.item()
+                total_samples += target.size(0) * target.size(1)
+
+        avg_loss = total_loss / len(val_dataloader)
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+
+        return {'loss': avg_loss, 'accuracy': accuracy}

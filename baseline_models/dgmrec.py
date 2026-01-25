@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from base_model import BaseModel  # 导入抽象基类
+from base_model import AbstractTrainableModel  # 导入抽象基类
 from config import config
 import scipy.sparse as sp
 from utils.utils import build_sim, compute_normalized_laplacian, build_knn_neighbourhood
 
 
-class DGMRec(BaseModel):
+class DGMRec(AbstractTrainableModel):
     """
     DGMRec模型 - 基于原始论文实现的完整版本
     来源: https://github.com/ptkjw1997/DGMRec
@@ -19,8 +19,8 @@ class DGMRec(BaseModel):
     4. 互信息最小化 (MI Minimization) - 确保特征独立性
     """
 
-    def __init__(self, config, dataset):
-        super(DGMRec, self).__init__()
+    def __init__(self, config, dataset, device="cuda" if torch.cuda.is_available() else "cpu"):
+        super(DGMRec, self).__init__(device)
         self.config = config
         self.n_users = dataset.num_users  # 从数据集中获取用户数
         self.n_items = dataset.num_items  # 从数据集中获取物品数
@@ -127,7 +127,9 @@ class DGMRec(BaseModel):
         
         # 激活函数
         self.act_g = nn.Tanh()
-        
+
+        # 优化器缓存
+        self._optimizers = {}
         # 初始化参数
         self._init_weights()
 
@@ -424,42 +426,98 @@ class DGMRec(BaseModel):
         reg_loss /= embs[-1].shape[0]
         return reg_loss
 
-    def train_step(self, batch, optimizer, criterion, device):
-        """
-        单步训练方法
-        """
-        # 清零梯度
-        optimizer.zero_grad()
-        
-        # 计算损失
-        loss = self.calculate_loss(batch)
-        
-        # 反向传播
-        loss.backward()
-        optimizer.step()
-        
-        return loss.item()
-
-    def predict(self, batch, **kwargs):
-        """
-        预测方法
-        """
-        # 使用full_sort_predict进行预测
-        scores = self.full_sort_predict((batch["user_id"], batch["item_id"]))
-        
-        # 获取对应位置的预测分数
-        user_ids = batch["user_id"]
-        item_ids = batch["item_id"]
-        
-        # 对于每个用户-项目对，提取对应的预测分数
-        predictions = []
-        for i in range(len(user_ids)):
-            score = scores[i, item_ids[i]]
-            predictions.append(score)
-        
-        return torch.stack(predictions)
-
     def mi_estimator(self, x1, x2):
         """互信息估计器的简化版本"""
         # 简单的互信息估计，实际应用中可以用更复杂的估计器
         return torch.mean(torch.sum(x1 * x2, dim=1))
+
+    def _get_optimizer(self, stage_id: int, stage_kwargs: dict) -> torch.optim.Optimizer:
+        """获取指定阶段的优化器"""
+        lr = stage_kwargs.get('lr', 0.001)
+        return torch.optim.Adam(self.parameters(), lr=lr)
+
+    def _get_optimizer_state_dict(self) -> dict:
+        """获取当前阶段优化器的状态字典"""
+        optimizer_states = {}
+        for stage_id, optimizer in self._optimizers.items():
+            optimizer_states[stage_id] = optimizer.state_dict()
+        return optimizer_states
+
+    def _load_optimizer_state_dict(self, state_dict: dict):
+        """加载当前阶段优化器的状态字典"""
+        for stage_id, opt_state in state_dict.items():
+            if stage_id in self._optimizers:
+                self._optimizers[stage_id].load_state_dict(opt_state)
+
+    def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
+        """
+        单batch训练逻辑
+        Args:
+            batch: 训练批次数据
+            stage_id: 阶段ID
+            stage_kwargs: 该阶段的自定义参数
+        Returns:
+            (batch_loss, batch_metrics)
+        """
+        # 计算损失
+        loss = self.calculate_loss(batch)
+        
+        # 计算指标 - 由于DGMRec是推荐系统，我们计算BPR损失相关的指标
+        users, pos_items, neg_items = batch
+        user_embeddings, item_embedding = self.cge(
+            self.user_embedding.weight, 
+            self.item_id_embedding.weight, 
+            self.norm_adj
+        )
+        
+        user_emb = user_embeddings[users]
+        pos_item_emb = item_embedding[pos_items]
+        neg_item_emb = item_embedding[neg_items]
+        
+        pos_scores = torch.sum(torch.mul(user_emb, pos_item_emb), dim=1)
+        neg_scores = torch.sum(torch.mul(user_emb, neg_item_emb), dim=1)
+        
+        # 计算命中率（HR@K）作为指标
+        hr = torch.mean((pos_scores > neg_scores).float())
+        metrics = {'hr': hr}
+        
+        return loss, metrics
+
+    def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int, stage_kwargs: dict) -> dict:
+        """单轮验证逻辑"""
+        self.eval()
+        total_loss = 0.0
+        total_hr = 0.0
+        num_batches = 0
+
+        with torch.no_grad():
+            for batch in val_dataloader:
+                # 计算损失
+                loss = self.calculate_loss(batch)
+                
+                # 计算指标
+                users, pos_items, neg_items = batch
+                user_embeddings, item_embedding = self.cge(
+                    self.user_embedding.weight, 
+                    self.item_id_embedding.weight, 
+                    self.norm_adj
+                )
+                
+                user_emb = user_embeddings[users]
+                pos_item_emb = item_embedding[pos_items]
+                neg_item_emb = item_embedding[neg_items]
+                
+                pos_scores = torch.sum(torch.mul(user_emb, pos_item_emb), dim=1)
+                neg_scores = torch.sum(torch.mul(user_emb, neg_item_emb), dim=1)
+                
+                # 计算命中率（HR@K）作为指标
+                hr = torch.mean((pos_scores > neg_scores).float())
+                
+                total_loss += loss.item()
+                total_hr += hr.item()
+                num_batches += 1
+
+        avg_loss = total_loss / num_batches
+        avg_hr = total_hr / num_batches if num_batches > 0 else 0.0
+
+        return {'loss': avg_loss, 'hr': avg_hr}

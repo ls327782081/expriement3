@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from copy import deepcopy
 from typing import Dict, Tuple
 from config import config
-from base_model import BaseModel  # 导入抽象基类
+from base_model import AbstractTrainableModel  # 导入抽象基类
 
 
 class Expert(nn.Module):
@@ -269,10 +269,10 @@ class AdaptiveFusionLayer(nn.Module):
         return fused_repr
 
 
-class PRISM(BaseModel):
+class PRISM(AbstractTrainableModel):
     """PRISM: 个性化交互感知语义建模推荐模型"""
-    def __init__(self, config):
-        super(PRISM, self).__init__()
+    def __init__(self, config, device="cuda" if torch.cuda.is_available() else "cpu"):
+        super(PRISM, self).__init__(device)
         self.config = config
         
         # 用户和物品嵌入
@@ -311,7 +311,9 @@ class PRISM(BaseModel):
             nn.Dropout(config.dropout),
             nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
         )
-        
+
+        # 优化器缓存
+        self._optimizers = {}
         # 初始化权重
         self._init_weights()
     
@@ -324,104 +326,113 @@ class PRISM(BaseModel):
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0, std=0.1)
-    
-    def forward(self, batch):
+
+    def _get_optimizer(self, stage_id: int, stage_kwargs: dict) -> torch.optim.Optimizer:
+        """获取指定阶段的优化器"""
+        lr = stage_kwargs.get('lr', 0.001)
+        return torch.optim.Adam(self.parameters(), lr=lr)
+
+    def _get_optimizer_state_dict(self) -> dict:
+        """获取当前阶段优化器的状态字典"""
+        optimizer_states = {}
+        for stage_id, optimizer in self._optimizers.items():
+            optimizer_states[stage_id] = optimizer.state_dict()
+        return optimizer_states
+
+    def _load_optimizer_state_dict(self, state_dict: dict):
+        """加载当前阶段优化器的状态字典"""
+        for stage_id, opt_state in state_dict.items():
+            if stage_id in self._optimizers:
+                self._optimizers[stage_id].load_state_dict(opt_state)
+
+    def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
         """
-        前向传播
-        
-        Args:
-            batch: 包含以下键的字典
-                - user_id: 用户ID张量
-                - item_id: 物品ID张量
-                - text_feat: 文本特征 (batch_size, text_dim)
-                - vision_feat: 视觉特征 (batch_size, visual_dim)
-                
-        Returns:
-            logits: 语义ID的logits (batch_size, id_length, codebook_size)
-        """
-        # 获取用户和物品嵌入
-        user_emb = self.user_emb(batch["user_id"])  # (batch_size, hidden_dim)
-        item_emb = self.item_emb(batch["item_id"])  # (batch_size, hidden_dim)
-        
-        # 编码多模态特征
-        visual_feat = self.visual_encoder(batch["vision_feat"].float())  # (batch_size, hidden_dim)
-        text_feat = self.text_encoder(batch["text_feat"].float())  # (batch_size, hidden_dim)
-        
-        # 通过交互专家层
-        interaction_output = self.interaction_layer(visual_feat, text_feat)
-        expert_embs = interaction_output["expert_embs"]
-        
-        # 获取不同类型的嵌入
-        uni_v_emb = expert_embs["uni_v"]  # 视觉独特性嵌入
-        uni_t_emb = expert_embs["uni_t"]  # 文本独特性嵌入
-        syn_emb = expert_embs["syn"]     # 协同性嵌入
-        rdn_emb = expert_embs["rdn"]     # 冗余性嵌入
-        
-        # 融合所有特征类型
-        fused_repr = torch.cat([
-            uni_v_emb, uni_t_emb, syn_emb, rdn_emb
-        ], dim=-1)  # (batch_size, hidden_dim * 4)
-        
-        # 生成语义ID
-        semantic_logits = self.semantic_id_generator(fused_repr)  # (batch_size, id_length*codebook_size)
-        semantic_logits = semantic_logits.reshape(-1, config.id_length, config.codebook_size)  # (batch_size, id_length, codebook_size)
-        
-        return semantic_logits
-    
-    def train_step(self, batch, optimizer, criterion, device):
-        """
-        单步训练方法
-        
+        单batch训练逻辑
         Args:
             batch: 训练批次数据
-            optimizer: 优化器
-            criterion: 损失函数
-            device: 计算设备
-            
+            stage_id: 阶段ID
+            stage_kwargs: 该阶段的自定义参数
         Returns:
-            loss: 损失值
+            (batch_loss, batch_metrics)
         """
         # 移动数据到设备
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(device)
-        
-        # 清零梯度
-        optimizer.zero_grad()
+                batch[key] = batch[key].to(self.device)
         
         # 前向传播
         logits = self.forward(batch)
         
         # 生成目标语义ID
-        target = torch.randint(0, config.codebook_size, (logits.size(0), config.id_length)).to(device)
+        target = torch.randint(0, config.codebook_size, (logits.size(0), config.id_length)).to(self.device)
         
         # 计算损失
+        criterion = torch.nn.CrossEntropyLoss()
         loss = 0
         for i in range(config.id_length):
             loss += criterion(logits[:, i, :], target[:, i])
         loss /= config.id_length
+
+        # 计算交互损失
+        visual_feat = self.visual_encoder(batch["vision_feat"].float())  # (batch_size, hidden_dim)
+        text_feat = self.text_encoder(batch["text_feat"].float())  # (batch_size, hidden_dim)
+        interaction_output = self.interaction_layer(visual_feat, text_feat)
+        interaction_loss = interaction_output["interaction_loss"]
+
+        # 总损失包括主要损失和交互损失
+        total_loss = loss + 0.1 * interaction_loss
+
+        # 计算指标
+        predictions = torch.argmax(logits, dim=-1)
+        correct = (predictions == target).float().sum()
+        accuracy = correct / (target.size(0) * target.size(1))
+        metrics = {'accuracy': accuracy}
         
-        # 反向传播
-        loss.backward()
-        optimizer.step()
-        
-        return loss.item()
-    
-    def predict(self, batch, **kwargs):
-        """
-        预测方法
-        
-        Args:
-            batch: 预测批次数据
-            **kwargs: 其他参数
-            
-        Returns:
-            predictions: 预测结果
-        """
-        # 前向传播获取logits
-        logits = self.forward(batch)
-        
-        # 获取最可能的语义ID
-        predictions = torch.argmax(logits, dim=-1)  # (batch_size, id_length)
-        
-        return predictions
+        return total_loss, metrics
+
+    def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int, stage_kwargs: dict) -> dict:
+        """单轮验证逻辑"""
+        self.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for batch in val_dataloader:
+                # 移动数据到设备
+                for key in batch:
+                    if isinstance(batch[key], torch.Tensor):
+                        batch[key] = batch[key].to(self.device)
+
+                # 前向传播
+                logits = self.forward(batch)
+
+                # 生成目标语义ID
+                target = torch.randint(0, config.codebook_size, (logits.size(0), config.id_length)).to(self.device)
+
+                # 计算损失
+                criterion = torch.nn.CrossEntropyLoss()
+                loss = 0
+                for i in range(config.id_length):
+                    loss += criterion(logits[:, i, :], target[:, i])
+                loss /= config.id_length
+
+                # 计算交互损失
+                visual_feat = self.visual_encoder(batch["vision_feat"].float())  # (batch_size, hidden_dim)
+                text_feat = self.text_encoder(batch["text_feat"].float())  # (batch_size, hidden_dim)
+                interaction_output = self.interaction_layer(visual_feat, text_feat)
+                interaction_loss = interaction_output["interaction_loss"]
+
+                # 总损失包括主要损失和交互损失
+                total_loss += (loss.item() + 0.1 * interaction_loss.item())
+
+                # 计算准确率
+                predictions = torch.argmax(logits, dim=-1)
+                correct = (predictions == target).float().sum()
+                total_correct += correct.item()
+                total_samples += target.size(0) * target.size(1)
+
+        avg_loss = total_loss / len(val_dataloader)
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+
+        return {'loss': avg_loss, 'accuracy': accuracy}

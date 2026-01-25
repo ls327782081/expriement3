@@ -4,19 +4,19 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from base_model import BaseModel  # 导入抽象基类
+from base_model import AbstractTrainableModel  # 导入抽象基类
 from config import config
 from util import item_id_to_semantic_id, semantic_id_to_item_id
 from transformers import T5Config, T5ForConditionalGeneration
 
 
-class Pctx(BaseModel):
+class Pctx(AbstractTrainableModel):
     """
     Pctx: 个性化上下文感知推荐模型
     使用T5模型对预生成的语义ID进行生成式推荐
     """
-    def __init__(self, use_pretrained_semantic_ids=True):
-        super(Pctx, self).__init__()  # 调用父类初始化
+    def __init__(self, use_pretrained_semantic_ids=True, device="cuda" if torch.cuda.is_available() else "cpu"):
+        super(Pctx, self).__init__(device)  # 调用父类初始化
         self.use_pretrained_semantic_ids = use_pretrained_semantic_ids
         
         # 使用T5模型作为生成式推荐器
@@ -59,7 +59,9 @@ class Pctx(BaseModel):
                 nn.ReLU(),
                 nn.Dropout(config.dropout)
             )
-        
+
+        # 优化器缓存
+        self._optimizers = {}
         # 初始化权重
         self._init_weights()
     
@@ -72,7 +74,154 @@ class Pctx(BaseModel):
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0, std=0.1)
-    
+
+    def _get_optimizer(self, stage_id: int, stage_kwargs: dict) -> torch.optim.Optimizer:
+        """获取指定阶段的优化器"""
+        lr = stage_kwargs.get('lr', 0.001)
+        return torch.optim.Adam(self.parameters(), lr=lr)
+
+    def _get_optimizer_state_dict(self) -> dict:
+        """获取当前阶段优化器的状态字典"""
+        optimizer_states = {}
+        for stage_id, optimizer in self._optimizers.items():
+            optimizer_states[stage_id] = optimizer.state_dict()
+        return optimizer_states
+
+    def _load_optimizer_state_dict(self, state_dict: dict):
+        """加载当前阶段优化器的状态字典"""
+        for stage_id, opt_state in state_dict.items():
+            if stage_id in self._optimizers:
+                self._optimizers[stage_id].load_state_dict(opt_state)
+
+    def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
+        """
+        单batch训练逻辑
+        Args:
+            batch: 训练批次数据
+            stage_id: 阶段ID
+            stage_kwargs: 该阶段的自定义参数
+        Returns:
+            (batch_loss, batch_metrics)
+        """
+        # 移动数据到设备
+        for key in batch:
+            if isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(self.device)
+        
+        # 前向传播
+        if "semantic_ids" in batch:
+            # 使用预生成的语义ID进行训练
+            outputs = self.forward(batch)
+            loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+        else:
+            # 如果没有语义ID，使用标准训练流程
+            logits = self.forward(batch)  # 根据实际情况调整
+            # 假设返回的是logits
+            if isinstance(logits, dict) and 'logits' in logits:
+                logits = logits['logits']
+            elif hasattr(logits, 'logits'):
+                logits = logits.logits
+            elif torch.is_tensor(logits):
+                # 如果直接返回logits张量
+                pass
+            else:
+                # 默认处理：假设返回的是元组，第一个元素是logits
+                logits = logits[0] if isinstance(logits, (tuple, list)) else logits
+            
+            # 生成目标语义ID
+            target = item_id_to_semantic_id(
+                batch["item_id"], config.id_length, config.codebook_size
+            ).to(self.device)
+            
+            # 计算损失
+            criterion = torch.nn.CrossEntropyLoss()
+            loss = 0
+            for i in range(config.id_length):
+                loss += criterion(logits[:, i, :], target[:, i])
+            loss /= config.id_length
+
+        # 计算指标
+        if "semantic_ids" in batch:
+            # 从outputs获取logits进行指标计算
+            if hasattr(outputs, 'logits'):
+                predictions = torch.argmax(outputs.logits, dim=-1)
+                target = batch["labels"]
+                correct = (predictions == target).float().sum()
+                accuracy = correct / target.numel() if target.numel() > 0 else 0.0
+            else:
+                accuracy = 0.0  # 如果无法计算准确率，则返回0
+        else:
+            predictions = torch.argmax(logits, dim=-1)
+            target = item_id_to_semantic_id(
+                batch["item_id"], config.id_length, config.codebook_size
+            ).to(self.device)
+            correct = (predictions == target).float().sum()
+            accuracy = correct / target.numel() if target.numel() > 0 else 0.0
+
+        metrics = {'accuracy': accuracy}
+        return loss, metrics
+
+    def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int, stage_kwargs: dict) -> dict:
+        """单轮验证逻辑"""
+        self.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        with torch.no_grad():
+            for batch in val_dataloader:
+                # 移动数据到设备
+                for key in batch:
+                    if isinstance(batch[key], torch.Tensor):
+                        batch[key] = batch[key].to(self.device)
+
+                # 前向传播
+                if "semantic_ids" in batch:
+                    outputs = self.forward(batch)
+                    loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
+                    if hasattr(outputs, 'logits'):
+                        predictions = torch.argmax(outputs.logits, dim=-1)
+                        target = batch["labels"]
+                        correct = (predictions == target).float().sum()
+                        total_correct += correct.item()
+                        total_samples += target.numel() if hasattr(target, 'numel') else 0
+                else:
+                    logits = self.forward(batch)
+                    if isinstance(logits, dict) and 'logits' in logits:
+                        logits = logits['logits']
+                    elif hasattr(logits, 'logits'):
+                        logits = logits.logits
+                    elif torch.is_tensor(logits):
+                        pass
+                    else:
+                        logits = logits[0] if isinstance(logits, (tuple, list)) else logits
+                        
+                    # 生成目标语义ID
+                    target = item_id_to_semantic_id(
+                        batch["item_id"], config.id_length, config.codebook_size
+                    ).to(self.device)
+                    
+                    # 计算损失
+                    criterion = torch.nn.CrossEntropyLoss()
+                    batch_loss = 0
+                    for i in range(config.id_length):
+                        batch_loss += criterion(logits[:, i, :], target[:, i])
+                    batch_loss /= config.id_length
+                    loss = batch_loss.item()
+
+                    # 计算准确率
+                    predictions = torch.argmax(logits, dim=-1)
+                    correct = (predictions == target).float().sum()
+                    total_correct += correct.item()
+                    total_samples += target.numel() if hasattr(target, 'numel') else 0
+
+                total_loss += loss.item() if hasattr(loss, 'item') else loss
+
+        avg_loss = total_loss / len(val_dataloader)
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+
+        return {'loss': avg_loss, 'accuracy': accuracy}
+
     def forward(self, batch):
         """
         前向传播
