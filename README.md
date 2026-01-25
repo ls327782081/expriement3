@@ -222,27 +222,11 @@ D(ID_i^u, ID_i^v) ≤ C · ||α_u - α_v||_2 · sim(u, v)
 **经典基线**：
 - Pctx (上下文感知)
 - MMQ (多模态量化)
-- FusID (融合ID)
-- RPG (循环个性化生成)
-
-**2025年最新基线（GitHub源码适配）**：
-- **PRISM** (WWW 2026) - 个性化多模态融合 ✅ **已实现并测试**
+- FusID (融合语义ID)
+- PRISM (WWW 2026) - 个性化多模态融合 ✅ **已实现并测试**
   - 来源: https://github.com/YutongLi2024/PRISM
-  - 参数量: 4.04M
-  - 核心: 交互专家层 + 自适应融合
-  - 状态: 已完成快速测试（2 epochs）
-
-- **DGMRec** (SIGIR 2025) - 解耦和生成模态 ✅ **已实现并测试**
+- DGMRec (SIGIR 2025) - 解耦和生成模态 ✅ **已实现并测试**
   - 来源: https://github.com/ptkjw1997/DGMRec
-  - 参数量: 6.66M
-  - 核心: 模态解耦 + 缺失模态生成
-  - 状态: 已完成快速测试（2 epochs）
-
-- **REARM** (MM 2025) - 关系增强自适应表示 ✅ **已实现并测试**
-  - 来源: https://github.com/MrShouxingMa/REARM
-  - 参数量: 6.27M
-  - 核心: 元网络学习 + 同态关系 + 正交约束
-  - 状态: 已完成快速测试（2 epochs）
 
 **待实现基线（可选）**：
 - AMMRM (自适应多模态推荐) - 优先级：中
@@ -441,10 +425,8 @@ from our_models.pmat import PMAT
 from our_models.mcrl import MCRL, PMATWithMCRL
 
 # 导入经典基线模型
-from baseline_models import Pctx, MMQ, FusID, RPG
-
-# 导入2025最新基线模型（GitHub源码适配）
-from baseline_models import PRISM, DGMRec, REARM
+from baseline_models import Pctx, MMQ, FusID, PRISM, DGMRec
+# from baseline_models import RPG, REARM  # 已删除，无法验证源码
 
 # 初始化模型
 pmat = PMAT(config)
@@ -454,14 +436,15 @@ joint_model = PMATWithMCRL(config)
 # 初始化基线模型
 prism = PRISM(config)
 dgmrec = DGMRec(config)
-rearm = REARM(config)
+# rearm = REARM(config)  # 已删除，无法验证源码
+
 ```
 
 ### 测试基线模型
 
 ```bash
-# 测试所有基线模型（PRISM, DGMRec, REARM）
-python test_baseline_models.py
+# 测试所有基线模型（PRISM, DGMRec）
+# 不再测试REARM，因为已删除
 
 # 测试单个基线模型
 python main.py --mode quick --model prism --epochs 2

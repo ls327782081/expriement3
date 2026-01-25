@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
 import math
+from base_model import BaseModel
 
 
 class UserModalAttention(nn.Module):
@@ -334,7 +335,7 @@ class SemanticIDQuantizer(nn.Module):
         return semantic_ids_logits, quantized_sum
 
 
-class PMAT(nn.Module):
+class PMAT(BaseModel):
     """完整的PMAT框架
     
     整合所有模块，实现个性化多模态自适应语义ID生成
@@ -497,6 +498,140 @@ class PMAT(nn.Module):
         losses['total_loss'] = sum(losses.values())
 
         return losses
+
+    def forward(
+        self,
+        batch_or_features,
+        user_history: Optional[torch.Tensor] = None,
+        short_history: Optional[torch.Tensor] = None,
+        long_history: Optional[torch.Tensor] = None,
+        previous_id_emb: Optional[torch.Tensor] = None
+    ):
+        """
+        Args:
+            batch_or_features: batch字典或item_features字典
+            user_history: 用户历史交互序列（可选）
+            short_history: 短期历史（用于漂移检测）
+            long_history: 长期历史（用于漂移检测）
+            previous_id_emb: 之前的ID嵌入（用于动态更新）
+
+        Returns:
+            如果输入是batch字典，返回logits (batch, id_length, codebook_size)
+            否则返回outputs字典
+        """
+        # 兼容两种调用方式
+        if isinstance(batch_or_features, dict) and 'text_feat' in batch_or_features:
+            # 训练/评估模式：从batch中提取特征
+            batch = batch_or_features
+            batch_size = batch['text_feat'].size(0)
+
+            item_features = {
+                'text': batch['text_feat'].float(),
+                'visual': batch['vision_feat'].float()
+            }
+
+            # 创建简单的用户历史（使用随机嵌入作为占位符）
+            # user_history shape: (batch, seq_len, user_dim)
+            user_history = torch.randn(batch_size, 10, self.config.hidden_dim, device=batch['text_feat'].device)
+
+            return_logits = True
+        else:
+            # 原始调用方式
+            item_features = batch_or_features
+            return_logits = False
+        # 1. 计算个性化模态权重
+        batch_size = user_history.size(0)
+        actual_num_modalities = len(item_features)  # 实际的模态数量
+
+        if self.ablation_mode != 'no_personalization':
+            full_modal_weights = self.user_modal_attention(user_history)
+            # 只取前actual_num_modalities个权重并重新归一化
+            modal_weights = full_modal_weights[:, :actual_num_modalities]
+            modal_weights = modal_weights / modal_weights.sum(dim=1, keepdim=True)
+        else:
+            # 消融：使用均匀权重
+            modal_weights = torch.ones(
+                batch_size, actual_num_modalities,
+                device=user_history.device
+            ) / actual_num_modalities
+
+        # 2. 编码多模态特征
+        encoded_features = self.multimodal_encoder(item_features)
+
+        # 3. 个性化融合
+        fused_features = self.personalized_fusion(encoded_features, modal_weights)
+        
+        # 4. 动态更新（如果提供了历史信息）
+        drift_score = None
+        if (short_history is not None and long_history is not None 
+            and self.ablation_mode != 'no_dynamic_update'):
+            drift_score = self.dynamic_updater.detect_drift(short_history, long_history)
+            
+            if previous_id_emb is not None:
+                fused_features = self.dynamic_updater.update(
+                    previous_id_emb, fused_features, drift_score
+                )
+        
+        # 5. 生成语义ID
+        semantic_ids, quantized_emb = self.semantic_quantizer(fused_features)
+
+        # 如果是训练/评估模式，直接返回logits
+        if return_logits:
+            return semantic_ids  # (batch, id_length, codebook_size)
+
+        return {
+            'semantic_ids': semantic_ids,
+            'modal_weights': modal_weights,
+            'drift_score': drift_score,
+            'quantized_emb': quantized_emb,
+            'fused_features': fused_features,
+            'modal_features': encoded_features  # 添加编码后的模态特征
+        }
+
+    def train_step(self, batch, criterion, optimizer, device):
+        """执行一个训练步骤
+        
+        Args:
+            batch: 训练批次数据
+            criterion: 损失函数
+            optimizer: 优化器
+            device: 计算设备
+            
+        Returns:
+            loss: 训练损失值
+        """
+        batch = {k: v.to(device) for k, v in batch.items()}
+        
+        # 前向传播
+        logits = self(batch)
+        
+        # 构造标签（将item_id转换为语义ID序列）
+        from util import item_id_to_semantic_id
+        target = item_id_to_semantic_id(batch["item_id"], self.config.id_length, self.config.codebook_size)
+        
+        # 计算损失
+        loss = criterion(logits.reshape(-1, self.config.codebook_size), target.reshape(-1))
+        
+        # 反向传播
+        loss.backward()
+        
+        return loss.item()
+
+    def predict(self, batch, top_k=10):
+        """执行预测
+        
+        Args:
+            batch: 批次数据
+            top_k: 返回top-k预测结果
+            
+        Returns:
+            predictions: 预测结果
+        """
+        with torch.no_grad():
+            logits = self(batch)
+            # 获取top-k预测
+            _, predictions = torch.topk(logits, k=top_k, dim=-1)
+            return predictions
 
 
 def get_pmat_ablation_model(ablation_module: str, config=None):

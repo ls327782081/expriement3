@@ -95,9 +95,9 @@
 
 ---
 
-### 3. REARM (MM 2025)
-
+### 3. REARM (MM 2025) - **已删除**
 **来源**: https://github.com/MrShouxingMa/REARM
+> **状态**: 已删除，因为无法找到源码验证
 
 **论文**: Relation-Enhanced Adaptive Representation for Multimodal Recommendation
 
@@ -145,12 +145,10 @@ baseline_models/
 ├── pctx.py             # 经典基线: Pctx
 ├── mmq.py              # 经典基线: MMQ
 ├── fusid.py            # 经典基线: FusID
-├── rpg.py              # 经典基线: RPG
+├── rpg.py              # 经典基线: RPG - **已删除**
 ├── prism.py            # ✅ 新增: PRISM (WWW 2026)
 ├── dgmrec.py           # ✅ 新增: DGMRec (SIGIR 2025)
-└── rearm.py            # ✅ 新增: REARM (MM 2025)
-
-test_baseline_models.py  # ✅ 新增: 基线模型测试脚本
+└── rearm.py            # ✅ 新增: REARM (MM 2025) - **已删除**
 ```
 
 ---
@@ -160,7 +158,9 @@ test_baseline_models.py  # ✅ 新增: 基线模型测试脚本
 ### 1. 导入模型
 
 ```python
-from baseline_models import PRISM, DGMRec, REARM
+from baseline_models import PRISM, DGMRec
+# from baseline_models import REARM  # 已删除，无法验证源码
+
 from config import BaseConfig
 
 # 创建配置
@@ -169,7 +169,8 @@ config = BaseConfig()
 # 初始化模型
 prism = PRISM(config)
 dgmrec = DGMRec(config)
-rearm = REARM(config)
+# rearm = REARM(config)  # 已删除，无法验证源码
+
 ```
 
 ### 2. 运行测试
@@ -181,21 +182,23 @@ python test_baseline_models.py
 # 预期输出:
 # ✓ PRISM: 通过
 # ✓ DGMRec: 通过
-# ✓ REARM: 通过
-# 总计: 3/3 个模型测试通过
+# ✓ REARM: 已删除
+# 不再测试REARM，因为已删除
+
 ```
 
 ### 3. 在main.py中使用
 
-```bash
+```
 # 测试PRISM
 python main.py --mode quick --model prism --epochs 2
 
 # 测试DGMRec
 python main.py --mode quick --model dgmrec --epochs 2
 
-# 测试REARM
-python main.py --mode quick --model rearm --epochs 2
+# 测试REARM - **已删除**
+# 不再测试REARM，因为已删除
+
 ```
 
 ---
@@ -231,7 +234,7 @@ python main.py --mode quick --model rearm --epochs 2
 |------|--------|---------|---------|
 | **PRISM** | 4.04M | 交互专家 + 自适应融合 | 模态缺失场景 |
 | **DGMRec** | 6.66M | 模态解耦 + 生成 | 缺失模态生成 |
-| **REARM** | 6.27M | 元网络 + 关系学习 | 关系增强推荐 |
+| **REARM** | 6.27M | 元网络 + 关系学习 | 关系增强推荐 | **已删除** |
 
 ---
 

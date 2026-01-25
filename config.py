@@ -14,8 +14,8 @@ class BaseConfig:
     # 数据配置
     category: str = "Video_Games"  # 数据集类别
     max_samples: int = 50000  # 控制样本量
-    item_vocab_size: int = 5000  # 物品库规模
-    user_vocab_size: int = 10000  # 用户库规模
+    item_vocab_size: int = None # 物品库规模
+    user_vocab_size: int = None   # 用户库规模
 
     # 训练配置
     batch_size: int = 64  # 增加batch size以加快训练
@@ -71,10 +71,9 @@ class BaseConfig:
         "Pctx",      # 上下文感知
         "MMQ",       # 多模态量化
         "FusID",     # 融合ID
-        "RPG",       # 检索增强生成
         "PRISM",     # 2025: 个性化多模态融合 (WWW 2026)
         "DGMRec",    # 2025: 解耦和生成模态 (SIGIR 2025)
-        "REARM"      # 2025: 关系增强自适应表示 (MM 2025)
+        # 删除了RPG和REARM模型，因为无法找到源码验证
         # 待实现: AMMRM, CoFiRec, LETTER
     ])
 

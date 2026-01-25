@@ -53,8 +53,7 @@ class AmazonBooksProcessor:
                  quick_mode: bool = False,
                  min_interactions: int = 3,
                  min_items: int = 5,
-                 max_users: Optional[int] = None,
-                 max_items: Optional[int] = None,
+
                  bert_model: str = "bert-base-uncased",
                  clip_model: str = "openai/clip-vit-base-patch32",
                  device: str = "auto",
@@ -85,8 +84,6 @@ class AmazonBooksProcessor:
         self.quick_mode = quick_mode
         self.min_interactions = min_interactions
         self.min_items = min_items
-        self.max_users = max_users
-        self.max_items = max_items
         self.bert_model_name = bert_model
         self.clip_model_name = clip_model
 
@@ -209,28 +206,16 @@ class AmazonBooksProcessor:
         original_size = len(df)
         
         # 移除缺失关键字段的记录
-        df = df.dropna(subset=['user_id', 'item_id', 'rating'])
-        
-        # 过滤评分范围
-        df = df[(df['rating'] >= 1) & (df['rating'] <= 5)]
+        df = df.dropna(subset=['user_id', 'item_id'])
         
         # 过滤用户和商品的最小交互次数
-        user_counts = df['user_id'].value_counts()
-        item_counts = df['item_id'].value_counts()
-        
-        valid_users = user_counts[user_counts >= self.min_interactions].index
-        valid_items = item_counts[item_counts >= self.min_items].index
-        
-        df = df[df['user_id'].isin(valid_users) & df['item_id'].isin(valid_items)]
-        
-        # 限制用户和商品数量
-        if self.max_users:
-            top_users = user_counts.head(self.max_users).index
-            df = df[df['user_id'].isin(top_users)]
-            
-        if self.max_items:
-            top_items = item_counts.head(self.max_items).index
-            df = df[df['item_id'].isin(top_items)]
+        # user_counts = df['user_id'].value_counts()
+        # item_counts = df['item_id'].value_counts()
+        #
+        # valid_users = user_counts[user_counts >= self.min_interactions].index
+        # valid_items = item_counts[item_counts >= self.min_items].index
+        #
+        # df = df[df['user_id'].isin(valid_users) & df['item_id'].isin(valid_items)]
 
         # 重新编码用户和商品ID
         # 重要：先排序再创建映射，确保映射顺序一致
@@ -255,7 +240,7 @@ class AmazonBooksProcessor:
         
         return df, user_mapping, item_mapping
     
-    def load_meta(self) -> pd.DataFrame:
+    def load_meta(self, item_mapping: Dict[str, int]) -> pd.DataFrame:
         """加载商品元数据"""
         self.logger.info("Loading meta data...")
 
@@ -276,18 +261,16 @@ class AmazonBooksProcessor:
         if not os.path.exists(jsonl_path):
             raise FileNotFoundError(f"Meta data file not found: {jsonl_path}")
 
-        # Quick模式下只加载前N条数据
-        max_lines = 5000 if self.quick_mode else None
-        line_count = 0
-
         with open(jsonl_path, 'r', encoding='utf-8') as f:
             for line in f:
-                if max_lines and line_count >= max_lines:
-                    self.logger.info(f"Quick mode: stopped at {max_lines} meta items")
-                    break
 
                 try:
                     item = json.loads(line.strip())
+
+                    item_id = item.get('parent_asin', '')
+                    if item_id not in item_mapping:
+                        continue
+
                     images = item.get('images', [])
                     image_urls = []
                     if images:
@@ -295,7 +278,7 @@ class AmazonBooksProcessor:
                             if isinstance(img, dict) and 'large' in img:
                                 image_urls.append(img['large'])
                     meta_data.append({
-                        'item_id': item.get('parent_asin', ''),
+                        'item_id': item_id,
                         'title': item.get('title', ''),
                         'main_category': item.get('main_category', ''),
                         'categories': item.get('categories', []),
@@ -308,7 +291,7 @@ class AmazonBooksProcessor:
                         'store': item.get('store', ''),
                         'details': item.get('details', {})
                     })
-                    line_count += 1
+
                 except json.JSONDecodeError as e:
                     self.logger.warning(f"Failed to parse line: {e}")
                     continue
@@ -545,7 +528,7 @@ class AmazonBooksProcessor:
         
         # 加载评论和元数据
         reviews_df, user_mapping, item_mapping = self.load_reviews()
-        meta_df = self.load_meta()
+        meta_df = self.load_meta(item_mapping)
         
         # 提取文本特征
         text_features = self._generate_bert_text_features(meta_df, item_mapping)
@@ -617,8 +600,6 @@ class AmazonBooksProcessor:
             test_ratio=test_ratio,
             val_ratio=val_ratio
         )
-        self.logger.info(
-            f"Train users: {len(train_sequences)}, Val users: {len(val_sequences)}, Test users: {len(test_sequences)}")
 
         # 添加到数据集
         data = {
@@ -734,7 +715,7 @@ class AmazonBooksProcessor:
                     self.logger.warning(f"Skipping invalid item_idx {item_idx} (num_items={num_items})")
             
             data['image_features'] = image_tensor
-            self.logger.info(f"✅ Converted image_features to tensor: {image_tensor.shape}")
+            # self.logger.info(f"✅ Converted image_features to tensor: {image_tensor.shape}")
             
         elif isinstance(data['image_features'], torch.Tensor):
             # 如果已经是tensor，检查维度是否正确
@@ -896,6 +877,10 @@ def get_dataloader(cache_dir: str,
             'user_sequences': user_sequences
        }
     """
+    # 读取真实物品库规模和用户库规模
+    config.item_vocab_size = data['num_items']
+    config.user_vocab_size = data['num_users']
+
     train_dataset = AmazonDataset(data, "train_sequences", feature_type, logger)
     val_dataset = AmazonDataset(data, "val_sequences", feature_type, logger)
     test_dataset = AmazonDataset(data, "test_sequences", feature_type, logger)
