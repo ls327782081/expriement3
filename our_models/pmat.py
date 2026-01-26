@@ -11,9 +11,11 @@ PMAT: Personalized Multimodal Adaptive Tokenizer
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any
 import math
-from base_model import BaseModel
+from base_model import AbstractTrainableModel
+from config import config
+from util import item_id_to_semantic_id
 
 
 class UserModalAttention(nn.Module):
@@ -335,14 +337,15 @@ class SemanticIDQuantizer(nn.Module):
         return semantic_ids_logits, quantized_sum
 
 
-class PMAT(BaseModel):
+class PMAT(AbstractTrainableModel):
     """完整的PMAT框架
-    
+
     整合所有模块，实现个性化多模态自适应语义ID生成
+    继承 AbstractTrainableModel 以使用统一训练框架
     """
-    
-    def __init__(self, config, ablation_mode: Optional[str] = None):
-        super().__init__()
+
+    def __init__(self, config, ablation_mode: Optional[str] = None, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
+        super().__init__(device=device)
         self.config = config
         self.ablation_mode = ablation_mode
         
@@ -588,34 +591,100 @@ class PMAT(BaseModel):
             'modal_features': encoded_features  # 添加编码后的模态特征
         }
 
-    def train_step(self, batch, criterion, optimizer, device):
-        """执行一个训练步骤
-        
-        Args:
-            batch: 训练批次数据
-            criterion: 损失函数
-            optimizer: 优化器
-            device: 计算设备
-            
-        Returns:
-            loss: 训练损失值
+    # ==================== AbstractTrainableModel 抽象方法实现 ====================
+
+    def _get_optimizer(self, stage_id: int, stage_kwargs: Dict) -> torch.optim.Optimizer:
+        """获取指定阶段的优化器"""
+        lr = stage_kwargs.get('lr', 0.001)
+        weight_decay = stage_kwargs.get('weight_decay', 0.01)
+        return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
+
+    def _get_optimizer_state_dict(self) -> Dict:
+        """获取当前阶段优化器的状态字典"""
+        optimizer_states = {}
+        for stage_id, optimizer in self._stage_optimizers.items():
+            optimizer_states[stage_id] = optimizer.state_dict()
+        return optimizer_states
+
+    def _load_optimizer_state_dict(self, state_dict: Dict):
+        """加载当前阶段优化器的状态字典"""
+        for stage_id, opt_state in state_dict.items():
+            if stage_id in self._stage_optimizers:
+                self._stage_optimizers[stage_id].load_state_dict(opt_state)
+
+    def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
         """
-        batch = {k: v.to(device) for k, v in batch.items()}
-        
+        单batch训练逻辑
+
+        Args:
+            batch: 训练批次数据（字典格式）
+            stage_id: 阶段ID
+            stage_kwargs: 该阶段的自定义参数
+
+        Returns:
+            (batch_loss, batch_metrics)
+        """
         # 前向传播
-        logits = self(batch)
-        
+        logits = self.forward(batch)
+
         # 构造标签（将item_id转换为语义ID序列）
-        from util import item_id_to_semantic_id
-        target = item_id_to_semantic_id(batch["item_id"], self.config.id_length, self.config.codebook_size)
-        
+        target = item_id_to_semantic_id(
+            batch["item_id"],
+            self.config.id_length,
+            self.config.codebook_size
+        ).to(self.device)
+
         # 计算损失
+        criterion = nn.CrossEntropyLoss()
         loss = criterion(logits.reshape(-1, self.config.codebook_size), target.reshape(-1))
-        
-        # 反向传播
-        loss.backward()
-        
-        return loss.item()
+
+        # 计算准确率
+        predictions = torch.argmax(logits, dim=-1)
+        correct = (predictions == target).float().sum()
+        accuracy = correct / target.numel()
+
+        metrics = {'accuracy': accuracy.item()}
+
+        return loss, metrics
+
+    def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int,
+                           stage_kwargs: Dict) -> Dict:
+        """单轮验证逻辑"""
+        self.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+
+        criterion = nn.CrossEntropyLoss()
+
+        with torch.no_grad():
+            for batch in val_dataloader:
+                # 前向传播
+                logits = self.forward(batch)
+
+                # 构造标签
+                target = item_id_to_semantic_id(
+                    batch["item_id"],
+                    self.config.id_length,
+                    self.config.codebook_size
+                ).to(self.device)
+
+                # 计算损失
+                loss = criterion(logits.reshape(-1, self.config.codebook_size), target.reshape(-1))
+                total_loss += loss.item()
+
+                # 计算准确率
+                predictions = torch.argmax(logits, dim=-1)
+                correct = (predictions == target).float().sum()
+                total_correct += correct.item()
+                total_samples += target.numel()
+
+        avg_loss = total_loss / len(val_dataloader)
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+
+        return {'loss': avg_loss, 'accuracy': accuracy}
+
+    # 移除旧的 train_step 方法，现在使用 AbstractTrainableModel 的统一训练框架
 
     def predict(self, batch, top_k=10):
         """执行预测

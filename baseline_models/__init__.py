@@ -34,17 +34,13 @@ Date: 2026-01-21
 """
 
 from .pctx import Pctx
-from .duorec import DuoRec
-from .mmq import MMQ
-from .fusid import FusID
+from .pctx_aligned import PctxAligned
 from .prism import PRISM
 from .dgmrec import DGMRec
 
 __all__ = [
     'Pctx',
-    'DuoRec',
-    'MMQ',
-    'FusID',
+    'PctxAligned',
     'PRISM',
     'DGMRec',
 ]

@@ -29,9 +29,9 @@ class Expert(nn.Module):
     def forward(self, x):
         out = self.fc1(x)
         out = self.relu(out)
-        out = self.drop(out)
+        x = self.drop(x)  # 官方代码：对输入dropout
         out = self.fc2(out)
-        out = self.drop(out)
+        x = self.drop(x)  # 官方代码：对输入dropout
         return out
 
 
@@ -195,78 +195,90 @@ class MLP(nn.Module):
 
 
 class MLPReWeighting(nn.Module):
-    """MLP重加权网络 - 自适应融合"""
+    """MLP重加权网络 - 自适应融合（对齐官方实现）"""
     def __init__(self, num_modalities, num_branches, hidden_dim, hidden_dim_rw=128, num_layers=2, temperature=1.0):
         super(MLPReWeighting, self).__init__()
         self.temperature = temperature
-        input_dim = hidden_dim * num_modalities  # 输入是concatenated模态特征
+        # 官方代码：输入是 num_modalities 个特征的concat
         self.mlp = MLP(
-            input_dim=input_dim,
+            input_dim=hidden_dim * num_modalities,
             hidden_dim=hidden_dim_rw,
-            output_dim=num_modalities * num_branches,  # 为每个模态-分支对生成权重
-            num_layers=num_layers
+            output_dim=num_branches,  # 官方代码：输出是 num_branches 个权重
+            num_layers=num_layers,
+            activation=nn.GELU(),  # 官方代码使用 GELU
+            dropout=0.3  # 官方代码使用 0.3
         )
-        
-    def forward(self, modality_features):
+
+    def temperature_scaled_softmax(self, logits):
+        """温度缩放的softmax"""
+        logits = logits / self.temperature
+        return torch.softmax(logits, dim=-1)
+
+    def forward(self, inputs):
         """
         Args:
-            modality_features: List of (batch, hidden_dim) 特征列表
+            inputs: List of (batch, hidden_dim) 特征列表
         Returns:
-            weights: (batch, num_modalities, num_branches) 权重
+            weights: (batch, num_branches) 权重
         """
-        # concat模态特征
-        concat_features = torch.cat(modality_features, dim=-1)  # (batch, hidden_dim * num_modalities)
-        
+        # 官方代码：concat所有输入特征
+        x = torch.cat(inputs, dim=1)  # Shape: [B, num_modalities * D]
+
         # 通过MLP生成权重
-        raw_weights = self.mlp(concat_features)  # (batch, num_modalities * num_branches)
-        
-        # reshape为(batch, num_modalities, num_branches)
-        batch_size = concat_features.size(0)
-        num_modalities = len(modality_features)
-        num_branches = raw_weights.size(-1) // num_modalities
-        weights = raw_weights.view(batch_size, num_modalities, num_branches)
-        
+        logits = self.mlp(x)  # Shape: [B, num_branches]
+
         # 温度缩放的softmax
-        weights = F.softmax(weights / self.temperature, dim=-1)
-        
+        weights = self.temperature_scaled_softmax(logits)  # Shape: [B, num_branches]
+
         return weights
 
 
 class AdaptiveFusionLayer(nn.Module):
-    """自适应融合层 - 动态权重融合多模态特征"""
-    def __init__(self, num_modalities, num_branches, hidden_dim):
+    """自适应融合层 - 对齐官方实现"""
+    def __init__(self, args):
         super(AdaptiveFusionLayer, self).__init__()
-        self.num_modalities = num_modalities
-        self.num_branches = num_branches
-        self.hidden_dim = hidden_dim
-        
-        # 为每个模态-分支对学习参数
-        self.modality_weights = nn.Parameter(torch.randn(num_modalities, num_branches, hidden_dim))
-        
-    def forward(self, modality_features, weights):
+        # 官方代码：5个输入（4个专家嵌入 + ID嵌入），4个分支权重
+        self.adaptive_fusion_mlp = MLPReWeighting(
+            num_modalities=5,
+            num_branches=4,
+            hidden_dim=args.hidden_dim,
+            hidden_dim_rw=args.hidden_dim * 2,
+            num_layers=2,
+            temperature=getattr(args, 'temperature', 0.7)
+        )
+
+    def forward(self, item_embeddings, fusion_results):
         """
         Args:
-            modality_features: List of (batch, hidden_dim) 特征列表
-            weights: (batch, num_modalities, num_branches) 权重
+            item_embeddings: (batch, seq_len, hidden_dim) 物品嵌入
+            fusion_results: dict 包含 expert_embs
         Returns:
-            fused_repr: (batch, num_branches, hidden_dim) 融合表示
+            interaction_emb: (batch, hidden_dim) 融合后的交互嵌入
         """
-        batch_size = modality_features[0].size(0)
-        
-        # expand模态特征为(batch, num_modalities, hidden_dim)
-        expanded_modality_features = torch.stack(modality_features, dim=1)  # (batch, num_modalities, hidden_dim)
-        
-        # expand权重为(batch, num_modalities, num_branches, hidden_dim)
-        expanded_weights = weights.unsqueeze(-1).expand(-1, -1, -1, self.hidden_dim)  # (batch, num_modalities, num_branches, hidden_dim)
-        
-        # expand模态权重为(batch, num_modalities, num_branches, hidden_dim)
-        expanded_modality_weights = self.modality_weights.unsqueeze(0).expand(batch_size, -1, -1, -1)
-        
-        # 加权融合
-        weighted_features = expanded_modality_features.unsqueeze(2).expand(-1, -1, self.num_branches, -1) * expanded_weights * expanded_modality_weights
-        fused_repr = torch.sum(weighted_features, dim=1)  # (batch, num_branches, hidden_dim)
-        
-        return fused_repr
+        expert_embs = fusion_results["expert_embs"]
+        id_emb = item_embeddings.mean(dim=1)  # (batch, hidden_dim)
+
+        # 官方代码：5个输入特征
+        gating_inputs = [
+            expert_embs["uni_v"],
+            expert_embs["uni_t"],
+            expert_embs["syn"],
+            expert_embs["rdn"],
+            id_emb
+        ]
+
+        # 获取权重 (batch, 4)
+        weights = self.adaptive_fusion_mlp(gating_inputs)
+
+        # 官方代码：加权融合4个专家嵌入
+        interaction_emb = (
+            weights[:, 0:1] * expert_embs["uni_v"] +
+            weights[:, 1:2] * expert_embs["uni_t"] +
+            weights[:, 2:3] * expert_embs["syn"] +
+            weights[:, 3:4] * expert_embs["rdn"]
+        )
+
+        return interaction_emb
 
 
 class PRISM(AbstractTrainableModel):
@@ -289,20 +301,9 @@ class PRISM(AbstractTrainableModel):
             expert_hidden_size=config.mlp_dim // 2,
             num_modalities=2
         )
-        
-        # MLP重加权网络
-        self.mlp_reweighting = MLPReWeighting(
-            num_modalities=2,
-            num_branches=4,  # uni_v, uni_t, syn, rdn
-            hidden_dim=config.hidden_dim
-        )
-        
-        # 自适应融合层
-        self.adaptive_fusion = AdaptiveFusionLayer(
-            num_modalities=2,
-            num_branches=4,
-            hidden_dim=config.hidden_dim
-        )
+
+        # 自适应融合层（官方实现）
+        self.adaptive_fusion = AdaptiveFusionLayer(config)
         
         # 语义ID生成器
         self.semantic_id_generator = nn.Sequential(
@@ -312,8 +313,6 @@ class PRISM(AbstractTrainableModel):
             nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
         )
 
-        # 优化器缓存
-        self._optimizers = {}
         # 初始化权重
         self._init_weights()
     
@@ -327,6 +326,44 @@ class PRISM(AbstractTrainableModel):
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, mean=0, std=0.1)
 
+    def forward(self, batch):
+        """
+        前向传播
+        Args:
+            batch: dict 包含 user_id, item_id, vision_feat, text_feat
+        Returns:
+            logits: (batch, id_length, codebook_size) 语义ID预测
+        """
+        # 编码多模态特征
+        visual_feat = self.visual_encoder(batch["vision_feat"].float())  # (batch, hidden_dim)
+        text_feat = self.text_encoder(batch["text_feat"].float())  # (batch, hidden_dim)
+
+        # 交互专家层
+        interaction_output = self.interaction_layer(visual_feat, text_feat)
+
+        # 物品嵌入
+        item_emb = self.item_emb(batch["item_id"])  # (batch, hidden_dim)
+        if item_emb.dim() == 2:
+            item_emb = item_emb.unsqueeze(1)  # (batch, 1, hidden_dim)
+
+        # 自适应融合层
+        interaction_emb = self.adaptive_fusion(item_emb, interaction_output)  # (batch, hidden_dim)
+
+        # 拼接4种专家嵌入
+        expert_embs = interaction_output["expert_embs"]
+        fused_features = torch.cat([
+            expert_embs["uni_v"],
+            expert_embs["uni_t"],
+            expert_embs["syn"],
+            expert_embs["rdn"]
+        ], dim=-1)  # (batch, hidden_dim * 4)
+
+        # 生成语义ID
+        logits = self.semantic_id_generator(fused_features)  # (batch, codebook_size * id_length)
+        logits = logits.reshape(-1, self.config.id_length, self.config.codebook_size)  # (batch, id_length, codebook_size)
+
+        return logits
+
     def _get_optimizer(self, stage_id: int, stage_kwargs: dict) -> torch.optim.Optimizer:
         """获取指定阶段的优化器"""
         lr = stage_kwargs.get('lr', 0.001)
@@ -335,15 +372,15 @@ class PRISM(AbstractTrainableModel):
     def _get_optimizer_state_dict(self) -> dict:
         """获取当前阶段优化器的状态字典"""
         optimizer_states = {}
-        for stage_id, optimizer in self._optimizers.items():
+        for stage_id, optimizer in self._stage_optimizers.items():
             optimizer_states[stage_id] = optimizer.state_dict()
         return optimizer_states
 
     def _load_optimizer_state_dict(self, state_dict: dict):
         """加载当前阶段优化器的状态字典"""
         for stage_id, opt_state in state_dict.items():
-            if stage_id in self._optimizers:
-                self._optimizers[stage_id].load_state_dict(opt_state)
+            if stage_id in self._stage_optimizers:
+                self._stage_optimizers[stage_id].load_state_dict(opt_state)
 
     def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
         """

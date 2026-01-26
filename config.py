@@ -69,11 +69,10 @@ class BaseConfig:
     # 基线模型（已实现的模型）
     baseline_models: List[str] = field(default_factory=lambda: [
         "Pctx",      # 上下文感知
-        "MMQ",       # 多模态量化
-        "FusID",     # 融合ID
         "PRISM",     # 2025: 个性化多模态融合 (WWW 2026)
         "DGMRec",    # 2025: 解耦和生成模态 (SIGIR 2025)
-        # 删除了RPG和REARM模型，因为无法找到源码验证
+        # 已删除: MMQ, FusID, DuoRec - 无官方代码验证
+        # 已删除: RPG, REARM - 无法找到源码验证
         # 待实现: AMMRM, CoFiRec, LETTER
     ])
 

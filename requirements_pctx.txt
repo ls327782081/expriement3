@@ -1,0 +1,14 @@
+# Pctx 官方实现所需依赖
+
+# 核心依赖
+sentence-transformers>=2.2.0  # 用于文本编码
+faiss-cpu>=1.7.0  # 用于 RQ 量化（如果有 GPU 可以用 faiss-gpu）
+scikit-learn>=1.0.0  # 用于 PCA 降维
+numpy>=1.21.0
+torch>=1.10.0
+transformers>=4.20.0
+
+# 可选依赖
+tqdm>=4.62.0  # 进度条
+pandas>=1.3.0  # 数据处理
+

@@ -6,8 +6,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from base_model import AbstractTrainableModel  # 导入抽象基类
 from config import config
-from util import item_id_to_semantic_id, semantic_id_to_item_id
+from util import item_id_to_semantic_id, semantic_id_to_item_id, save_checkpoint
 from transformers import T5Config, T5ForConditionalGeneration
+import os
 
 
 class Pctx(AbstractTrainableModel):
@@ -60,8 +61,6 @@ class Pctx(AbstractTrainableModel):
                 nn.Dropout(config.dropout)
             )
 
-        # 优化器缓存
-        self._optimizers = {}
         # 初始化权重
         self._init_weights()
     
@@ -83,15 +82,15 @@ class Pctx(AbstractTrainableModel):
     def _get_optimizer_state_dict(self) -> dict:
         """获取当前阶段优化器的状态字典"""
         optimizer_states = {}
-        for stage_id, optimizer in self._optimizers.items():
+        for stage_id, optimizer in self._stage_optimizers.items():
             optimizer_states[stage_id] = optimizer.state_dict()
         return optimizer_states
 
     def _load_optimizer_state_dict(self, state_dict: dict):
         """加载当前阶段优化器的状态字典"""
         for stage_id, opt_state in state_dict.items():
-            if stage_id in self._optimizers:
-                self._optimizers[stage_id].load_state_dict(opt_state)
+            if stage_id in self._stage_optimizers:
+                self._stage_optimizers[stage_id].load_state_dict(opt_state)
 
     def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
         """
@@ -222,6 +221,8 @@ class Pctx(AbstractTrainableModel):
 
         return {'loss': avg_loss, 'accuracy': accuracy}
 
+    # 使用基类的 on_epoch_end 默认实现（自动保存检查点）
+
     def forward(self, batch):
         """
         前向传播
@@ -291,64 +292,6 @@ class Pctx(AbstractTrainableModel):
             
             return outputs
 
-    def train_step(self, batch, optimizer, criterion, device):
-        """
-        单步训练方法
-        
-        Args:
-            batch: 训练批次数据
-            optimizer: 优化器
-            criterion: 损失函数
-            device: 计算设备
-            
-        Returns:
-            loss: 损失值
-        """
-        # 移动数据到设备
-        for key in batch:
-            if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(device)
-        
-        # 清零梯度
-        optimizer.zero_grad()
-        
-        # 前向传播
-        if "semantic_ids" in batch:
-            # 使用预生成的语义ID进行训练
-            outputs = self.forward(batch)
-            loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-        else:
-            # 如果没有语义ID，使用标准训练流程
-            logits = self.forward(batch)  # 根据实际情况调整
-            # 假设返回的是logits
-            if isinstance(logits, dict) and 'logits' in logits:
-                logits = logits['logits']
-            elif hasattr(logits, 'logits'):
-                logits = logits.logits
-            elif torch.is_tensor(logits):
-                # 如果直接返回logits张量
-                pass
-            else:
-                # 默认处理：假设返回的是元组，第一个元素是logits
-                logits = logits[0] if isinstance(logits, (tuple, list)) else logits
-            
-            # 生成目标语义ID
-            target = item_id_to_semantic_id(
-                batch["item_id"], config.id_length, config.codebook_size
-            ).to(device)
-            
-            # 计算损失
-            loss = 0
-            for i in range(config.id_length):
-                loss += criterion(logits[:, i, :], target[:, i])
-            loss /= config.id_length
-        
-        # 反向传播
-        loss.backward()
-        optimizer.step()
-        
-        return loss.item()
-
     def predict(self, batch, **kwargs):
         """
         预测方法
@@ -406,102 +349,3 @@ class Pctx(AbstractTrainableModel):
         )
         
         return generated_sequences
-    
-    def generate_semantic_ids_from_upstream(self, upstream_model_output):
-        """
-        从上游模型（如DuoRec）输出生成语义ID
-        这是一个模拟函数，实际应用中会使用真正的上游模型输出
-        
-        Args:
-            upstream_model_output: 上游模型的输出（如DuoRec的表示）
-            
-        Returns:
-            semantic_ids: 生成的语义ID序列
-        """
-        # 这里假设上游模型输出是某种嵌入表示
-        # 通过量化或其他方法转换为离散的语义ID
-        batch_size = upstream_model_output.size(0)
-        
-        # 简单的线性投影后argmax得到语义ID
-        projected = nn.Linear(upstream_model_output.size(-1), config.codebook_size * config.id_length)(
-            upstream_model_output
-        )
-        projected = projected.view(batch_size, config.id_length, config.codebook_size)
-        semantic_ids = torch.argmax(projected, dim=-1)  # (batch_size, id_length)
-        
-        return semantic_ids
-
-    def train_with_duo_rec_integration(self, duo_rec_dataloader, pctx_dataloader, 
-                                      optimizer, criterion, device, logger=None):
-        """
-        Pctx的完整两阶段训练流程：
-        1. 使用DuoRec生成语义ID
-        2. 使用生成的语义ID训练Pctx
-        
-        Args:
-            duo_rec_dataloader: 用于训练DuoRec的数据加载器
-            pctx_dataloader: 用于训练Pctx的数据加载器
-            optimizer: 优化器
-            criterion: 损失函数
-            device: 设备
-            logger: 日志记录器
-        """
-        if logger:
-            logger.info("开始Pctx的两阶段训练流程...")
-        
-        # 第一阶段：使用DuoRec生成语义ID（这里模拟）
-        if logger:
-            logger.info("第一阶段：准备语义ID（模拟DuoRec生成）")
-        
-        # 第二阶段：使用语义ID训练Pctx
-        if logger:
-            logger.info("第二阶段：使用语义ID训练Pctx模型")
-        
-        self.train()
-        total_loss = 0
-        num_batches = 0
-        
-        for batch_idx, batch in enumerate(pctx_dataloader):
-            # 确保数据在正确设备上
-            for key in batch:
-                if isinstance(batch[key], torch.Tensor):
-                    batch[key] = batch[key].to(device)
-            
-            # 确保批次中有语义ID
-            if "semantic_ids" not in batch:
-                # 如果没有语义ID，使用内部方法生成
-                # 这里使用简化的逻辑
-                with torch.no_grad():
-                    # 生成语义ID（模拟从DuoRec获取）
-                    user_emb = self.user_emb(batch["user_id"])
-                    item_emb = self.item_emb(batch["item_id"])
-                    interaction_repr = torch.cat([user_emb, item_emb], dim=-1)
-                    
-                    # 生成语义ID
-                    semantic_logits = nn.Linear(interaction_repr.size(-1), config.codebook_size * config.id_length)(
-                        interaction_repr
-                    ).view(-1, config.id_length, config.codebook_size)
-                    batch["semantic_ids"] = torch.argmax(semantic_logits, dim=-1)
-            
-            # 清零梯度
-            optimizer.zero_grad()
-            
-            # 前向传播
-            outputs = self.forward(batch)
-            loss = outputs.loss if hasattr(outputs, 'loss') else outputs[0]
-            
-            # 反向传播
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            if logger and batch_idx % 100 == 0:
-                logger.info(f"Pctx训练 - Batch {batch_idx}, Loss: {loss.item():.4f}")
-        
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0
-        if logger:
-            logger.info(f"Pctx训练完成，平均损失: {avg_loss:.4f}")
-        
-        return avg_loss

@@ -6,6 +6,24 @@ from typing import Dict, Optional, Tuple, Any, List, Union
 from tqdm import tqdm
 
 
+# ==================== 模型基类说明 ====================
+#
+# BaseModel: 简单的 nn.Module 别名
+#   - 用于不需要多阶段训练的模型（如 PMAT, MCRL）
+#   - 这些模型有自己的训练逻辑（如 train_step 方法）
+#   - 适合研究型模型，灵活性高
+#
+# AbstractTrainableModel: 抽象训练模型基类
+#   - 用于需要统一多阶段训练流程的模型（如基线模型）
+#   - 提供完整的训练框架：检查点、优化器管理、钩子函数等
+#   - 子类必须实现5个抽象方法
+#   - 适合生产环境，规范性强
+#
+# ====================================================
+
+BaseModel = nn.Module
+
+
 @dataclass
 class StageConfig:
     """
@@ -129,8 +147,30 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         pass
 
     def on_epoch_end(self, epoch: int, stage_id: int, stage_kwargs: Dict, train_metrics: Dict, val_metrics: Dict):
-        """epoch结束钩子"""
-        pass
+        """epoch结束钩子：默认实现保存检查点"""
+        import os
+
+        experiment_name = stage_kwargs.get('experiment_name', self.__class__.__name__)
+        val_loss = val_metrics.get('loss', float('inf'))
+
+        # 更新最优指标
+        is_best = val_loss < self.best_metric if self.best_metric > 0 else True
+        if is_best:
+            self.best_metric = val_loss
+
+        # 保存检查点
+        checkpoint_dir = './checkpoints'
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+        # 保存当前epoch的检查点
+        checkpoint_path = os.path.join(checkpoint_dir, f'{experiment_name}_epoch_{epoch}.pth')
+        self.save_checkpoint(checkpoint_path)
+
+        # 如果是最优模型，额外保存一份
+        if is_best:
+            best_path = os.path.join(checkpoint_dir, f'{experiment_name}_best.pth')
+            self.save_checkpoint(best_path)
+            print(f"✅ 保存最优模型到 {best_path} | Val Loss: {val_loss:.4f}")
 
     def on_batch_start(self, batch: Any, batch_idx: int, stage_id: int, stage_kwargs: Dict):
         """batch开始钩子"""
@@ -171,8 +211,13 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         for batch_idx, batch in enumerate(pbar):
             self.on_batch_start(batch, batch_idx, stage_id, stage_kwargs)
 
-            # 数据移到设备
-            batch = [x.to(self.device) if isinstance(x, torch.Tensor) else x for x in batch]
+            # 数据移到设备（支持字典和列表两种格式）
+            if isinstance(batch, dict):
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()}
+            elif isinstance(batch, (list, tuple)):
+                batch = [x.to(self.device) if isinstance(x, torch.Tensor) else x for x in batch]
+
             # 核心训练逻辑
             loss, metrics = self._train_one_batch(batch, stage_id, stage_kwargs)
             # 参数更新

@@ -11,8 +11,10 @@ MCRL: Multi-task Contrastive Representation Learning
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple
-from base_model import BaseModel
+from typing import Dict, Tuple, Any, Optional
+from base_model import AbstractTrainableModel
+from config import config
+from util import item_id_to_semantic_id
 
 
 class UserPreferenceContrastive(nn.Module):
@@ -274,16 +276,18 @@ class InterModalContrastive(nn.Module):
         return total_loss / max(num_pairs, 1)
 
 
-class MCRL(BaseModel):
+class MCRL(AbstractTrainableModel):
     """完整的多任务对比学习框架
     理论依据：定理5，三层对比学习的协同效应
+    继承 AbstractTrainableModel 以使用统一训练框架
     """
-    
+
     def __init__(
         self,
-        config
+        config,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
-        super().__init__()
+        super().__init__(device=device)
         self.config = config
         
         # 从配置中获取参数
@@ -404,66 +408,6 @@ class MCRL(BaseModel):
         optimized_ids = optimized_ids + id_embeddings
         return optimized_ids
 
-    def train_step(self, batch, optimizer, criterion, device):
-        """
-        单步训练方法
-        """
-        # 移动数据到设备
-        user_ids = batch["user_id"].to(device)
-        item_ids = batch["item_id"].to(device)
-        visual_feat = batch["vision_feat"].float().to(device)
-        text_feat = batch["text_feat"].float().to(device)
-        
-        # 清零梯度
-        optimizer.zero_grad()
-        
-        # 注册模态信息（如果还没有注册的话）
-        if not hasattr(self, '_modalities_registered'):
-            self.register_modalities({
-                'visual': visual_feat.size(1),  # 视觉特征的实际维度
-                'text': text_feat.size(1)       # 文本特征的实际维度
-            })
-            self._modalities_registered = True
-        
-        # 生成用户嵌入（简化版本）
-        batch_size = user_ids.size(0)
-        user_embeddings = torch.randn(batch_size, self.hidden_dim).to(device)
-        
-        # 准备模态特征
-        modal_features = {
-            'visual': visual_feat,
-            'text': text_feat
-        }
-        
-        # 生成模态权重（简化版本）
-        modal_weights = torch.ones(batch_size, self.num_modalities).to(device) / self.num_modalities
-        
-        # 生成正负样本（简化版本）
-        positive_ids = torch.randn(batch_size, 5, self.hidden_dim).to(device)  # 5个正样本
-        negative_ids = torch.randn(batch_size, 10, self.hidden_dim).to(device)  # 10个负样本
-        
-        # 生成初始ID嵌入（简化版本）
-        id_embeddings = torch.randn(batch_size, self.hidden_dim).to(device)
-        
-        # 前向传播
-        outputs = self(
-            id_embeddings=id_embeddings,
-            user_embeddings=user_embeddings,
-            modal_features=modal_features,
-            modal_weights=modal_weights,
-            positive_ids=positive_ids,
-            negative_ids=negative_ids
-        )
-        
-        # 计算损失
-        loss = outputs['losses']['total_contrastive_loss']
-        
-        # 反向传播
-        loss.backward()
-        optimizer.step()
-        
-        return loss.item()
-
     def predict(self, batch, **kwargs):
         """
         预测方法
@@ -473,13 +417,146 @@ class MCRL(BaseModel):
         item_ids = batch["item_id"]
         visual_feat = batch["vision_feat"].float()
         text_feat = batch["text_feat"].float()
-        
+
         # 生成初始ID嵌入（简化版本）
         batch_size = user_ids.size(0)
-        id_embeddings = torch.randn(batch_size, self.hidden_dim)
-        
+        id_embeddings = torch.randn(batch_size, self.hidden_dim).to(self.device)
+
         # 优化ID表征
         optimized_ids = self.get_optimized_representation(id_embeddings)
-        
+
         # 返回优化后的ID嵌入
         return optimized_ids
+
+    # ==================== AbstractTrainableModel 抽象方法实现 ====================
+
+    def _get_optimizer(self, stage_id: int, stage_kwargs: Dict) -> torch.optim.Optimizer:
+        """获取指定阶段的优化器"""
+        lr = stage_kwargs.get('lr', 0.001)
+        weight_decay = stage_kwargs.get('weight_decay', 0.01)
+        return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
+
+    def _get_optimizer_state_dict(self) -> Dict:
+        """获取当前阶段优化器的状态字典"""
+        optimizer_states = {}
+        for stage_id, optimizer in self._stage_optimizers.items():
+            optimizer_states[stage_id] = optimizer.state_dict()
+        return optimizer_states
+
+    def _load_optimizer_state_dict(self, state_dict: Dict):
+        """加载当前阶段优化器的状态字典"""
+        for stage_id, opt_state in state_dict.items():
+            if stage_id in self._stage_optimizers:
+                self._stage_optimizers[stage_id].load_state_dict(opt_state)
+
+    def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
+        """
+        单batch训练逻辑（MCRL 对比学习）
+
+        Args:
+            batch: 训练批次数据（字典格式）
+            stage_id: 阶段ID
+            stage_kwargs: 该阶段的自定义参数
+
+        Returns:
+            (batch_loss, batch_metrics)
+        """
+        batch_size = batch["user_id"].size(0)
+
+        # 准备模态特征
+        modal_features = {
+            'visual': batch.get('vision_feat', torch.randn(batch_size, config.visual_dim).to(self.device)).float(),
+            'text': batch.get('text_feat', torch.randn(batch_size, config.text_dim).to(self.device)).float()
+        }
+
+        # 准备模态权重（简化版本）
+        modal_weights = torch.ones(batch_size, self.num_modalities).to(self.device) / self.num_modalities
+
+        # 准备ID嵌入（简化版本）
+        id_embeddings = torch.randn(batch_size, self.hidden_dim).to(self.device)
+
+        # 准备用户嵌入
+        user_embeddings = torch.randn(batch_size, self.hidden_dim).to(self.device)
+
+        # 采样正负样本
+        num_pos = stage_kwargs.get('num_positive_samples', 5)
+        num_neg = stage_kwargs.get('num_negative_samples', 20)
+        positive_ids = torch.randn(batch_size, num_pos, self.hidden_dim).to(self.device)
+        negative_ids = torch.randn(batch_size, num_neg, self.hidden_dim).to(self.device)
+
+        # 前向传播
+        outputs = self.forward(
+            id_embeddings=id_embeddings,
+            user_embeddings=user_embeddings,
+            modal_features=modal_features,
+            modal_weights=modal_weights,
+            positive_ids=positive_ids,
+            negative_ids=negative_ids
+        )
+
+        # 获取损失
+        loss = outputs['losses']['total_contrastive_loss']
+
+        # 记录各项损失作为指标
+        metrics = {
+            'user_pref_loss': outputs['losses'].get('user_preference_loss', torch.tensor(0.0)).item(),
+            'intra_modal_loss': outputs['losses'].get('intra_modal_loss', torch.tensor(0.0)).item(),
+            'inter_modal_loss': outputs['losses'].get('inter_modal_loss', torch.tensor(0.0)).item(),
+        }
+
+        return loss, metrics
+
+    def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int,
+                           stage_kwargs: Dict) -> Dict:
+        """单轮验证逻辑"""
+        self.eval()
+        total_loss = 0.0
+        total_metrics = {
+            'user_pref_loss': 0.0,
+            'intra_modal_loss': 0.0,
+            'inter_modal_loss': 0.0,
+        }
+
+        with torch.no_grad():
+            for batch in val_dataloader:
+                batch_size = batch["user_id"].size(0)
+
+                # 准备数据（与训练相同）
+                modal_features = {
+                    'visual': batch.get('vision_feat', torch.randn(batch_size, config.visual_dim).to(self.device)).float(),
+                    'text': batch.get('text_feat', torch.randn(batch_size, config.text_dim).to(self.device)).float()
+                }
+                modal_weights = torch.ones(batch_size, self.num_modalities).to(self.device) / self.num_modalities
+                id_embeddings = torch.randn(batch_size, self.hidden_dim).to(self.device)
+                user_embeddings = torch.randn(batch_size, self.hidden_dim).to(self.device)
+
+                num_pos = stage_kwargs.get('num_positive_samples', 5)
+                num_neg = stage_kwargs.get('num_negative_samples', 20)
+                positive_ids = torch.randn(batch_size, num_pos, self.hidden_dim).to(self.device)
+                negative_ids = torch.randn(batch_size, num_neg, self.hidden_dim).to(self.device)
+
+                # 前向传播
+                outputs = self.forward(
+                    id_embeddings=id_embeddings,
+                    user_embeddings=user_embeddings,
+                    modal_features=modal_features,
+                    modal_weights=modal_weights,
+                    positive_ids=positive_ids,
+                    negative_ids=negative_ids
+                )
+
+                # 累计损失
+                loss = outputs['losses']['total_contrastive_loss']
+                total_loss += loss.item()
+
+                total_metrics['user_pref_loss'] += outputs['losses'].get('user_preference_loss', torch.tensor(0.0)).item()
+                total_metrics['intra_modal_loss'] += outputs['losses'].get('intra_modal_loss', torch.tensor(0.0)).item()
+                total_metrics['inter_modal_loss'] += outputs['losses'].get('inter_modal_loss', torch.tensor(0.0)).item()
+
+        # 计算平均值
+        num_batches = len(val_dataloader)
+        avg_loss = total_loss / num_batches
+        avg_metrics = {k: v / num_batches for k, v in total_metrics.items()}
+        avg_metrics['loss'] = avg_loss
+
+        return avg_metrics

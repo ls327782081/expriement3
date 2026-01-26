@@ -28,6 +28,7 @@ except ImportError:
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+from typing import Dict, Any, List, Tuple, Optional
 from config import config
 import tqdm
 from datetime import datetime
@@ -61,7 +62,7 @@ class AmazonBooksProcessor:
                  **kwargs):
         """
         初始化Amazon Books数据集处理器
-        
+
         Args:
             quick_mode: 是否使用快速模式（减少数据量）
             min_interactions: 用户最小交互次数
@@ -76,7 +77,7 @@ class AmazonBooksProcessor:
         """
         # 设置日志记录器
         self.logger = logger if logger is not None else logging.getLogger(__name__)
-        
+
         # 基本配置
 
         self.category=category
@@ -92,35 +93,35 @@ class AmazonBooksProcessor:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
-            
-        self.logger.info(f"Using device: {self.device}")
-        
 
-        
+        self.logger.info(f"Using device: {self.device}")
+
+
+
         # 初始化预训练模型
         self._init_pretrained_models()
-        
+
         # 其他参数
         self.kwargs = kwargs
-        
+
     def _init_pretrained_models(self):
         """初始化预训练模型"""
         self.logger.info("Initializing pre-trained models...")
-        
+
         # 初始化BERT模型和分词器
         self.logger.info(f"Loading BERT model: {self.bert_model_name}")
         self.bert_tokenizer = AutoTokenizer.from_pretrained(self.bert_model_name, cache_dir="./pre-trained_models/")
         self.bert_model = AutoModel.from_pretrained(self.bert_model_name, cache_dir="./pre-trained_models/").to(self.device)
         self.bert_model.eval()
-        
+
         # 初始化CLIP模型和处理器
         self.logger.info(f"Loading CLIP model: {self.clip_model_name}")
         self.clip_processor = CLIPProcessor.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/")
         self.clip_model = CLIPModel.from_pretrained(self.clip_model_name, cache_dir="./pre-trained_models/").to(self.device)
         self.clip_model.eval()
-        
+
         self.logger.info("Pre-trained models initialized successfully")
-        
+
     def _log_memory_usage(self, context: str = ""):
         """记录内存使用情况"""
         try:
@@ -136,7 +137,7 @@ class AmazonBooksProcessor:
                 self.logger.info(f"[{context}] CPU内存: {cpu_mem_mb:.1f}MB")
         except ImportError:
             pass  # psutil未安装，跳过内存监控
-    
+
     def load_reviews(self) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, int]]:
         """加载评论数据"""
         self.logger.info("Loading reviews data...")
@@ -193,21 +194,21 @@ class AmazonBooksProcessor:
         df, user_mapping, item_mapping = self._clean_reviews_data(df)
 
         return df, user_mapping, item_mapping
-    
+
     def _clean_reviews_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, int]]:
         """
         清洗评论数据
-        
+
         Returns:
             tuple: (cleaned_df, user_mapping, item_mapping)
         """
         self.logger.info("Cleaning reviews data...")
-        
+
         original_size = len(df)
-        
+
         # 移除缺失关键字段的记录
         df = df.dropna(subset=['user_id', 'item_id'])
-        
+
         # 过滤用户和商品的最小交互次数
         # user_counts = df['user_id'].value_counts()
         # item_counts = df['item_id'].value_counts()
@@ -221,25 +222,25 @@ class AmazonBooksProcessor:
         # 重要：先排序再创建映射，确保映射顺序一致
         unique_users = sorted(df['user_id'].unique())
         unique_items = sorted(df['item_id'].unique())
-        
+
         user_mapping = {user_id: i for i, user_id in enumerate(unique_users)}  # 从0开始
         item_mapping = {item_id: i+1 for i, item_id in enumerate(unique_items)}  # 从1开始，0保留给padding
-        
+
         # 应用映射
         df['user_id'] = df['user_id'].map(user_mapping)
         df['item_id'] = df['item_id'].map(item_mapping)
-        
+
         # 按时间排序
         df = df.sort_values(['user_id', 'timestamp'])
-        
+
         self.logger.info(f"Data cleaning completed:")
         self.logger.info(f"  Original size: {original_size}")
         self.logger.info(f"  After cleaning: {len(df)}")
         self.logger.info(f"  Users: {len(user_mapping)}")
         self.logger.info(f"  Items: {len(item_mapping)}")
-        
+
         return df, user_mapping, item_mapping
-    
+
     def load_meta(self, item_mapping: Dict[str, int]) -> pd.DataFrame:
         """加载商品元数据"""
         self.logger.info("Loading meta data...")
@@ -298,73 +299,73 @@ class AmazonBooksProcessor:
 
         df = pd.DataFrame(meta_data)
         self.logger.info(f"Loaded {len(df)} meta items")
-        
+
         return df
-    
+
     def _generate_bert_text_features(self, meta_df: pd.DataFrame, item_mapping: Dict[str, int]) -> Dict[int, torch.Tensor]:
         """使用BERT生成文本特征"""
         self.logger.info("Generating BERT text features...")
-        
+
         batch_size = 100  # 增加批处理大小以提高效率
-        
+
         # 准备文本数据
         texts_to_process = []
         item_indices = []
-        
+
         for _, row in meta_df.iterrows():
             item_id = row['item_id']
             if item_id not in item_mapping:
                 continue
-                
+
             item_idx = item_mapping[item_id]
-            
+
             # 组合文本信息
             text_parts = []
-            
+
             # 标题
             if row['title']:
                 text_parts.append(row['title'])
-                
+
             # 特征
             if row['features']:
                 text_parts.extend(row['features'][:3])  # 取前3个特征
-                
+
             # 描述
             if row['description']:
                 text_parts.extend(row['description'][:2])  # 取前2个描述
-                
+
             # 类别
             if row['categories']:
                 text_parts.append(' '.join(row['categories']))
-                
+
             # 合并文本并截断
             combined_text = ' '.join(text_parts)
             # 限制文本长度以适应BERT
             if len(combined_text) > 500:
                 combined_text = combined_text[:500]
-                
+
             texts_to_process.append(combined_text)
             item_indices.append(item_idx)
-            
+
         # 批处理生成BERT文本特征
         text_features = self._extract_bert_features_batch(texts_to_process, item_indices, batch_size)
-        
+
         self.logger.info(f"Generated BERT text features for {len(text_features)} items")
-        
+
         # 记录内存使用
         self._log_memory_usage("After BERT feature extraction")
-        
+
         return text_features
-    
+
     def _extract_bert_features_batch(self, texts: List[str], item_indices: List[int], batch_size: int) -> Dict[int, torch.Tensor]:
         """批量提取BERT特征"""
         text_features = {}
-        
+
         with torch.no_grad():
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i:i + batch_size]
                 batch_indices = item_indices[i:i + batch_size]
-                
+
                 # 分词和编码
                 encoded = self.bert_tokenizer(
                     batch_texts,
@@ -373,47 +374,47 @@ class AmazonBooksProcessor:
                     max_length=512,
                     return_tensors='pt'
                 )
-                
+
                 # 移动到设备
                 input_ids = encoded['input_ids'].to(self.device)
                 attention_mask = encoded['attention_mask'].to(self.device)
-                
+
                 # 获取BERT输出
                 outputs = self.bert_model(input_ids=input_ids, attention_mask=attention_mask)
-                
+
                 # 使用[CLS]标记的隐藏状态作为文本表示
                 cls_embeddings = outputs.last_hidden_state[:, 0, :]  # [batch_size, hidden_size]
-                
+
                 # 存储特征（移动到CPU省份，使用float16减少内存）
                 for j, item_idx in enumerate(batch_indices):
                     text_features[item_idx] = cls_embeddings[j].cpu().half()  # float16
-                    
+
                 # 输出进度日志
                 if (i // batch_size + 1) % 10 == 0:
                     self.logger.info(f"Processed {i + len(batch_texts)}/{len(texts)} BERT texts")
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    
+
         return text_features
-    
+
     def _generate_clip_image_features(self, meta_df: pd.DataFrame, item_mapping: Dict[str, int]) -> Dict[int, torch.Tensor]:
         """使用CLIP生成图像特征"""
         self.logger.info("Generating CLIP image features...")
-        
+
         image_features = {}
         batch_size = 50  # 图像处理批次较小
-        
+
         # 准备图像URL数据
         image_urls = []
         item_indices = []
-        
+
         for _, row in meta_df.iterrows():
             item_id = row['item_id']
             if item_id not in item_mapping:
                 continue
-                
+
             item_idx = item_mapping[item_id]
-            
+
             # 获取图像URL
             urls = row['image_urls']
             if urls and len(urls) > 0:
@@ -422,43 +423,43 @@ class AmazonBooksProcessor:
             else:
                 # 如果没有图像URL，创建零特征
                 image_features[item_idx] = torch.zeros(512, dtype=torch.float16)
-                
+
         if len(image_urls) == 0:
             self.logger.warning("No valid image URLs found")
             return image_features
-            
+
         # 批量提取CLIP特征
         image_features.update(self._extract_clip_features_batch(image_urls, item_indices, batch_size))
-        
+
         # 检查缺失项
         valid_items = set(item_indices)
         all_items = set(item_mapping.values())
         missing_items = all_items - valid_items
 
-            
+
         if missing_items:
             self.logger.warning(f"Created zero features for {len(missing_items)} items with missing images")
-            
+
         self.logger.info(f"Generated CLIP image features for {len(image_features)} items")
-        
+
         # 记录内存使用
         self._log_memory_usage("After CLIP image feature extraction")
-        
+
         return image_features
-    
+
     def _extract_clip_features_batch(self, image_urls: List[str], item_indices: List[int], batch_size: int) -> Dict[int, torch.Tensor]:
         """批量提取CLIP图像特征"""
         clip_features = {}
-        
+
         with torch.no_grad():
             for i in range(0, len(image_urls), batch_size):
                 batch_urls = image_urls[i:i + batch_size]
                 batch_indices = item_indices[i:i + batch_size]
-                
+
                 # 下载和预处理图像
                 batch_images = []
                 valid_indices = []
-                
+
                 for j, url in enumerate(batch_urls):
                     try:
                         image = self._download_and_preprocess_image(url)
@@ -474,40 +475,40 @@ class AmazonBooksProcessor:
                         self.logger.error(f"Error processing image from {url}: {e}")
                         zero_features = torch.zeros(512, dtype=torch.float16)
                         clip_features[batch_indices[j]] = zero_features
-                
+
                 if not batch_images:
                     continue
-                    
+
                 # 使用CLIP处理器预处理图像
                 inputs = self.clip_processor(images=batch_images, return_tensors="pt").to(self.device)
-                
+
                 # 获取CLIP图像特征
                 outputs = self.clip_model.get_image_features(**inputs)
-                
+
                 # 存储特征（移动到CPU省份，使用float16减少内存）
                 for j, item_idx in enumerate(valid_indices):
                     clip_features[item_idx] = outputs[j].cpu().half()  # float16
-                    
+
                 # 输出进度日志
                 if (i // batch_size + 1) % 5 == 0:
                     self.logger.info(f"Processed {i + len(batch_urls)}/{len(image_urls)} CLIP images")
-                    
+
         return clip_features
-    
+
     def _download_and_preprocess_image(self, url: str, max_retries: int = 3) -> Optional[Image.Image]:
         """下载并预处理图像"""
         for attempt in range(max_retries):
             try:
                 response = requests.get(url, timeout=60)
                 response.raise_for_status()
-                
+
                 # 打开图像
                 image = Image.open(BytesIO(response.content)).convert("RGB")
-                
+
                 # 简单的预处理（CLIP处理器会处理调整大小等）
 
                 return image
-                
+
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 2  # 指数退避：2, 4, 6秒
@@ -516,20 +517,20 @@ class AmazonBooksProcessor:
                 else:
                     self.logger.error(f"Failed to download {url} after {max_retries} attempts: {e}")
                     raise
-                    
+
         return None
-    
+
     def load_dataset(self) -> Dict[str, Any]:
         """加载完整数据集"""
         self.logger.info(f"Loading {self.category} dataset...")
 
         # 缓存未命中，正常加载数据
         start_time = time.time()
-        
+
         # 加载评论和元数据
         reviews_df, user_mapping, item_mapping = self.load_reviews()
         meta_df = self.load_meta(item_mapping)
-        
+
         # 提取文本特征
         text_features = self._generate_bert_text_features(meta_df, item_mapping)
 
@@ -539,12 +540,12 @@ class AmazonBooksProcessor:
 
         # 提取图像特征
         image_features = self._generate_clip_image_features(meta_df, item_mapping)
-        
+
         # 准备数据集字典
         num_users = len(user_mapping)
         num_items = len(item_mapping)
 
-        
+
         dataset = {
             'reviews_df': reviews_df,
             'meta_df': meta_df,
@@ -556,12 +557,12 @@ class AmazonBooksProcessor:
             'image_features': image_features
         }
 
-        
+
         elapsed_time = time.time() - start_time
         self.logger.info(f"Dataset loaded successfully in {elapsed_time:.2f} seconds")
-        
+
         return dataset
-    
+
     def load_dataset_for_experiment(
         self,
         test_ratio: float = 0.2,
@@ -570,22 +571,22 @@ class AmazonBooksProcessor:
     ) -> Dict[str, Any]:
         """
         加载数据集用于实验（包括序列构建、数据分割等）
-        
+
         Args:
             test_ratio: 测试集比例
             val_ratio: 验证集比例
             add_padding_item: 是否为padding item 0预留位置
-            
+
         Returns:
             包含所有实验所需数据的字典
         """
         self.logger.info("="*80)
         self.logger.info("Loading dataset for experiment")
         self.logger.info("="*80)
-        
+
         # 加载基础数据集
         dataset = self.load_dataset()
-        
+
         # 构建用户序列
         self.logger.info("Building user sequences...")
         from util import build_user_sequences, split_user_sequences
@@ -612,65 +613,65 @@ class AmazonBooksProcessor:
 
         # 验证数据范围
         # self._validate_data_ranges(data)
-        
+
         # 转换特征格式（添加padding item）
         if add_padding_item:
             data = self._convert_features_to_tensors(data)
-        
+
         self.logger.info("="*80)
         self.logger.info("Dataset loaded successfully for experiment")
         self.logger.info("="*80)
-        
+
         return data
-    
+
     def _validate_data_ranges(self, data: Dict[str, Any]):
         """验证数据范围，确保item_id在有效范围内"""
         num_items = data['num_items']
         num_users = data['num_users']
-        
+
         # 检查所有序列中的item_id
         all_sequences = {**data['train_sequences'], **data['val_sequences'], **data['test_sequences']}
-        
+
         max_item_id = 0
         max_user_id = 0
         invalid_items = []
-        
+
         for user_id, seq in all_sequences.items():
             max_user_id = max(max_user_id, user_id)
             for item_id in seq['item_indices']:
                 max_item_id = max(max_item_id, item_id)
                 if item_id > num_items:
                     invalid_items.append((user_id, item_id))
-        
+
         self.logger.info(f"Data validation:")
         self.logger.info(f"  num_users: {num_users}, max_user_id: {max_user_id}")
         self.logger.info(f"  num_items: {num_items}, max_item_id: {max_item_id}")
-        
+
         if invalid_items:
             self.logger.warning(f"Found {len(invalid_items)} invalid item_ids (> num_items={num_items})")
             self.logger.warning(f"First 5 invalid items: {invalid_items[:5]}")
-            
+
             # 修复：将超出范围的item_id截断到有效范围
             self.logger.info(f"Fixing invalid item_ids by clamping to [1, {num_items}]...")
-            
+
             for user_id, seq in all_sequences.items():
                 for i, item_id in enumerate(seq['item_indices']):
                     if item_id > num_items:
                         seq['item_indices'][i] = min(item_id, num_items)
-    
+
     def _convert_features_to_tensors(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """将特征转换为张量格式，并添加padding item"""
         num_items = data['num_items']
-        
+
         self.logger.info("Converting features to tensors...")
-        
+
         # 处理文本特征
         if isinstance(data['text_features'], dict):
             self.logger.info(f"Converting text features to tensor ({num_items} items)...")
-            
+
             # 创建张量（+1为padding item 0预留位置）
             text_tensor = torch.zeros(num_items + 1, 768, dtype=torch.float16)  # BERT特征维度
-            
+
             # 填充特征
             for item_idx, feat in data['text_features'].items():
                 # 确保索引在有效范围内
@@ -678,10 +679,10 @@ class AmazonBooksProcessor:
                     text_tensor[item_idx] = feat
                 else:
                     self.logger.warning(f"Skipping invalid item_idx {item_idx} (num_items={num_items})")
-            
+
             data['text_features'] = text_tensor
             self.logger.info(f"✅ Converted text_features to tensor: {text_tensor.shape}")
-            
+
         elif isinstance(data['text_features'], torch.Tensor):
             # 如果已经是tensor，检查维度是否正确
             current_shape = data['text_features'].shape
@@ -698,14 +699,14 @@ class AmazonBooksProcessor:
                 self.logger.info(f"✅ text_features already has correct shape: {current_shape}")
             else:
                 self.logger.warning(f"⚠️ Unexpected text_features shape: {current_shape}, expected [{num_items}] or [{num_items+1}]")
-        
+
         # 处理图像特征
         if isinstance(data['image_features'], dict):
             self.logger.info(f"Converting image features to tensor ({num_items} items)...")
-            
+
             # 创建张量（+1为padding item 0预留位置）
             image_tensor = torch.zeros(num_items + 1, 512, dtype=torch.float16)  # CLIP特征维度
-            
+
             # 填充特征
             for item_idx, feat in data['image_features'].items():
                 # 确保索引在有效范围内
@@ -713,10 +714,10 @@ class AmazonBooksProcessor:
                     image_tensor[item_idx] = feat
                 else:
                     self.logger.warning(f"Skipping invalid item_idx {item_idx} (num_items={num_items})")
-            
+
             data['image_features'] = image_tensor
             # self.logger.info(f"✅ Converted image_features to tensor: {image_tensor.shape}")
-            
+
         elif isinstance(data['image_features'], torch.Tensor):
             # 如果已经是tensor，检查维度是否正确
             current_shape = data['image_features'].shape
@@ -733,9 +734,9 @@ class AmazonBooksProcessor:
                 self.logger.info(f"✅ image_features already has correct shape: {current_shape}")
             else:
                 self.logger.warning(f"⚠️ Unexpected image_features shape: {current_shape}, expected [{num_items}] or [{num_items+1}]")
-        
+
         self._log_memory_usage("After feature tensor conversion")
-        
+
         return data
 
 def collate_fn_pad(batch):
@@ -790,10 +791,10 @@ class AmazonDataset(Dataset):
 
         self.logger = logger
         self.logger.info(f"Initialized dataset with {self.num_users} users, feature_type={feature_type}")
-        
+
     def __len__(self):
         return self.num_users
-    
+
     def __getitem__(self, idx):
         user_id = self.user_ids[idx]
         seq = self.sequences[user_id]
@@ -884,7 +885,7 @@ def get_dataloader(cache_dir: str,
     train_dataset = AmazonDataset(data, "train_sequences", feature_type, logger)
     val_dataset = AmazonDataset(data, "val_sequences", feature_type, logger)
     test_dataset = AmazonDataset(data, "test_sequences", feature_type, logger)
-    
+
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -1046,4 +1047,267 @@ def get_mock_dataloader(
         pin_memory=torch.cuda.is_available()
     )
 
-    return train_loader, val_loader, test_loader
+
+
+# ============================================================================
+# Pctx-specific Data Loading
+# ============================================================================
+
+class PctxDataset(Dataset):
+    """
+    专门为 PctxAligned 模型设计的数据集
+    使用 PctxTokenizerOfficial 来处理数据
+    """
+    def __init__(self, sequences: Dict[int, List[int]], tokenizer, logger: logging.Logger = None):
+        """
+        Args:
+            sequences: {user_id: [item1, item2, ...]}
+            tokenizer: PctxTokenizerOfficial 实例
+            logger: 日志记录器
+        """
+        self.sequences = sequences
+        self.tokenizer = tokenizer
+        self.logger = logger or logging.getLogger(__name__)
+
+        # 创建样本列表：每个用户的每个位置都是一个样本
+        self.samples = []
+        for user_id, item_seq in sequences.items():
+            # 每个位置都可以作为一个训练样本
+            # 前面的物品作为历史，当前物品作为目标
+            for idx in range(len(item_seq)):
+                if idx > 0:  # 至少需要一个历史物品
+                    history = item_seq[:idx]
+                    target = item_seq[idx]
+                    self.samples.append({
+                        'user_id': user_id,
+                        'history': history,
+                        'target': target
+                    })
+
+        self.logger.info(f"PctxDataset initialized with {len(self.samples)} samples from {len(sequences)} users")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+
+        # 使用 tokenizer 处理
+        tokenized = self.tokenizer.tokenize(
+            user_id=sample['user_id'],
+            item_sequence=sample['history'],
+            target_item=sample['target']
+        )
+
+        return tokenized
+
+
+def extract_user_sequences_from_data(data: Dict[str, Any], sequence_key: str = 'train_sequences') -> Dict[int, List[int]]:
+    """
+    从数据字典中提取用户序列
+
+    Args:
+        data: 包含序列数据的字典
+        sequence_key: 序列数据的键名
+
+    Returns:
+        {user_id: [item1, item2, ...]}
+    """
+    sequences_dict = data.get(sequence_key, {})
+    user_sequences = {}
+
+    for user_id, seq_data in sequences_dict.items():
+        item_indices = seq_data.get('item_indices', [])
+        if isinstance(item_indices, torch.Tensor):
+            item_indices = item_indices.tolist()
+        user_sequences[user_id] = item_indices
+
+    return user_sequences
+
+
+def get_pctx_dataloader(
+    cache_dir: str,
+    category: str = "Video_Games",
+    batch_size: int = 32,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    quick_mode: bool = False,
+    logger: logging.Logger = None,
+    tokenizer_path: str = None,
+    device: str = "cuda"
+) -> Tuple[DataLoader, DataLoader, DataLoader, Any]:
+    """
+    为 PctxAligned 模型创建专用的数据加载器
+
+    Args:
+        cache_dir: 缓存目录
+        category: 数据集类别
+        batch_size: 批次大小
+        shuffle: 是否打乱
+        num_workers: 工作进程数
+        quick_mode: 快速模式（使用小数据集）
+        logger: 日志记录器
+        tokenizer_path: tokenizer 保存路径
+        device: 设备
+
+    Returns:
+        (train_loader, val_loader, test_loader, tokenizer)
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    logger.info("=" * 60)
+    logger.info("Loading data for PctxAligned...")
+    logger.info("=" * 60)
+
+    # 1. 加载数据（使用与 get_dataloader 相同的逻辑）
+    data = None
+    cache_suffix = "_quick" if quick_mode else ""
+    cache_file_name = f"{cache_dir}/{category}{cache_suffix}.pkl"
+
+    if os.path.exists(cache_file_name):
+        logger.info(f"Loading cached data from {cache_file_name}")
+        with open(cache_file_name, "rb") as f:
+            data = pickle.load(f)
+
+    if data is None:
+        processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)
+        data = processor.load_dataset_for_experiment(
+            test_ratio=0.2,
+            val_ratio=0.1,
+            add_padding_item=True
+        )
+        with open(cache_file_name, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # 2. 提取用户序列
+    train_sequences = extract_user_sequences_from_data(data, 'train_sequences')
+    val_sequences = extract_user_sequences_from_data(data, 'val_sequences')
+    test_sequences = extract_user_sequences_from_data(data, 'test_sequences')
+
+    logger.info(f"Extracted sequences:")
+    logger.info(f"  Train: {len(train_sequences)} users")
+    logger.info(f"  Val: {len(val_sequences)} users")
+    logger.info(f"  Test: {len(test_sequences)} users")
+
+    # 3. 构建或加载 tokenizer
+    from baseline_models.pctx_tokenizer_official import PctxTokenizerOfficial
+
+    if tokenizer_path and os.path.exists(tokenizer_path):
+        logger.info(f"Loading tokenizer from {tokenizer_path}")
+        tokenizer = PctxTokenizerOfficial.load(tokenizer_path, device=device)
+    else:
+        logger.info("Building new tokenizer...")
+
+        # 收集所有唯一的物品ID
+        all_items = set()
+        for seq in train_sequences.values():
+            all_items.update(seq)
+
+        # 创建物品文本（使用简单的 item_id 格式）
+        item_texts = {item_id: f"item_{item_id}" for item_id in all_items}
+
+        logger.info(f"Total unique items: {len(item_texts)}")
+
+        # 初始化 tokenizer
+        tokenizer = PctxTokenizerOfficial(
+            codebook_size=256,
+            n_codebooks=3,
+            id_length=4,
+            max_seq_len=20,
+            device=device
+        )
+
+        # 构建 semantic IDs
+        tokenizer.build_semantic_ids_from_dataset(
+            user_sequences=train_sequences,
+            item_texts=item_texts,
+            save_path=tokenizer_path
+        )
+
+    # 4. 创建数据集
+    train_dataset = PctxDataset(train_sequences, tokenizer, logger)
+    val_dataset = PctxDataset(val_sequences, tokenizer, logger)
+    test_dataset = PctxDataset(test_sequences, tokenizer, logger)
+
+    # 5. 创建 DataLoader
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=pctx_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=pctx_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=pctx_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    logger.info("PctxAligned dataloaders created successfully!")
+    logger.info("=" * 60)
+
+    return train_loader, val_loader, test_loader, tokenizer
+
+
+def pctx_collate_fn(batch):
+    """
+    PctxDataset 的 collate 函数
+    将多个样本合并成一个 batch，处理变长序列
+    """
+    # batch 是一个列表，每个元素是 tokenizer.tokenize() 返回的字典
+    # 需要将它们合并成一个 batch，并进行 padding
+
+    input_ids_list = []
+    attention_mask_list = []
+    labels_list = []
+
+    for item in batch:
+        input_ids_list.append(item['input_ids'].squeeze(0))
+        attention_mask_list.append(item['attention_mask'].squeeze(0))
+        labels_list.append(item['labels'].squeeze(0))
+
+    # 找到最大长度
+    max_input_len = max(x.size(0) for x in input_ids_list)
+    max_label_len = max(x.size(0) for x in labels_list)
+
+    # Padding
+    padded_input_ids = []
+    padded_attention_mask = []
+    padded_labels = []
+
+    for input_ids, attention_mask, labels in zip(input_ids_list, attention_mask_list, labels_list):
+        # Pad input_ids and attention_mask
+        input_pad_len = max_input_len - input_ids.size(0)
+        if input_pad_len > 0:
+            input_ids = torch.cat([input_ids, torch.zeros(input_pad_len, dtype=input_ids.dtype)])
+            attention_mask = torch.cat([attention_mask, torch.zeros(input_pad_len, dtype=attention_mask.dtype)])
+
+        # Pad labels (使用 -100 作为 padding，这样在计算 loss 时会被忽略)
+        label_pad_len = max_label_len - labels.size(0)
+        if label_pad_len > 0:
+            labels = torch.cat([labels, torch.full((label_pad_len,), -100, dtype=labels.dtype)])
+
+        padded_input_ids.append(input_ids)
+        padded_attention_mask.append(attention_mask)
+        padded_labels.append(labels)
+
+    return {
+        'input_ids': torch.stack(padded_input_ids),
+        'attention_mask': torch.stack(padded_attention_mask),
+        'labels': torch.stack(padded_labels)
+    }

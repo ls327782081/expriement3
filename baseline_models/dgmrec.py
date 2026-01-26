@@ -5,7 +5,28 @@ import numpy as np
 from base_model import AbstractTrainableModel  # 导入抽象基类
 from config import config
 import scipy.sparse as sp
-from utils.utils import build_sim, compute_normalized_laplacian, build_knn_neighbourhood
+
+# 简化的工具函数（替代 utils.utils）
+def build_sim(context):
+    """构建相似度矩阵"""
+    context_norm = context.div(torch.norm(context, p=2, dim=-1, keepdim=True))
+    sim = torch.mm(context_norm, context_norm.transpose(1, 0))
+    return sim
+
+def compute_normalized_laplacian(adj):
+    """计算归一化拉普拉斯矩阵"""
+    adj = sp.coo_matrix(adj)
+    rowsum = np.array(adj.sum(1))
+    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
+    d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
+    return d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt).tocoo()
+
+def build_knn_neighbourhood(adj, topk):
+    """构建 KNN 邻域"""
+    knn_val, knn_ind = torch.topk(adj, topk, dim=-1)
+    weighted_adjacency_matrix = (torch.zeros_like(adj)).scatter_(-1, knn_ind, knn_val)
+    return weighted_adjacency_matrix
 
 
 class DGMRec(AbstractTrainableModel):
@@ -70,88 +91,75 @@ class DGMRec(AbstractTrainableModel):
             text_adj = build_knn_neighbourhood(text_adj, topk=self.knn_k)
             self.text_adj = compute_normalized_laplacian(text_adj).to_sparse_coo().to(self.device)
 
-        # 多模态编码器
+        # 多模态编码器（对齐官方代码）
         image_input_dim = self.v_feat.shape[1] if self.v_feat is not None else config.visual_dim
         text_input_dim = self.t_feat.shape[1] if self.t_feat is not None else config.text_dim
-        
+
+        # General encoders (通用特征编码器)
         self.image_encoder = nn.Linear(image_input_dim, self.latent_dim).to(self.device)
         self.text_encoder = nn.Linear(text_input_dim, self.latent_dim).to(self.device)
-        
-        # 共享编码器 (用于提取通用特征)
         self.shared_encoder = nn.Linear(self.latent_dim, self.latent_dim).to(self.device)
-        
-        # 特定编码器 (用于提取特定特征)
+        nn.init.xavier_uniform_(self.image_encoder.weight)
+        nn.init.xavier_uniform_(self.text_encoder.weight)
+        nn.init.xavier_uniform_(self.shared_encoder.weight)
+
+        # Specific encoders (特定特征编码器)
         self.image_encoder_s = nn.Linear(image_input_dim, self.latent_dim).to(self.device)
         self.text_encoder_s = nn.Linear(text_input_dim, self.latent_dim).to(self.device)
-        
-        # 特征生成器 (用于生成缺失模态特征)
+        nn.init.xavier_uniform_(self.image_encoder_s.weight)
+        nn.init.xavier_uniform_(self.text_encoder_s.weight)
+
+        # Preference encoders (用户偏好编码器) - 官方代码
+        self.image_preference_ = nn.Linear(self.latent_dim, self.latent_dim, bias=False).to(self.device)
+        self.text_preference_ = nn.Linear(self.latent_dim, self.latent_dim, bias=False).to(self.device)
+        nn.init.xavier_uniform_(self.image_preference_.weight)
+        nn.init.xavier_uniform_(self.text_preference_.weight)
+
+        # Decoders (解码器) - 官方代码
+        if self.v_feat is not None:
+            self.image_decoder = nn.Linear(self.latent_dim * 2, self.v_feat.shape[1]).to(self.device)
+            nn.init.xavier_uniform_(self.image_decoder.weight)
+        if self.t_feat is not None:
+            self.text_decoder = nn.Linear(self.latent_dim * 2, self.t_feat.shape[1]).to(self.device)
+            nn.init.xavier_uniform_(self.text_decoder.weight)
+
+        # Generator for Specific Feature (特定特征生成器) - 官方代码
         self.image_gen = nn.Sequential(
             nn.Linear(self.latent_dim, self.latent_dim),
             nn.Tanh(),
             nn.Linear(self.latent_dim, self.latent_dim)
         ).to(self.device)
+        self.image_gen.apply(self.init_weight)
+
         self.text_gen = nn.Sequential(
             nn.Linear(self.latent_dim, self.latent_dim),
             nn.Tanh(),
             nn.Linear(self.latent_dim, self.latent_dim)
         ).to(self.device)
-        
-        # 模态转换器 (用于跨模态生成)
+        self.text_gen.apply(self.init_weight)
+
+        # Generator for General Feature (通用特征生成器) - 官方代码
         self.image2text = nn.Sequential(
             nn.Linear(self.latent_dim, self.latent_dim),
             nn.Tanh(),
             nn.Linear(self.latent_dim, self.latent_dim)
         ).to(self.device)
+        self.image2text.apply(self.init_weight)
+
         self.text2image = nn.Sequential(
             nn.Linear(self.latent_dim, self.latent_dim),
             nn.Tanh(),
             nn.Linear(self.latent_dim, self.latent_dim)
         ).to(self.device)
-        
-        # 解码器 (用于重构)
-        if self.v_feat is not None:
-            self.image_decoder = nn.Linear(self.latent_dim * 2, self.v_feat.shape[1]).to(self.device)
-        if self.t_feat is not None:
-            self.text_decoder = nn.Linear(self.latent_dim * 2, self.t_feat.shape[1]).to(self.device)
-        
-        # 用户偏好编码器
-        self.image_preference = nn.Linear(self.latent_dim, self.latent_dim, bias=False).to(self.device)
-        self.text_preference = nn.Linear(self.latent_dim, self.latent_dim, bias=False).to(self.device)
-        
-        # 最终预测层
-        self.predictor = nn.Sequential(
-            nn.Linear(self.latent_dim * 2, self.latent_dim),
-            nn.ReLU(),
-            nn.Linear(self.latent_dim, 1)
-        ).to(self.device)
-        
-        # 激活函数
+        self.text2image.apply(self.init_weight)
+
+        # Activation function
         self.act_g = nn.Tanh()
 
-        # 优化器缓存
-        self._optimizers = {}
-        # 初始化参数
-        self._init_weights()
-
-    def _init_weights(self):
-        """初始化模型权重"""
-        nn.init.xavier_uniform_(self.image_encoder.weight)
-        nn.init.xavier_uniform_(self.text_encoder.weight)
-        nn.init.xavier_uniform_(self.shared_encoder.weight)
-        nn.init.xavier_uniform_(self.image_encoder_s.weight)
-        nn.init.xavier_uniform_(self.text_encoder_s.weight)
-        nn.init.xavier_uniform_(self.image_preference.weight)
-        nn.init.xavier_uniform_(self.text_preference.weight)
-        
-        if hasattr(self, 'image_decoder'):
-            nn.init.xavier_uniform_(self.image_decoder.weight)
-        if hasattr(self, 'text_decoder'):
-            nn.init.xavier_uniform_(self.text_decoder.weight)
-        
-        for m in [self.image_gen, self.text_gen, self.image2text, self.text2image]:
-            for layer in m:
-                if isinstance(layer, nn.Linear):
-                    nn.init.xavier_uniform_(layer.weight)
+    def init_weight(self, layer):
+        """初始化单个层的权重（官方代码）"""
+        if isinstance(layer, nn.Linear):
+            nn.init.xavier_uniform_(layer.weight)
 
     def init_mi_estimator(self):
         """初始化互信息估计器"""
@@ -171,33 +179,17 @@ class DGMRec(AbstractTrainableModel):
 
     def mge(self):
         """
-        多模态嵌入生成 (Multi-Modal Embedding Generation)
+        多模态嵌入生成 (Modality Generation Encoding) - 对齐官方代码
         提取通用特征和特定特征
         """
-        if self.v_feat is not None:
-            # 编码原始模态特征
-            item_image_encoded = F.normalize(self.image_encoder(self.image_embedding.weight), dim=1)
-            # 提取通用特征
-            item_image_g = F.sigmoid(self.shared_encoder(self.act_g(item_image_encoded)))
-            # 提取特定特征
-            item_image_s = F.sigmoid(self.image_encoder_s(self.image_embedding.weight))
-        else:
-            # 如果没有视觉特征，则使用零向量
-            item_image_g = torch.zeros((self.n_items, self.latent_dim), device=self.device)
-            item_image_s = torch.zeros((self.n_items, self.latent_dim), device=self.device)
-        
-        if self.t_feat is not None:
-            # 编码原始模态特征
-            item_text_encoded = F.normalize(self.text_encoder(self.text_embedding.weight), dim=1)
-            # 提取通用特征
-            item_text_g = F.sigmoid(self.shared_encoder(self.act_g(item_text_encoded)))
-            # 提取特定特征
-            item_text_s = F.sigmoid(self.text_encoder_s(self.text_embedding.weight))
-        else:
-            # 如果没有文本特征，则使用零向量
-            item_text_g = torch.zeros((self.n_items, self.latent_dim), device=self.device)
-            item_text_s = torch.zeros((self.n_items, self.latent_dim), device=self.device)
-        
+        # 官方代码：General features (通用特征)
+        item_image_g = F.sigmoid(self.shared_encoder(self.act_g(self.image_encoder(self.image_embedding.weight))))
+        item_text_g = F.sigmoid(self.shared_encoder(self.act_g(self.text_encoder(self.text_embedding.weight))))
+
+        # 官方代码：Specific features (特定特征)
+        item_image_s = F.sigmoid(self.image_encoder_s(self.image_embedding.weight))
+        item_text_s = F.sigmoid(self.text_encoder_s(self.text_embedding.weight))
+
         return item_image_g, item_text_g, item_image_s, item_text_s
 
     def cge(self, user_emb, item_emb, adj):
@@ -439,15 +431,15 @@ class DGMRec(AbstractTrainableModel):
     def _get_optimizer_state_dict(self) -> dict:
         """获取当前阶段优化器的状态字典"""
         optimizer_states = {}
-        for stage_id, optimizer in self._optimizers.items():
+        for stage_id, optimizer in self._stage_optimizers.items():
             optimizer_states[stage_id] = optimizer.state_dict()
         return optimizer_states
 
     def _load_optimizer_state_dict(self, state_dict: dict):
         """加载当前阶段优化器的状态字典"""
         for stage_id, opt_state in state_dict.items():
-            if stage_id in self._optimizers:
-                self._optimizers[stage_id].load_state_dict(opt_state)
+            if stage_id in self._stage_optimizers:
+                self._stage_optimizers[stage_id].load_state_dict(opt_state)
 
     def _train_one_batch(self, batch: any, stage_id: int, stage_kwargs: dict) -> tuple:
         """

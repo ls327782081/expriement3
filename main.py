@@ -15,12 +15,13 @@ from collections import defaultdict
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
-from data_utils import get_dataloader
-from baseline_models import Pctx, MMQ, FusID, PRISM, DGMRec
+from data_utils import get_dataloader, get_pctx_dataloader
+from baseline_models import Pctx, PctxAligned, PRISM, DGMRec
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
 from metrics import calculate_metrics
 from util import item_id_to_semantic_id, save_checkpoint, load_checkpoint, save_results
+from base_model import AbstractTrainableModel, StageConfig
 
 # 混合精度训练
 scaler = GradScaler()
@@ -44,121 +45,57 @@ def sample_positive_negative_ids(batch, train_loader, num_pos=5, num_neg=20):
 
 
 def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None):
-    """通用训练函数（带检查点）"""
+    """通用训练函数（使用 AbstractTrainableModel 统一训练框架）
+
+    Args:
+        model: 模型实例（必须继承 AbstractTrainableModel）
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
+        experiment_name: 实验名称
+        ablation_module: 消融模块名称（可选）
+        logger: 日志记录器
+
+    Returns:
+        训练后的模型
+    """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
 
-    # 检查模型是否继承自BaseModel抽象类
-    from base_model import BaseModel
-    is_basemodel = isinstance(model, BaseModel)
-    
-    if is_basemodel:
-        # 如果模型继承自BaseModel，使用模型的训练方法
-        logger.info(f"使用模型 {model.__class__.__name__} 的内部训练方法")
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    # 检查模型是否继承自 AbstractTrainableModel
+    if not isinstance(model, AbstractTrainableModel):
+        raise TypeError(f"模型 {model.__class__.__name__} 必须继承 AbstractTrainableModel")
 
-        # 加载检查点（断点续训）
-        model, optimizer, start_epoch, best_loss = load_checkpoint(model, optimizer, experiment_name, logger=logger)
+    # ✅ 使用 AbstractTrainableModel 的统一训练框架
+    logger.info(f"✅ 使用 AbstractTrainableModel 统一训练框架训练 {model.__class__.__name__}")
 
-        for epoch in range(start_epoch, config.epochs):
-            # 使用模型的train_epoch方法
-            train_loss = model.train_epoch(train_loader, optimizer, criterion, config.device, logger)
-            
-            # 验证
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    batch = {k: v.to(config.device) for k, v in batch.items()}
-                    logits = model(batch)
-                    if torch.is_tensor(logits):
-                        if hasattr(logits, 'logits'):
-                            # 如果是包含logits属性的对象
-                            target = item_id_to_semantic_id(batch["item_id"], config.id_length, config.codebook_size)
-                            loss = nn.CrossEntropyLoss()(logits.logits.reshape(-1, config.codebook_size), target.reshape(-1))
-                        else:
-                            # 直接是logits张量
-                            target = item_id_to_semantic_id(batch["item_id"], config.id_length, config.codebook_size)
-                            loss = nn.CrossEntropyLoss()(logits.reshape(-1, config.codebook_size), target.reshape(-1))
-                    else:
-                        # 使用模型的预测方法
-                        predictions = model.predict(batch)
-                        target = batch["item_id"]
-                        loss = nn.CrossEntropyLoss()(predictions, target)
-                    
-                    val_loss += loss.item()
+    # 配置单阶段训练
+    stage_config = StageConfig(
+        stage_id=1,
+        epochs=config.epochs,
+        start_epoch=0,
+        kwargs={
+            'lr': config.lr,
+            'weight_decay': config.weight_decay,
+            'experiment_name': experiment_name,
+            'num_positive_samples': getattr(config, 'num_positive_samples', 5),
+            'num_negative_samples': getattr(config, 'num_negative_samples', 20),
+        }
+    )
 
-            val_loss /= len(val_loader)
-            logger.info(f"Epoch {epoch + 1} | Val Loss: {val_loss:.4f}")
+    # 调用模型的统一训练方法
+    model.train(
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        stage_configs=[stage_config]
+    )
 
-            # 保存检查点
-            is_best = val_loss < best_loss
-            best_loss = min(val_loss, best_loss)
-            save_checkpoint(model, optimizer, epoch, val_loss, experiment_name, is_best, logger=logger)
-
-        return model
-    else:
-        # 否则使用传统的训练方法
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-
-        # 加载检查点（断点续训）
-        model, optimizer, start_epoch, best_loss = load_checkpoint(model, optimizer, experiment_name, logger=logger)
-
-        for epoch in range(start_epoch, config.epochs):
-            model.train()
-            train_loss = 0.0
-            pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config.epochs}")
-
-            for step, batch in enumerate(pbar):
-                # 数据移至GPU
-                batch = {k: v.to(config.device) for k, v in batch.items()}
-
-                with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):  # 混合精度训练（适配L4）
-                    logits = model(batch)
-                    # 构造标签（将item_id转换为语义ID序列）
-                    # target shape: (batch_size, id_length)
-                    target = item_id_to_semantic_id(batch["item_id"], config.id_length, config.codebook_size)
-                    loss = criterion(logits.reshape(-1, config.codebook_size), target.reshape(-1))
-                    loss = loss / config.gradient_accumulation_steps  # 梯度累积
-
-                # 反向传播
-                scaler.scale(loss).backward()
-
-                # 梯度累积更新
-                if (step + 1) % config.gradient_accumulation_steps == 0:
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer.zero_grad()
-
-                train_loss += loss.item() * config.gradient_accumulation_steps
-                pbar.set_postfix({"train_loss": train_loss / (step + 1)})
-
-            # 验证
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_loader:
-                    batch = {k: v.to(config.device) for k, v in batch.items()}
-                    logits = model(batch)
-                    target = batch["item_id"].repeat(config.id_length).reshape(-1, config.id_length)
-                    loss = criterion(logits.reshape(-1, config.codebook_size), target.reshape(-1))
-                    val_loss += loss.item()
-
-            val_loss /= len(val_loader)
-            logger.info(f"Epoch {epoch + 1} | Val Loss: {val_loss:.4f}")
-
-            # 保存检查点
-            is_best = val_loss < best_loss
-            best_loss = min(val_loss, best_loss)
-            save_checkpoint(model, optimizer, epoch, val_loss, experiment_name, is_best, logger=logger)
-
-        return model
+    return model
 
 
 def train_mcrl_model(model, train_loader, val_loader, experiment_name, logger=None):
-    """MCRL模型专用训练函数（包含三层对比学习）
+    """MCRL模型训练函数（现在使用统一训练框架）
+
+    注意：此函数现在只是 train_model 的别名，保留是为了向后兼容
 
     Args:
         model: MCRL模型
@@ -172,130 +109,8 @@ def train_mcrl_model(model, train_loader, val_loader, experiment_name, logger=No
 
     logger.info(f"\n===== 开始训练MCRL模型: {experiment_name} =====")
 
-    # 优化器
-    optimizer = optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-
-    # 学习率调度器
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.epochs)
-
-    # 加载检查点
-    model, optimizer, start_epoch, best_loss = load_checkpoint(model, optimizer, experiment_name, logger=logger)
-
-    for epoch in range(start_epoch, config.epochs):
-        model.train()
-        epoch_losses = {
-            'total': 0.0,
-            'mcrl_user_pref': 0.0,
-            'mcrl_intra': 0.0,
-            'mcrl_inter': 0.0,
-            'mcrl_total': 0.0
-        }
-
-        pbar = tqdm(train_loader, desc=f"[MCRL] Epoch {epoch + 1}/{config.epochs}")
-
-        for step, batch in enumerate(pbar):
-            # 数据移至设备
-            batch = {k: v.to(config.device) for k, v in batch.items()}
-            batch_size = batch["user_id"].size(0)
-
-            # 采样正负样本
-            positive_ids, negative_ids = sample_positive_negative_ids(
-                batch, train_loader,
-                num_pos=config.num_positive_samples,
-                num_neg=config.num_negative_samples
-            )
-
-            # 准备用户嵌入（简化版本：使用user_id的embedding）
-            user_embeddings = torch.randn(batch_size, config.hidden_dim).to(config.device)
-
-            with autocast(device_type='cuda' if torch.cuda.is_available() else 'cpu'):
-                # 前向传播（MCRL）
-                try:
-                    # 准备模态特征
-                    modal_features = {
-                        'visual': batch.get('vision_feat', torch.randn(batch_size, config.visual_dim).to(config.device)),
-                        'text': batch.get('text_feat', torch.randn(batch_size, config.text_dim).to(config.device))
-                    }
-
-                    # 准备模态权重（简化版本）
-                    modal_weights = torch.ones(batch_size, config.num_modalities).to(config.device) / config.num_modalities
-
-                    # 准备ID嵌入（简化版本）
-                    id_embeddings = torch.randn(batch_size, config.hidden_dim).to(config.device)
-
-                    # 前向传播
-                    outputs = model(
-                        id_embeddings=id_embeddings,
-                        user_embeddings=user_embeddings,
-                        modal_features=modal_features,
-                        modal_weights=modal_weights,
-                        positive_ids=positive_ids,
-                        negative_ids=negative_ids
-                    )
-
-                    # 获取损失
-                    loss = outputs['losses']['total_contrastive_loss']
-
-                    # 记录各项损失
-                    epoch_losses['total'] += loss.item()
-                    epoch_losses['mcrl_user_pref'] += outputs['losses'].get('user_preference_loss', torch.tensor(0.0)).item()
-                    epoch_losses['mcrl_intra'] += outputs['losses'].get('intra_modal_loss', torch.tensor(0.0)).item()
-                    epoch_losses['mcrl_inter'] += outputs['losses'].get('inter_modal_loss', torch.tensor(0.0)).item()
-                    epoch_losses['mcrl_total'] += outputs['losses'].get('total_contrastive_loss', torch.tensor(0.0)).item()
-
-                except Exception as e:
-                    logger.warning(f"MCRL训练出错: {e}")
-                    # 降级到普通训练
-                    logits = model(batch)
-                    target = item_id_to_semantic_id(batch["item_id"], config.id_length, config.codebook_size)
-                    criterion = nn.CrossEntropyLoss()
-                    loss = criterion(logits.reshape(-1, config.codebook_size), target.reshape(-1))
-                    epoch_losses['total'] += loss.item()
-
-            # 反向传播
-            scaler.scale(loss).backward()
-
-            # 梯度裁剪
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
-
-            # 优化器步进
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-
-            # 更新进度条
-            avg_loss = epoch_losses['total'] / (step + 1)
-            pbar.set_postfix({
-                'loss': f"{avg_loss:.4f}",
-                'mcrl_loss': f"{epoch_losses['mcrl_total']/(step+1):.4f}"
-            })
-
-        # 验证
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in val_loader:
-                batch = {k: v.to(config.device) for k, v in batch.items()}
-                logits = model(batch)
-                target = item_id_to_semantic_id(batch["item_id"], config.id_length, config.codebook_size)
-                criterion = nn.CrossEntropyLoss()
-                loss = criterion(logits.reshape(-1, config.codebook_size), target.reshape(-1))
-                val_loss += loss.item()
-
-        val_loss /= len(val_loader)
-        logger.info(f"Epoch {epoch + 1} | Val Loss: {val_loss:.4f}")
-
-        # 记录损失
-        for key in epoch_losses:
-            epoch_losses[key] /= len(train_loader)
-
-        # 保存检查点
-        is_best = val_loss < best_loss
-        best_loss = min(val_loss, best_loss)
-        save_checkpoint(model, optimizer, epoch, val_loss, experiment_name, is_best, logger=logger)
-
-    return model
+    # 使用统一训练框架
+    return train_model(model, train_loader, val_loader, experiment_name, logger=logger)
 
 
 def evaluate_model(model, test_loader, model_name, logger=None):
@@ -345,37 +160,61 @@ def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
     """运行基线模型实验"""
 
     logger.info("===== 开始基线实验 =====")
-    # Windows下使用num_workers=0避免多进程问题
-    train_loader,val_loader, test_loader  = get_dataloader("./data", category=config.category, shuffle=True, quick_mode=quick_mode, logger=logger, num_workers=0)
 
     results = []
     # 训练并评估基线模型
     for baseline_name in config.baseline_models:
         logger.info(f"\n训练基线模型：{baseline_name}")
-        if baseline_name == "Pctx":
-            model = Pctx().to(config.device)
-        elif baseline_name == "MMQ":
-            model = MMQ().to(config.device)
-        elif baseline_name == "FusID":
-            model = FusID().to(config.device)
-        elif baseline_name == "PRISM":
-            model = PRISM(config).to(config.device)
-        elif baseline_name == "DGMRec":
-            base_model = DGMRec(config).to(config.device)
-            # Wrapper for DGMRec to accept batch dict
-            class DGMRecWrapper(torch.nn.Module):
-                def __init__(self, model):
-                    super().__init__()
-                    self.model = model
-                    self.fc = torch.nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
-                def forward(self, batch):
-                    result = self.model(batch["user_id"], batch["item_id"], batch["vision_feat"].float(), batch["text_feat"].float())
-                    logits = self.fc(result['user_embeddings'])
-                    return logits.reshape(-1, config.id_length, config.codebook_size)
-            model = DGMRecWrapper(base_model).to(config.device)
+
+        # PctxAligned 需要特殊的数据加载流程
+        if baseline_name == "PctxAligned":
+            logger.info("Using specialized dataloader for PctxAligned...")
+            tokenizer_path = f"checkpoints/pctx_tokenizer_{config.category}.pkl"
+            train_loader, val_loader, test_loader, tokenizer = get_pctx_dataloader(
+                cache_dir="./data",
+                category=config.category,
+                batch_size=config.batch_size,
+                shuffle=True,
+                quick_mode=quick_mode,
+                logger=logger,
+                num_workers=0,
+                tokenizer_path=tokenizer_path,
+                device=config.device
+            )
+            model = PctxAligned(vocab_size=tokenizer.vocab_size, device=config.device).to(config.device)
         else:
-            logger.warning(f"未知基线模型: {baseline_name}，跳过")
-            continue
+            # 其他模型使用标准数据加载器
+            if baseline_name == config.baseline_models[0] and baseline_name != "PctxAligned":
+                # 只在第一个非PctxAligned模型时加载数据
+                train_loader, val_loader, test_loader = get_dataloader(
+                    "./data",
+                    category=config.category,
+                    shuffle=True,
+                    quick_mode=quick_mode,
+                    logger=logger,
+                    num_workers=0
+                )
+
+            if baseline_name == "Pctx":
+                model = Pctx().to(config.device)
+            elif baseline_name == "PRISM":
+                model = PRISM(config).to(config.device)
+            elif baseline_name == "DGMRec":
+                base_model = DGMRec(config).to(config.device)
+                # Wrapper for DGMRec to accept batch dict
+                class DGMRecWrapper(torch.nn.Module):
+                    def __init__(self, model):
+                        super().__init__()
+                        self.model = model
+                        self.fc = torch.nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
+                    def forward(self, batch):
+                        result = self.model(batch["user_id"], batch["item_id"], batch["vision_feat"].float(), batch["text_feat"].float())
+                        logits = self.fc(result['user_embeddings'])
+                        return logits.reshape(-1, config.id_length, config.codebook_size)
+                model = DGMRecWrapper(base_model).to(config.device)
+            else:
+                logger.warning(f"未知基线模型: {baseline_name}，跳过")
+                continue
 
         # 训练
         model = train_model(model, train_loader, val_loader, f"baseline_{baseline_name}", logger=logger)
