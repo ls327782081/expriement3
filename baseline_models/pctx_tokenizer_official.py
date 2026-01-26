@@ -9,16 +9,16 @@ Pctx Tokenizer - 完全对齐官方实现
 4. interactionKey 生成 (userID-itemID-preorderedSeq)
 5. merge_conflict 和 merge_low_frequency 策略
 """
-import torch
-import numpy as np
-import faiss
-from typing import List, Dict, Tuple, Optional
-from collections import defaultdict, Counter
-from sklearn.decomposition import PCA
-from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
-import pickle
 import os
+import pickle
+from typing import List, Dict
+
+import faiss
+import numpy as np
+import torch
+from sentence_transformers import SentenceTransformer
+from sklearn.decomposition import PCA
+from tqdm import tqdm
 
 
 class PctxTokenizerOfficial:

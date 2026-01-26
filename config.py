@@ -68,7 +68,7 @@ class BaseConfig:
 
     # 基线模型（已实现的模型）
     baseline_models: List[str] = field(default_factory=lambda: [
-        "Pctx",      # 上下文感知
+        "PctxAligned",      # 上下文感知
         "PRISM",     # 2025: 个性化多模态融合 (WWW 2026)
         "DGMRec",    # 2025: 解耦和生成模态 (SIGIR 2025)
         # 已删除: MMQ, FusID, DuoRec - 无官方代码验证

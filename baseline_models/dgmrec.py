@@ -40,11 +40,11 @@ class DGMRec(AbstractTrainableModel):
     4. 互信息最小化 (MI Minimization) - 确保特征独立性
     """
 
-    def __init__(self, config, dataset, device="cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, config, device="cuda" if torch.cuda.is_available() else "cpu"):
         super(DGMRec, self).__init__(device)
         self.config = config
-        self.n_users = dataset.num_users  # 从数据集中获取用户数
-        self.n_items = dataset.num_items  # 从数据集中获取物品数
+        self.n_users = config.user_vocab_size  # 从数据集中加载到config中获取用户数
+        self.n_items = config.item_vocab_size  # 从数据集中加载到config中获取物品数
         self.latent_dim = config.hidden_dim
         self.n_ui_layers = getattr(config, 'n_ui_layers', 2)
         self.n_mm_layers = getattr(config, 'n_mm_layers', 2)

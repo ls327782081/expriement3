@@ -238,7 +238,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         avg_metrics["loss"] = avg_loss
         return avg_metrics
 
-    def train(self,
+    def customer_train(self,
               train_dataloader: torch.utils.data.DataLoader,
               val_dataloader: torch.utils.data.DataLoader,
               stage_configs: List[StageConfig]):

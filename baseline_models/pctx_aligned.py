@@ -147,6 +147,8 @@ class PctxAligned(AbstractTrainableModel):
                 total = batch['labels'].numel()
                 metrics['accuracy'] = (correct / total).item() if total > 0 else 0.0
 
+        return loss, metrics
+
 
     def _validate_one_epoch(self, val_dataloader, stage_id: int, stage_kwargs: dict) -> dict:
         """单轮验证"""

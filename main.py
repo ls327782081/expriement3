@@ -83,7 +83,7 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
     )
 
     # 调用模型的统一训练方法
-    model.train(
+    model.customer_train(
         train_dataloader=train_loader,
         val_dataloader=val_loader,
         stage_configs=[stage_config]
@@ -195,9 +195,7 @@ def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
                     num_workers=0
                 )
 
-            if baseline_name == "Pctx":
-                model = Pctx().to(config.device)
-            elif baseline_name == "PRISM":
+            if baseline_name == "PRISM":
                 model = PRISM(config).to(config.device)
             elif baseline_name == "DGMRec":
                 base_model = DGMRec(config).to(config.device)
