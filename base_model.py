@@ -288,10 +288,6 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
                 # Epoch结束钩子
                 self.on_epoch_end(epoch, stage_id, stage_kwargs, train_metrics, val_metrics)
 
-                # 打印日志
-                print(
-                    f"Stage {stage_id} | Epoch {epoch + 1}/{total_epochs} | Train Loss: {train_metrics['loss']:.4f} | Val Loss: {val_metrics['loss']:.4f}")
-
             # -------------------------- 阶段结束 --------------------------
             self.on_stage_end(stage_id, stage_kwargs)
             self.current_stage_epoch = 0  # 重置阶段内epoch

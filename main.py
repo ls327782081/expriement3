@@ -598,6 +598,7 @@ if __name__ == "__main__":
     # 设置日志
     os.makedirs(config.log_dir, exist_ok=True)
     logging.basicConfig(
+        encoding="utf-8",
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         handlers=[
