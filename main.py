@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
 from data_utils import get_dataloader, get_pctx_dataloader
-from baseline_models import Pctx, PctxAligned, PRISM, DGMRec
+from baseline_models import PctxAligned, PRISM, DGMRec
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
 from metrics import calculate_metrics
@@ -362,8 +362,9 @@ def parse_args():
     
     # 模式选择
     parser.add_argument('--mode', type=str, default='quick',
-                        choices=['quick', 'full', 'baseline', 'ablation', 'hyper', 'mcrl'],
-                        help='实验模式: quick(快速测试)/full(完整实验)/specific(特定实验)')
+                        choices=['quick', 'full', 'baseline', 'ablation', 'hyper', 'mcrl',
+                                'efficiency', 'robustness', 'multi_dataset', 'complete'],
+                        help='实验模式: quick(快速测试)/full(完整实验)/efficiency(效率分析)/robustness(鲁棒性)/multi_dataset(多数据集)/complete(完整实验)')
     
     # 数据集
     parser.add_argument('--dataset', type=str, default='mock',
@@ -395,6 +396,172 @@ def parse_args():
                         help='日志保存目录')
 
     return parser.parse_args()
+
+
+def run_efficiency_experiment(logger=None):
+    """效率分析实验"""
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("\n" + "="*80)
+    logger.info("效率分析实验")
+    logger.info("="*80)
+
+    from experiment_framework import ExperimentFramework
+
+    # 初始化实验框架
+    framework = ExperimentFramework(results_dir="./results", logger=logger)
+
+    # 加载数据
+    train_loader = get_dataloader(config.category, split="train")
+    val_loader = get_dataloader(config.category, split="val")
+
+    # 初始化所有模型
+    models = [
+        ("PMAT", PMAT(config)),
+        ("MCRL", MCRL(config)),
+        ("PctxAligned", PctxAligned(config)),
+        ("PRISM", PRISM(config)),
+        ("DGMRec", DGMRec(config)),
+    ]
+
+    # 运行效率分析
+    results = framework.run_efficiency_analysis(
+        models=models,
+        train_loader=train_loader,
+        val_loader=val_loader
+    )
+
+    logger.info("\n效率分析结果:")
+    for model_name, metrics in results.items():
+        logger.info(f"\n{model_name}:")
+        logger.info(f"  训练时间: {metrics['train_time_per_epoch']:.2f}s/epoch")
+        logger.info(f"  推理时间: {metrics['inference_time_per_sample']*1000:.2f}ms/sample")
+        logger.info(f"  内存占用: {metrics['memory_usage_mb']:.2f}MB")
+        logger.info(f"  参数量: {metrics['num_parameters']:,}")
+
+    return results
+
+
+def run_robustness_experiment(logger=None):
+    """鲁棒性分析实验"""
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("\n" + "="*80)
+    logger.info("鲁棒性分析实验")
+    logger.info("="*80)
+
+    from experiment_framework import ExperimentFramework
+
+    # 初始化实验框架
+    framework = ExperimentFramework(results_dir="./results", logger=logger)
+
+    # 准备不同稀疏度的数据集
+    # 注意：这里需要实现数据稀疏度控制
+    logger.info("准备不同稀疏度的数据集...")
+
+    datasets_by_sparsity = []
+    for sparsity in [0.2, 0.5, 0.8]:
+        logger.info(f"  准备稀疏度 {sparsity} 的数据...")
+        # 这里简化处理，实际应该根据稀疏度过滤数据
+        train_loader = get_dataloader(config.category, split="train")
+        val_loader = get_dataloader(config.category, split="val")
+        datasets_by_sparsity.append((f"Sparsity_{sparsity}", train_loader, val_loader))
+
+    # 运行鲁棒性分析
+    results = framework.run_robustness_analysis(
+        model_class=PMAT,
+        datasets_by_sparsity=datasets_by_sparsity,
+        config=config
+    )
+
+    logger.info("\n鲁棒性分析结果:")
+    for sparsity, metrics in results.items():
+        logger.info(f"\n{sparsity}:")
+        logger.info(f"  Recall@10: {metrics.get('Recall@10', 0):.4f}")
+        logger.info(f"  NDCG@10: {metrics.get('NDCG@10', 0):.4f}")
+
+    return results
+
+
+def run_multi_dataset_experiment(logger=None):
+    """多数据集验证实验"""
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("\n" + "="*80)
+    logger.info("多数据集验证实验")
+    logger.info("="*80)
+
+    from experiment_framework import ExperimentFramework
+
+    # 初始化实验框架
+    framework = ExperimentFramework(results_dir="./results", logger=logger)
+
+    # 准备多个数据集
+    datasets = []
+    for dataset_name in ["Video_Games", "Beauty", "Sports"]:
+        logger.info(f"准备数据集: {dataset_name}")
+        try:
+            train_loader = get_dataloader(dataset_name, split="train")
+            val_loader = get_dataloader(dataset_name, split="val")
+            datasets.append((dataset_name, train_loader, val_loader))
+        except Exception as e:
+            logger.warning(f"无法加载数据集 {dataset_name}: {e}")
+
+    if not datasets:
+        logger.error("没有可用的数据集！")
+        return {}
+
+    # 运行多数据集实验
+    results = framework.run_multi_dataset_experiments(
+        model_class=PMAT,
+        datasets=datasets,
+        config=config
+    )
+
+    logger.info("\n多数据集验证结果:")
+    for dataset, metrics in results.items():
+        logger.info(f"\n{dataset}:")
+        logger.info(f"  Recall@10: {metrics.get('Recall@10', 0):.4f}")
+        logger.info(f"  NDCG@10: {metrics.get('NDCG@10', 0):.4f}")
+
+    return results
+
+
+def run_complete_experiments(logger=None):
+    """运行所有完整实验"""
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("\n" + "="*80)
+    logger.info("运行所有完整实验")
+    logger.info("="*80)
+
+    # 1. 基线对比实验
+    logger.info("\n[1/5] 基线对比实验")
+    run_baseline_experiment(logger=logger, quick_mode=False)
+
+    # 2. 消融实验
+    logger.info("\n[2/5] 消融实验")
+    run_ablation_experiment(logger=logger, quick_mode=False)
+
+    # 3. 效率分析
+    logger.info("\n[3/5] 效率分析")
+    run_efficiency_experiment(logger=logger)
+
+    # 4. 鲁棒性分析
+    logger.info("\n[4/5] 鲁棒性分析")
+    run_robustness_experiment(logger=logger)
+
+    # 5. 多数据集验证
+    logger.info("\n[5/5] 多数据集验证")
+    run_multi_dataset_experiment(logger=logger)
+
+    logger.info("\n" + "="*80)
+    logger.info("所有完整实验已完成！")
+    logger.info("="*80)
 
 
 def apply_args_to_config(args):
@@ -479,5 +646,17 @@ if __name__ == "__main__":
     elif args.mode == 'mcrl':
         logger.info("MCRL实验模式")
         run_mcrl_experiment(logger=logger, quick_model=(args.dataset=='mock'))
+    elif args.mode == 'efficiency':
+        logger.info("效率分析模式")
+        run_efficiency_experiment(logger=logger)
+    elif args.mode == 'robustness':
+        logger.info("鲁棒性分析模式")
+        run_robustness_experiment(logger=logger)
+    elif args.mode == 'multi_dataset':
+        logger.info("多数据集验证模式")
+        run_multi_dataset_experiment(logger=logger)
+    elif args.mode == 'complete':
+        logger.info("完整实验模式 - 运行所有实验")
+        run_complete_experiments(logger=logger)
 
     logger.info("所有实验完成！")

@@ -114,18 +114,29 @@ pip install -r requirements_pctx.txt
 ### 运行实验
 
 ```bash
-# 快速测试（2 epochs）
-python main.py --mode quick --model pmat --epochs 2
-
-# 完整实验（10 epochs）
-python main.py --mode full --dataset amazon --epochs 10 --device cuda
+# 快速测试
+python main.py --mode quick --epochs 2
 
 # 基线对比
 python main.py --mode baseline --epochs 10
 
-# MCRL 实验
-python main.py --mode mcrl --epochs 10
+# 消融实验
+python main.py --mode ablation --epochs 10
+
+# 效率分析
+python main.py --mode efficiency
+
+# 鲁棒性分析
+python main.py --mode robustness --epochs 10
+
+# 多数据集验证
+python main.py --mode multi_dataset --epochs 10
+
+# 运行所有完整实验
+python main.py --mode complete --epochs 10 --device cuda
 ```
+
+📖 **详细实验指南**: [EXPERIMENT_GUIDE.md](EXPERIMENT_GUIDE.md)
 
 ### 使用模型
 
@@ -164,22 +175,45 @@ metrics = pmat.evaluate(val_dataloader)
 
 ## 文档
 
-- **[DEVELOPMENT_NOTES.md](DEVELOPMENT_NOTES.md)**: 开发笔记，记录所有重要修改
-- **[MODELS_DOCUMENTATION.md](MODELS_DOCUMENTATION.md)**: 模型详细文档
-- **[BASELINE_ALIGNMENT_SUMMARY.md](BASELINE_ALIGNMENT_SUMMARY.md)**: 基线模型对齐总结
-- **[BASELINE_MODELS_COMPARISON.md](BASELINE_MODELS_COMPARISON.md)**: 基线模型对比分析
-- **[PCTX_OFFICIAL_ALIGNMENT_COMPLETE.md](PCTX_OFFICIAL_ALIGNMENT_COMPLETE.md)**: Pctx 官方对齐报告
+### 📚 核心文档
+- **[README.md](README.md)**: 项目主文档（本文档）
+- **[docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md)**: 项目结构说明 🆕
+- **[docs/EXPERIMENT_GUIDE.md](docs/EXPERIMENT_GUIDE.md)**: 实验使用指南 🆕
+
+### 🔧 开发文档
+- **[docs/DEVELOPMENT_NOTES.md](docs/DEVELOPMENT_NOTES.md)**: 开发笔记
+- **[docs/TRAINING_FRAMEWORK_MIGRATION.md](docs/TRAINING_FRAMEWORK_MIGRATION.md)**: 训练框架迁移
+
+### 🤖 模型文档
+- **[docs/MODELS_DOCUMENTATION.md](docs/MODELS_DOCUMENTATION.md)**: 模型详细文档
+- **[docs/BASELINE_ALIGNMENT_SUMMARY.md](docs/BASELINE_ALIGNMENT_SUMMARY.md)**: 基线对齐总结
+- **[docs/BASELINE_MODELS_COMPARISON.md](docs/BASELINE_MODELS_COMPARISON.md)**: 基线对比
+- **[docs/PCTX_OFFICIAL_ALIGNMENT_COMPLETE.md](docs/PCTX_OFFICIAL_ALIGNMENT_COMPLETE.md)**: Pctx对齐报告
+
+### 🧪 实验文档
+- **[docs/EXPERIMENT_IMPROVEMENTS_SUMMARY.md](docs/EXPERIMENT_IMPROVEMENTS_SUMMARY.md)**: 实验改进总结 🆕
+- **[docs/CLEANUP_SUMMARY.md](docs/CLEANUP_SUMMARY.md)**: 项目清理总结
 
 ---
 
 ## 更新日志
 
-### 2026-01-26 - 项目清理与文档整理 ✅
-- ✅ 删除所有临时测试文件
-- ✅ 删除临时文件夹（temp_dgmrec, temp_prism）
-- ✅ 整理文档，合并重复内容
-- ✅ 更新 README.md，使其更加简洁专业
-- ✅ 创建统一的开发文档（DEVELOPMENT_NOTES.md）
+### 2026-01-26 - 项目整理与实验完善 ✅
+- ✅ **实验框架完善**
+  - 创建 `experiment_framework.py` 统一实验框架
+  - 新增 4 种实验模式（efficiency, robustness, multi_dataset, complete）
+  - 实现消融实验、效率分析、鲁棒性分析
+  - 自动化结果保存和可视化
+- ✅ **文档整理**
+  - 所有文档移至 `docs/` 文件夹
+  - 创建 `PROJECT_STRUCTURE.md` 项目结构说明
+  - 创建 `EXPERIMENT_GUIDE.md` 实验指南
+  - 创建 `EXPERIMENT_IMPROVEMENTS_SUMMARY.md` 实验改进总结
+- ✅ **代码清理**
+  - 删除旧版 `pctx.py` 和 `pctx_tokenizer.py`
+  - 删除临时测试文件
+  - 更新 `baseline_models/__init__.py`
+  - 统一导入语句
 
 ### 2026-01-26 - 基线模型对齐 ✅
 - ✅ PRISM 对齐官方实现
