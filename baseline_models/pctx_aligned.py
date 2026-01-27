@@ -143,9 +143,19 @@ class PctxAligned(AbstractTrainableModel):
         if hasattr(outputs, 'logits') and 'labels' in batch:
             with torch.no_grad():
                 predictions = torch.argmax(outputs.logits, dim=-1)
-                correct = (predictions == batch['labels']).float().sum()
-                total = batch['labels'].numel()
-                metrics['accuracy'] = (correct / total).item() if total > 0 else 0.0
+                labels = batch['labels']
+
+                # 忽略 padding token（T5 使用 -100 表示需要忽略的位置）
+                mask = labels != -100
+                if mask.sum() > 0:
+                    correct = ((predictions == labels) & mask).float().sum()
+                    total = mask.sum()
+                    metrics['accuracy'] = (correct / total).item()
+                else:
+                    metrics['accuracy'] = 0.0
+
+                # 添加 perplexity（语言模型常用指标）
+                metrics['perplexity'] = torch.exp(loss.detach()).item()
 
         return loss, metrics
 
