@@ -209,7 +209,7 @@ class PctxAligned(AbstractTrainableModel):
                 attention_mask=batch.get('attention_mask'),
                 max_length=max_length,
                 num_beams=num_beams,
-                num_return_sequences=kwargs.get('num_return_sequences', 10),
+                num_return_sequences=kwargs.get('eval_top_k', 10),
                 early_stopping=True,
                 pad_token_id=0,
                 eos_token_id=self.vocab_size - 1

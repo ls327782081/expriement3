@@ -98,6 +98,7 @@ class BaseConfig:
     eval_batch_size: int = 64
     eval_interval: int = 1  # 每N个epoch评估一次
     top_k_list: List[int] = field(default_factory=lambda: [5, 10, 20, 50])
+    eval_top_k: int = 10
 
     # 数据集配置
     datasets: Dict = field(default_factory=lambda: {
