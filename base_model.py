@@ -4,6 +4,7 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any, List, Union
 from tqdm import tqdm
+import os
 
 
 # ==================== 模型基类说明 ====================
@@ -54,6 +55,8 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         self.current_stage_epoch = 0  # 当前阶段内的已训练epoch
         self.best_metric = 0.0  # 通用最优指标存储
         self._stage_optimizers = {}  # 缓存各阶段的优化器
+        self.checkpoint_dir = './checkpoints'
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
 
     # -------------------------- 通用工具方法（无需重写） --------------------------
     def save_checkpoint(self, path: str, additional_info: Optional[Dict] = None):
@@ -148,7 +151,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
 
     def on_epoch_end(self, epoch: int, stage_id: int, stage_kwargs: Dict, train_metrics: Dict, val_metrics: Dict):
         """epoch结束钩子：默认实现保存检查点"""
-        import os
+
 
         experiment_name = stage_kwargs.get('experiment_name', self.__class__.__name__)
         val_loss = val_metrics.get('loss', float('inf'))
@@ -158,17 +161,15 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         if is_best:
             self.best_metric = val_loss
 
-        # 保存检查点
-        checkpoint_dir = './checkpoints'
-        os.makedirs(checkpoint_dir, exist_ok=True)
+
 
         # 保存当前epoch的检查点
-        checkpoint_path = os.path.join(checkpoint_dir, f'{experiment_name}_epoch_{epoch}.pth')
+        checkpoint_path = os.path.join(self.checkpoint_dir, f'{experiment_name}_stage_{stage_id}_epoch_{epoch}.pth')
         self.save_checkpoint(checkpoint_path)
 
         # 如果是最优模型，额外保存一份
         if is_best:
-            best_path = os.path.join(checkpoint_dir, f'{experiment_name}_best.pth')
+            best_path = os.path.join(self.checkpoint_dir, f'{experiment_name}_best.pth')
             self.save_checkpoint(best_path)
             print(f"✅ 保存最优模型到 {best_path} | Val Loss: {val_loss:.4f}")
 
@@ -274,9 +275,16 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
                 self.on_stage_switch(prev_stage_id, stage_id, stage_kwargs)
             print(f"\n===== Start Stage {stage_id} Training (Epochs: {start_epoch + 1}~{total_epochs}) =====")
 
+            experiment_name = stage_kwargs.get('experiment_name', self.__class__.__name__)
             # -------------------------- 阶段内训练 --------------------------
             for epoch in range(start_epoch, total_epochs):
                 self.current_stage_epoch = epoch
+
+                checkpoint_path = os.path.join(self.checkpoint_dir, f'{experiment_name}_stage_{stage_id}_epoch_{epoch}.pth')
+                if os.path.exists(checkpoint_path):
+                    self.load_checkpoint(checkpoint_path)
+                    continue
+
                 # Epoch开始钩子
                 self.on_epoch_start(epoch, stage_id, stage_kwargs)
 

@@ -82,6 +82,7 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
         }
     )
 
+
     # 调用模型的统一训练方法
     model.customer_train(
         train_dataloader=train_loader,
@@ -623,13 +624,13 @@ if __name__ == "__main__":
     # 根据模式运行实验
     if args.mode == 'quick':
         logger.info("快速测试模式 - 运行所有实验（抽样数据）")
-        run_baseline_experiment(logger=logger, quick_mode=True)
+        # run_baseline_experiment(logger=logger, quick_mode=True)
         run_ablation_experiment(logger=logger, quick_mode=True)
         run_hyper_param_experiment(logger=logger, quick_mode=True)
         run_mcrl_experiment(logger=logger, quick_model=True)
     elif args.mode == 'full':
         logger.info("完整实验模式 - 运行所有实验")
-        run_baseline_experiment(logger=logger, quick_mode=False)
+        # run_baseline_experiment(logger=logger, quick_mode=False)
         run_ablation_experiment(logger=logger, quick_mode=False)
         run_hyper_param_experiment(logger=logger, quick_mode=False)
         run_mcrl_experiment(logger=logger, quick_model=False)
