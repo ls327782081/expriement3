@@ -30,20 +30,6 @@ scaler = GradScaler()
 NUM_WORKS = 0 if os.name == 'nt' else 4
 
 
-def sample_positive_negative_ids(batch, train_loader, num_pos=5, num_neg=20):
-    """采样正负样本ID（简化版本）"""
-    hidden_dim = config.hidden_dim
-
-    # 简化版本：随机采样
-    # 正样本：同一用户的其他物品
-    positive_ids = torch.randn(batch["user_id"].size(0), num_pos, hidden_dim).to(config.device)
-
-    # 负样本：其他用户的物品
-    negative_ids = torch.randn(batch["user_id"].size(0), num_neg, hidden_dim).to(config.device)
-
-    return positive_ids, negative_ids
-
-
 def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None):
     """通用训练函数（使用 AbstractTrainableModel 统一训练框架）
 
@@ -92,26 +78,6 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
 
     return model
 
-
-def train_mcrl_model(model, train_loader, val_loader, experiment_name, logger=None):
-    """MCRL模型训练函数（现在使用统一训练框架）
-
-    注意：此函数现在只是 train_model 的别名，保留是为了向后兼容
-
-    Args:
-        model: MCRL模型
-        train_loader: 训练数据加载器
-        val_loader: 验证数据加载器
-        experiment_name: 实验名称
-        logger: 日志记录器
-    """
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
-
-    logger.info(f"\n===== 开始训练MCRL模型: {experiment_name} =====")
-
-    # 使用统一训练框架
-    return train_model(model, train_loader, val_loader, experiment_name, logger=logger)
 
 
 def evaluate_model(model, test_loader, model_name, logger=None):
@@ -301,49 +267,6 @@ def run_hyper_param_experiment(logger=None,quick_mode:bool=False):
 
     # 保存结果
     save_results(results, "hyper_param", logger=logger)
-
-
-# 4. MCRL实验
-def run_mcrl_experiment(logger=None,quick_model:bool=False):
-    """运行MCRL完整实验
-
-    包括：
-    1. MCRL单独训练
-    2. 消融实验（三层对比学习）
-    """
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
-
-    logger.info("\n" + "="*70)
-    logger.info("===== 开始MCRL完整实验 =====")
-    logger.info("="*70 + "\n")
-
-    # 加载数据
-    train_loader, val_loader, test_loader = get_dataloader(
-        "./data",
-        category=config.category,
-        shuffle=True,
-        logger=logger,
-        quick_mode=quick_model,
-        num_workers=NUM_WORKS
-    )
-
-    results = []
-
-    # ========== 实验1: MCRL模型训练 ==========
-    logger.info("\n【实验1】训练MCRL模型")
-    logger.info("-" * 70)
-    mcrl_model = MCRL(config).to(config.device)
-    mcrl_model = train_mcrl_model(mcrl_model, train_loader, val_loader, "MCRL_Exp_MCRL_only", logger=logger)
-    mcrl_metrics = evaluate_model(mcrl_model, test_loader, "MCRL_only", logger=logger)
-    results.append(mcrl_metrics)
-
-    # 保存结果
-    save_results(results, "mcrl_experiment", logger=logger)
-
-    logger.info("\n" + "="*70)
-    logger.info("MCRL实验完成")
-    logger.info("="*70 + "\n")
 
 
 def get_pmat_ablation_model(ablation_module, config=None):
@@ -742,15 +665,13 @@ if __name__ == "__main__":
     if args.mode == 'quick':
         logger.info("快速测试模式 - 运行所有实验（抽样数据）")
         # run_baseline_experiment(logger=logger, quick_mode=True)
-        run_ablation_experiment(logger=logger, quick_mode=True)
-        run_hyper_param_experiment(logger=logger, quick_mode=True)
-        run_mcrl_experiment(logger=logger, quick_model=True)
+        run_pmat_recommendation_experiment(logger=logger, quick_mode=True)
+        run_mcrl_recommendation_experiment(logger=logger, quick_mode=True)
     elif args.mode == 'full':
         logger.info("完整实验模式 - 运行所有实验")
         # run_baseline_experiment(logger=logger, quick_mode=False)
-        run_ablation_experiment(logger=logger, quick_mode=False)
-        run_hyper_param_experiment(logger=logger, quick_mode=False)
-        run_mcrl_experiment(logger=logger, quick_model=False)
+        run_pmat_recommendation_experiment(logger=logger, quick_mode=False)
+        run_mcrl_recommendation_experiment(logger=logger, quick_mode=False)
     elif args.mode == 'baseline':
         logger.info("基线实验模式")
         run_baseline_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
@@ -760,9 +681,6 @@ if __name__ == "__main__":
     elif args.mode == 'hyper':
         logger.info("超参实验模式")
         run_hyper_param_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
-    elif args.mode == 'mcrl':
-        logger.info("MCRL实验模式（旧版，使用随机数据）")
-        run_mcrl_experiment(logger=logger, quick_model=(args.dataset=='mock'))
     elif args.mode == 'pmat_rec':
         logger.info("PMAT推荐模型实验模式（使用真实用户历史）")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
