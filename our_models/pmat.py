@@ -1,18 +1,24 @@
 """
-PMAT: Personalized Multimodal Adaptive Tokenizer
-个性化多模态自适应语义ID生成框架（优化版）
+PMAT: Personalized Multimodal Adaptive Tokenizer for Recommendation
+个性化多模态自适应推荐模型
+
+核心改造：将语义ID生成从"分类目标"转为"推荐任务的增强表征"
+- 主任务：用户-物品偏好匹配（推荐核心）
+- 辅助任务：语义ID生成（多任务学习，提升物品表征质量）
 
 创新点：
 1. 个性化模态注意力权重分配
 2. 兴趣感知的动态语义ID更新机制
-3. 理论保证的语义一致性约束
+3. 语义ID增强的用户-物品匹配
+4. 多任务学习框架（推荐+语义ID生成）
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List
 import math
+import numpy as np
 from base_model import AbstractTrainableModel
 from config import config
 from util import item_id_to_semantic_id
@@ -337,171 +343,434 @@ class SemanticIDQuantizer(nn.Module):
         return semantic_ids_logits, quantized_sum
 
 
-class PMAT(AbstractTrainableModel):
-    """完整的PMAT框架
+# ==================== 新增模块：用户兴趣编码器 ====================
 
-    整合所有模块，实现个性化多模态自适应语义ID生成
-    继承 AbstractTrainableModel 以使用统一训练框架
+class UserInterestEncoder(nn.Module):
+    """用户兴趣编码器
+
+    从用户历史交互序列中学习用户兴趣表征
+    支持多模态历史特征的融合
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_dim = config.hidden_dim
+
+        # 历史物品的多模态特征融合
+        self.history_text_proj = nn.Linear(config.text_dim, config.hidden_dim)
+        self.history_visual_proj = nn.Linear(config.visual_dim, config.hidden_dim)
+
+        # 多模态融合层
+        self.modal_fusion = nn.Sequential(
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+
+        # 序列编码器（Transformer）
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.hidden_dim,
+            nhead=config.attention_heads,
+            dim_feedforward=config.mlp_dim,
+            dropout=config.dropout,
+            batch_first=True
+        )
+        self.sequence_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+
+        # 位置编码
+        self.position_embedding = nn.Embedding(512, config.hidden_dim)  # 最大序列长度512
+
+        # 用户兴趣聚合（attention pooling）
+        self.interest_query = nn.Parameter(torch.randn(1, 1, config.hidden_dim))
+        self.interest_attention = nn.MultiheadAttention(
+            embed_dim=config.hidden_dim,
+            num_heads=config.attention_heads,
+            dropout=config.dropout,
+            batch_first=True
+        )
+
+    def forward(
+        self,
+        history_text_feat: torch.Tensor,
+        history_vision_feat: torch.Tensor,
+        history_len: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Args:
+            history_text_feat: (batch, max_seq_len, text_dim) 历史物品文本特征
+            history_vision_feat: (batch, max_seq_len, visual_dim) 历史物品视觉特征
+            history_len: (batch,) 每个用户的实际历史长度
+
+        Returns:
+            user_interest: (batch, hidden_dim) 用户兴趣表征
+        """
+        batch_size, max_seq_len, _ = history_text_feat.shape
+        device = history_text_feat.device
+
+        # 1. 投影多模态特征
+        text_proj = self.history_text_proj(history_text_feat)  # (batch, seq, hidden)
+        visual_proj = self.history_visual_proj(history_vision_feat)  # (batch, seq, hidden)
+
+        # 2. 融合多模态特征
+        combined = torch.cat([text_proj, visual_proj], dim=-1)  # (batch, seq, hidden*2)
+        fused_history = self.modal_fusion(combined)  # (batch, seq, hidden)
+
+        # 3. 添加位置编码
+        positions = torch.arange(max_seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        pos_emb = self.position_embedding(positions)
+        fused_history = fused_history + pos_emb
+
+        # 4. 创建attention mask（padding位置为True）
+        # history_len: 实际长度，padding在前面
+        mask = torch.arange(max_seq_len, device=device).unsqueeze(0) < (max_seq_len - history_len.unsqueeze(1))
+
+        # 5. Transformer编码
+        encoded_history = self.sequence_encoder(fused_history, src_key_padding_mask=mask)
+
+        # 6. Attention pooling获取用户兴趣
+        query = self.interest_query.expand(batch_size, -1, -1)  # (batch, 1, hidden)
+        user_interest, _ = self.interest_attention(
+            query, encoded_history, encoded_history,
+            key_padding_mask=mask
+        )
+        user_interest = user_interest.squeeze(1)  # (batch, hidden)
+
+        return user_interest
+
+
+# ==================== 新增模块：用户-物品匹配层 ====================
+
+class UserItemMatcher(nn.Module):
+    """用户-物品匹配层
+
+    计算用户对物品的偏好得分
+    支持语义ID增强的匹配
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_dim = config.hidden_dim
+
+        # 用户表征投影
+        self.user_proj = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.ReLU()
+        )
+
+        # 物品表征投影（融合多模态特征和语义ID嵌入）
+        self.item_proj = nn.Sequential(
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),  # 多模态特征 + 语义ID嵌入
+            nn.LayerNorm(config.hidden_dim),
+            nn.ReLU()
+        )
+
+        # 匹配网络（MLP）
+        self.match_mlp = nn.Sequential(
+            nn.Linear(config.hidden_dim * 3, config.hidden_dim),  # user + item + element-wise product
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(config.hidden_dim // 2, 1)
+        )
+
+    def forward(
+        self,
+        user_repr: torch.Tensor,
+        item_fused_feat: torch.Tensor,
+        item_semantic_emb: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Args:
+            user_repr: (batch, hidden_dim) 用户表征
+            item_fused_feat: (batch, hidden_dim) 或 (batch, num_items, hidden_dim) 物品融合特征
+            item_semantic_emb: (batch, hidden_dim) 或 (batch, num_items, hidden_dim) 物品语义ID嵌入
+
+        Returns:
+            scores: (batch,) 或 (batch, num_items) 偏好得分
+        """
+        # 用户投影
+        user_proj = self.user_proj(user_repr)  # (batch, hidden)
+
+        # 处理物品特征
+        if item_fused_feat.dim() == 2:
+            # 单个物品: (batch, hidden)
+            item_combined = torch.cat([item_fused_feat, item_semantic_emb], dim=-1)
+            item_proj = self.item_proj(item_combined)  # (batch, hidden)
+
+            # 计算匹配分数
+            interaction = user_proj * item_proj  # element-wise product
+            combined = torch.cat([user_proj, item_proj, interaction], dim=-1)
+            scores = self.match_mlp(combined).squeeze(-1)  # (batch,)
+        else:
+            # 多个物品: (batch, num_items, hidden)
+            batch_size, num_items, _ = item_fused_feat.shape
+            item_combined = torch.cat([item_fused_feat, item_semantic_emb], dim=-1)
+            item_proj = self.item_proj(item_combined)  # (batch, num_items, hidden)
+
+            # 扩展用户表征
+            user_proj_expanded = user_proj.unsqueeze(1).expand(-1, num_items, -1)
+
+            # 计算匹配分数
+            interaction = user_proj_expanded * item_proj
+            combined = torch.cat([user_proj_expanded, item_proj, interaction], dim=-1)
+            scores = self.match_mlp(combined).squeeze(-1)  # (batch, num_items)
+
+        return scores
+
+
+# ==================== 重构的PMAT推荐模型 ====================
+
+class PMAT(AbstractTrainableModel):
+    """PMAT: 个性化多模态自适应推荐模型
+
+    核心架构：
+    1. 用户兴趣编码器：从历史序列学习用户表征
+    2. 多模态编码器：编码物品的多模态特征
+    3. 个性化融合：根据用户偏好融合多模态特征
+    4. 语义ID量化器：生成物品的语义ID（辅助任务）
+    5. 用户-物品匹配层：计算偏好得分（主任务）
+
+    多任务学习：
+    - 主损失：BPR推荐损失
+    - 辅助损失：语义ID生成损失
     """
 
     def __init__(self, config, ablation_mode: Optional[str] = None, device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         super().__init__(device=device)
         self.config = config
         self.ablation_mode = ablation_mode
-        
-        # 核心模块
+
+        # ===== 用户侧模块 =====
+        # 用户兴趣编码器（新增）
+        self.user_interest_encoder = UserInterestEncoder(config)
+
+        # 用户模态偏好感知器（用于个性化融合）
         self.user_modal_attention = UserModalAttention(
             user_dim=config.hidden_dim,
             num_modalities=config.num_modalities,
             hidden_dim=config.hidden_dim
         )
-        
+
+        # ===== 物品侧模块 =====
         self.multimodal_encoder = MultiModalEncoder(config)
-        
         self.personalized_fusion = PersonalizedFusion(config.hidden_dim)
-        
-        self.dynamic_updater = DynamicIDUpdater(
-            hidden_dim=config.hidden_dim,
-            drift_threshold=config.drift_threshold
-        )
-        
+
+        # 语义ID量化器（辅助任务）
         self.semantic_quantizer = SemanticIDQuantizer(
             hidden_dim=config.hidden_dim,
             codebook_size=config.codebook_size,
             id_length=config.id_length
         )
-        
-        # 语义一致性约束
+
+        # ===== 匹配模块（新增）=====
+        self.user_item_matcher = UserItemMatcher(config)
+
+        # ===== 动态更新模块 =====
+        self.dynamic_updater = DynamicIDUpdater(
+            hidden_dim=config.hidden_dim,
+            drift_threshold=config.drift_threshold
+        )
+
+        # ===== 损失权重 =====
+        self.rec_loss_weight = getattr(config, 'rec_loss_weight', 1.0)  # 推荐损失权重
+        self.semantic_loss_weight = getattr(config, 'semantic_loss_weight', 0.1)  # 语义ID损失权重
         self.consistency_weight = config.consistency_weight
 
-    
-    def compute_loss(
+    def encode_item(
         self,
-        outputs: Dict[str, torch.Tensor],
-        targets: torch.Tensor,
-        previous_id_emb: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        """计算损失
-        
-        Args:
-            outputs: forward的输出
-            targets: 目标ID序列
-            previous_id_emb: 之前的ID嵌入（用于一致性约束）
-            
-        Returns:
-            losses: 各项损失
-        """
-        losses = {}
-        
-        # 1. ID生成损失（交叉熵）
-        semantic_ids = outputs['semantic_ids']
-        id_loss = F.cross_entropy(
-            semantic_ids.reshape(-1, self.config.codebook_size),
-            targets.reshape(-1)
-        )
-        losses['id_loss'] = id_loss
-        
-        # 2. 语义一致性损失
-        if previous_id_emb is not None:
-            consistency_loss = F.mse_loss(
-                outputs['quantized_emb'],
-                previous_id_emb
-            )
-            losses['consistency_loss'] = self.consistency_weight * consistency_loss
-        
-        # 总损失
-        losses['total_loss'] = sum(losses.values())
+        text_feat: torch.Tensor,
+        vision_feat: torch.Tensor,
+        user_interest: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """编码物品特征
 
-        return losses
-
-    def forward(
-        self,
-        batch_or_features,
-        user_history: Optional[torch.Tensor] = None,
-        short_history: Optional[torch.Tensor] = None,
-        long_history: Optional[torch.Tensor] = None,
-        previous_id_emb: Optional[torch.Tensor] = None
-    ):
-        """
         Args:
-            batch_or_features: batch字典或item_features字典
-            user_history: 用户历史交互序列（可选）
-            short_history: 短期历史（用于漂移检测）
-            long_history: 长期历史（用于漂移检测）
-            previous_id_emb: 之前的ID嵌入（用于动态更新）
+            text_feat: (batch, text_dim) 或 (batch, num_items, text_dim)
+            vision_feat: (batch, visual_dim) 或 (batch, num_items, visual_dim)
+            user_interest: (batch, hidden_dim) 用户兴趣（用于个性化融合）
 
         Returns:
-            如果输入是batch字典，返回logits (batch, id_length, codebook_size)
-            否则返回outputs字典
+            fused_feat: 融合后的物品特征
+            semantic_ids_logits: 语义ID的logits
+            quantized_emb: 量化后的嵌入
         """
-        # 兼容两种调用方式
-        if isinstance(batch_or_features, dict) and 'text_feat' in batch_or_features:
-            # 训练/评估模式：从batch中提取特征
-            batch = batch_or_features
-            batch_size = batch['text_feat'].size(0)
-
+        # 处理维度
+        if text_feat.dim() == 2:
+            # 单个物品
             item_features = {
-                'text': batch['text_feat'].float(),
-                'visual': batch['vision_feat'].float()
+                'text': text_feat.float(),
+                'visual': vision_feat.float()
             }
 
-            # 创建简单的用户历史（使用随机嵌入作为占位符）
-            # user_history shape: (batch, seq_len, user_dim)
-            user_history = torch.randn(batch_size, 10, self.config.hidden_dim, device=batch['text_feat'].device)
+            # 计算个性化模态权重
+            batch_size = user_interest.size(0)
+            if self.ablation_mode != 'no_personalization':
+                # 使用用户兴趣计算模态权重
+                full_modal_weights = self.user_modal_attention(user_interest.unsqueeze(1))
+                modal_weights = full_modal_weights[:, :2]  # text + visual
+                modal_weights = modal_weights / modal_weights.sum(dim=1, keepdim=True)
+            else:
+                modal_weights = torch.ones(batch_size, 2, device=text_feat.device) / 2
 
-            return_logits = True
+            # 编码和融合
+            encoded_features = self.multimodal_encoder(item_features)
+            fused_feat = self.personalized_fusion(encoded_features, modal_weights)
+
+            # 生成语义ID
+            semantic_ids_logits, quantized_emb = self.semantic_quantizer(fused_feat)
+
         else:
-            # 原始调用方式
-            item_features = batch_or_features
-            return_logits = False
-        # 1. 计算个性化模态权重
-        batch_size = user_history.size(0)
-        actual_num_modalities = len(item_features)  # 实际的模态数量
+            # 多个物品: (batch, num_items, dim)
+            batch_size, num_items, _ = text_feat.shape
 
-        if self.ablation_mode != 'no_personalization':
-            full_modal_weights = self.user_modal_attention(user_history)
-            # 只取前actual_num_modalities个权重并重新归一化
-            modal_weights = full_modal_weights[:, :actual_num_modalities]
-            modal_weights = modal_weights / modal_weights.sum(dim=1, keepdim=True)
-        else:
-            # 消融：使用均匀权重
-            modal_weights = torch.ones(
-                batch_size, actual_num_modalities,
-                device=user_history.device
-            ) / actual_num_modalities
+            # 展平处理
+            text_flat = text_feat.view(-1, text_feat.size(-1))
+            vision_flat = vision_feat.view(-1, vision_feat.size(-1))
 
-        # 2. 编码多模态特征
-        encoded_features = self.multimodal_encoder(item_features)
+            item_features = {
+                'text': text_flat.float(),
+                'visual': vision_flat.float()
+            }
 
-        # 3. 个性化融合
-        fused_features = self.personalized_fusion(encoded_features, modal_weights)
-        
-        # 4. 动态更新（如果提供了历史信息）
-        drift_score = None
-        if (short_history is not None and long_history is not None 
-            and self.ablation_mode != 'no_dynamic_update'):
-            drift_score = self.dynamic_updater.detect_drift(short_history, long_history)
-            
-            if previous_id_emb is not None:
-                fused_features = self.dynamic_updater.update(
-                    previous_id_emb, fused_features, drift_score
-                )
-        
-        # 5. 生成语义ID
-        semantic_ids, quantized_emb = self.semantic_quantizer(fused_features)
+            # 计算模态权重（扩展到所有物品）
+            if self.ablation_mode != 'no_personalization':
+                full_modal_weights = self.user_modal_attention(user_interest.unsqueeze(1))
+                modal_weights = full_modal_weights[:, :2]
+                modal_weights = modal_weights / modal_weights.sum(dim=1, keepdim=True)
+                # 扩展到所有物品
+                modal_weights = modal_weights.unsqueeze(1).expand(-1, num_items, -1).reshape(-1, 2)
+            else:
+                modal_weights = torch.ones(batch_size * num_items, 2, device=text_feat.device) / 2
 
-        # 如果是训练/评估模式，直接返回logits
-        if return_logits:
-            return semantic_ids  # (batch, id_length, codebook_size)
+            # 编码和融合
+            encoded_features = self.multimodal_encoder(item_features)
+            fused_feat = self.personalized_fusion(encoded_features, modal_weights)
+
+            # 生成语义ID
+            semantic_ids_logits, quantized_emb = self.semantic_quantizer(fused_feat)
+
+            # 恢复形状
+            fused_feat = fused_feat.view(batch_size, num_items, -1)
+            semantic_ids_logits = semantic_ids_logits.view(batch_size, num_items, self.config.id_length, -1)
+            quantized_emb = quantized_emb.view(batch_size, num_items, -1)
+
+        return fused_feat, semantic_ids_logits, quantized_emb
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """前向传播
+
+        Args:
+            batch: 包含以下键的字典（来自PMATDataset）
+                - history_text_feat: (batch, max_seq_len, text_dim)
+                - history_vision_feat: (batch, max_seq_len, visual_dim)
+                - history_len: (batch,)
+                - target_text_feat: (batch, text_dim)
+                - target_vision_feat: (batch, visual_dim)
+                - target_item: (batch,)
+                - neg_text_feat: (batch, num_neg, text_dim)
+                - neg_vision_feat: (batch, num_neg, visual_dim)
+                - negative_items: (batch, num_neg)
+
+        Returns:
+            outputs: 包含各种输出的字典
+        """
+        # 1. 编码用户兴趣（使用真实历史序列）
+        user_interest = self.user_interest_encoder(
+            batch['history_text_feat'],
+            batch['history_vision_feat'],
+            batch['history_len']
+        )  # (batch, hidden_dim)
+
+        # 2. 编码正样本（目标物品）
+        pos_fused_feat, pos_semantic_logits, pos_quantized_emb = self.encode_item(
+            batch['target_text_feat'],
+            batch['target_vision_feat'],
+            user_interest
+        )
+
+        # 3. 编码负样本
+        neg_fused_feat, neg_semantic_logits, neg_quantized_emb = self.encode_item(
+            batch['neg_text_feat'],
+            batch['neg_vision_feat'],
+            user_interest
+        )
+
+        # 4. 计算用户-物品匹配分数
+        # 正样本分数
+        pos_scores = self.user_item_matcher(
+            user_interest, pos_fused_feat, pos_quantized_emb
+        )  # (batch,)
+
+        # 负样本分数
+        neg_scores = self.user_item_matcher(
+            user_interest, neg_fused_feat, neg_quantized_emb
+        )  # (batch, num_neg)
 
         return {
-            'semantic_ids': semantic_ids,
-            'modal_weights': modal_weights,
-            'drift_score': drift_score,
-            'quantized_emb': quantized_emb,
-            'fused_features': fused_features,
-            'modal_features': encoded_features  # 添加编码后的模态特征
+            'user_interest': user_interest,
+            'pos_scores': pos_scores,
+            'neg_scores': neg_scores,
+            'pos_fused_feat': pos_fused_feat,
+            'neg_fused_feat': neg_fused_feat,
+            'pos_semantic_logits': pos_semantic_logits,
+            'neg_semantic_logits': neg_semantic_logits,
+            'pos_quantized_emb': pos_quantized_emb,
+            'neg_quantized_emb': neg_quantized_emb,
+            'target_item': batch['target_item'],
+            'negative_items': batch['negative_items']
         }
+
+    def compute_loss(self, outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """计算多任务损失
+
+        主损失：BPR推荐损失
+        辅助损失：语义ID生成损失
+
+        Args:
+            outputs: forward的输出
+
+        Returns:
+            losses: 各项损失的字典
+        """
+        losses = {}
+
+        # ===== 1. BPR推荐损失（主任务）=====
+        pos_scores = outputs['pos_scores']  # (batch,)
+        neg_scores = outputs['neg_scores']  # (batch, num_neg)
+
+        # BPR loss: -log(sigmoid(pos - neg))
+        # 对每个负样本计算
+        pos_scores_expanded = pos_scores.unsqueeze(1)  # (batch, 1)
+        bpr_loss = -torch.log(torch.sigmoid(pos_scores_expanded - neg_scores) + 1e-8)
+        bpr_loss = bpr_loss.mean()
+        losses['bpr_loss'] = self.rec_loss_weight * bpr_loss
+
+        # ===== 2. 语义ID生成损失（辅助任务）=====
+        # 将item_id转换为语义ID目标
+        target_items = outputs['target_item']
+        target_semantic_ids = item_id_to_semantic_id(
+            target_items,
+            self.config.id_length,
+            self.config.codebook_size
+        ).to(target_items.device)
+
+        # 正样本的语义ID损失
+        pos_semantic_logits = outputs['pos_semantic_logits']  # (batch, id_length, codebook_size)
+        semantic_loss = F.cross_entropy(
+            pos_semantic_logits.reshape(-1, self.config.codebook_size),
+            target_semantic_ids.reshape(-1)
+        )
+        losses['semantic_loss'] = self.semantic_loss_weight * semantic_loss
+
+        # ===== 3. 总损失 =====
+        losses['total_loss'] = losses['bpr_loss'] + losses['semantic_loss']
+
+        return losses
 
     # ==================== AbstractTrainableModel 抽象方法实现 ====================
 
@@ -526,10 +795,10 @@ class PMAT(AbstractTrainableModel):
 
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
         """
-        单batch训练逻辑
+        单batch训练逻辑（推荐任务）
 
         Args:
-            batch: 训练批次数据（字典格式）
+            batch: 训练批次数据（来自PMATDataset）
             stage_id: 阶段ID
             stage_kwargs: 该阶段的自定义参数
 
@@ -537,82 +806,217 @@ class PMAT(AbstractTrainableModel):
             (batch_loss, batch_metrics)
         """
         # 前向传播
-        logits = self.forward(batch)
+        outputs = self.forward(batch)
 
-        # 构造标签（将item_id转换为语义ID序列）
-        target = item_id_to_semantic_id(
-            batch["item_id"],
-            self.config.id_length,
-            self.config.codebook_size
-        ).to(self.device)
+        # 计算多任务损失
+        losses = self.compute_loss(outputs)
 
-        # 计算损失
-        criterion = nn.CrossEntropyLoss()
-        loss = criterion(logits.reshape(-1, self.config.codebook_size), target.reshape(-1))
+        # 计算训练指标
+        pos_scores = outputs['pos_scores']
+        neg_scores = outputs['neg_scores']
 
-        # 计算准确率
-        predictions = torch.argmax(logits, dim=-1)
-        correct = (predictions == target).float().sum()
-        accuracy = correct / target.numel()
+        # 计算AUC近似（正样本分数 > 负样本分数的比例）
+        pos_expanded = pos_scores.unsqueeze(1)
+        auc_approx = (pos_expanded > neg_scores).float().mean().item()
 
-        metrics = {'accuracy': accuracy.item()}
+        metrics = {
+            'bpr_loss': losses['bpr_loss'].item(),
+            'semantic_loss': losses['semantic_loss'].item(),
+            'auc_approx': auc_approx
+        }
 
-        return loss, metrics
+        return losses['total_loss'], metrics
 
     def _validate_one_epoch(self, val_dataloader: torch.utils.data.DataLoader, stage_id: int,
                            stage_kwargs: Dict) -> Dict:
-        """单轮验证逻辑"""
+        """单轮验证逻辑（使用推荐指标）"""
         self.eval()
-        total_loss = 0.0
-        total_correct = 0
-        total_samples = 0
 
-        criterion = nn.CrossEntropyLoss()
+        total_loss = 0.0
+        total_bpr_loss = 0.0
+        total_semantic_loss = 0.0
+        all_pos_scores = []
+        all_neg_scores = []
 
         with torch.no_grad():
             for batch in val_dataloader:
-                # 前向传播
-                logits = self.forward(batch)
+                # 移动数据到设备
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()}
 
-                # 构造标签
-                target = item_id_to_semantic_id(
-                    batch["item_id"],
-                    self.config.id_length,
-                    self.config.codebook_size
-                ).to(self.device)
+                # 前向传播
+                outputs = self.forward(batch)
 
                 # 计算损失
-                loss = criterion(logits.reshape(-1, self.config.codebook_size), target.reshape(-1))
-                total_loss += loss.item()
+                losses = self.compute_loss(outputs)
+                total_loss += losses['total_loss'].item()
+                total_bpr_loss += losses['bpr_loss'].item()
+                total_semantic_loss += losses['semantic_loss'].item()
 
-                # 计算准确率
-                predictions = torch.argmax(logits, dim=-1)
-                correct = (predictions == target).float().sum()
-                total_correct += correct.item()
-                total_samples += target.numel()
+                # 收集分数用于计算指标
+                all_pos_scores.append(outputs['pos_scores'].cpu())
+                all_neg_scores.append(outputs['neg_scores'].cpu())
 
-        avg_loss = total_loss / len(val_dataloader)
-        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+        # 计算平均损失
+        num_batches = len(val_dataloader)
+        avg_loss = total_loss / num_batches
+        avg_bpr_loss = total_bpr_loss / num_batches
+        avg_semantic_loss = total_semantic_loss / num_batches
 
-        return {'loss': avg_loss, 'accuracy': accuracy}
+        # 计算推荐指标
+        all_pos_scores = torch.cat(all_pos_scores, dim=0)
+        all_neg_scores = torch.cat(all_neg_scores, dim=0)
 
-    # 移除旧的 train_step 方法，现在使用 AbstractTrainableModel 的统一训练框架
+        metrics = self._compute_recommendation_metrics(all_pos_scores, all_neg_scores)
+        metrics['loss'] = avg_loss
+        metrics['bpr_loss'] = avg_bpr_loss
+        metrics['semantic_loss'] = avg_semantic_loss
 
-    def predict(self, batch, top_k=10):
-        """执行预测
-        
+        return metrics
+
+    def _compute_recommendation_metrics(
+        self,
+        pos_scores: torch.Tensor,
+        neg_scores: torch.Tensor,
+        k_list: List[int] = [5, 10, 20]
+    ) -> Dict[str, float]:
+        """计算推荐指标
+
         Args:
-            batch: 批次数据
-            top_k: 返回top-k预测结果
-            
+            pos_scores: (num_samples,) 正样本分数
+            neg_scores: (num_samples, num_neg) 负样本分数
+            k_list: 要计算的K值列表
+
         Returns:
-            predictions: 预测结果
+            metrics: 包含各种推荐指标的字典
         """
+        metrics = {}
+        num_samples = pos_scores.size(0)
+        num_neg = neg_scores.size(1)
+
+        # 将正样本分数和负样本分数合并，正样本在第一位
+        # all_scores: (num_samples, 1 + num_neg)
+        all_scores = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
+
+        # 计算排名（正样本的排名，1-based）
+        # 排名 = 比正样本分数高的负样本数量 + 1
+        ranks = (neg_scores > pos_scores.unsqueeze(1)).sum(dim=1) + 1  # (num_samples,)
+
+        # Hit Rate / Recall@K
+        for k in k_list:
+            hit_at_k = (ranks <= k).float().mean().item()
+            metrics[f'HR@{k}'] = hit_at_k
+            metrics[f'Recall@{k}'] = hit_at_k  # 在这种设置下，HR和Recall相同
+
+        # NDCG@K
+        for k in k_list:
+            # DCG = 1 / log2(rank + 1) if rank <= k else 0
+            dcg = torch.where(
+                ranks <= k,
+                1.0 / torch.log2(ranks.float() + 1),
+                torch.zeros_like(ranks.float())
+            )
+            # IDCG = 1 / log2(2) = 1 (因为只有一个正样本，理想排名是1)
+            idcg = 1.0
+            ndcg = (dcg / idcg).mean().item()
+            metrics[f'NDCG@{k}'] = ndcg
+
+        # MRR (Mean Reciprocal Rank)
+        mrr = (1.0 / ranks.float()).mean().item()
+        metrics['MRR'] = mrr
+
+        # AUC近似
+        auc = (pos_scores.unsqueeze(1) > neg_scores).float().mean().item()
+        metrics['AUC'] = auc
+
+        return metrics
+
+    def predict(self, batch: Dict[str, torch.Tensor], all_item_features: Optional[Dict] = None) -> torch.Tensor:
+        """执行推荐预测
+
+        Args:
+            batch: 包含用户历史的批次数据
+            all_item_features: 所有物品的特征（用于全量排序）
+
+        Returns:
+            scores: 预测分数
+        """
+        self.eval()
         with torch.no_grad():
-            logits = self(batch)
-            # 获取top-k预测
-            _, predictions = torch.topk(logits, k=top_k, dim=-1)
-            return predictions
+            # 编码用户兴趣
+            user_interest = self.user_interest_encoder(
+                batch['history_text_feat'],
+                batch['history_vision_feat'],
+                batch['history_len']
+            )
+
+            if all_item_features is not None:
+                # 全量物品排序
+                all_text_feat = all_item_features['text']
+                all_vision_feat = all_item_features['visual']
+
+                # 编码所有物品
+                fused_feat, _, quantized_emb = self.encode_item(
+                    all_text_feat.unsqueeze(0).expand(user_interest.size(0), -1, -1),
+                    all_vision_feat.unsqueeze(0).expand(user_interest.size(0), -1, -1),
+                    user_interest
+                )
+
+                # 计算分数
+                scores = self.user_item_matcher(user_interest, fused_feat, quantized_emb)
+            else:
+                # 只对batch中的目标物品计算分数
+                outputs = self.forward(batch)
+                scores = outputs['pos_scores']
+
+            return scores
+
+    def get_user_embedding(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """获取用户嵌入（用于召回）
+
+        Args:
+            batch: 包含用户历史的批次数据
+
+        Returns:
+            user_embedding: (batch, hidden_dim)
+        """
+        self.eval()
+        with torch.no_grad():
+            user_interest = self.user_interest_encoder(
+                batch['history_text_feat'],
+                batch['history_vision_feat'],
+                batch['history_len']
+            )
+            return user_interest
+
+    def get_item_embedding(self, text_feat: torch.Tensor, vision_feat: torch.Tensor) -> torch.Tensor:
+        """获取物品嵌入（用于召回）
+
+        Args:
+            text_feat: (num_items, text_dim)
+            vision_feat: (num_items, visual_dim)
+
+        Returns:
+            item_embedding: (num_items, hidden_dim)
+        """
+        self.eval()
+        with torch.no_grad():
+            # 使用均匀的模态权重（因为没有用户信息）
+            item_features = {
+                'text': text_feat.float(),
+                'visual': vision_feat.float()
+            }
+
+            num_items = text_feat.size(0)
+            modal_weights = torch.ones(num_items, 2, device=text_feat.device) / 2
+
+            encoded_features = self.multimodal_encoder(item_features)
+            fused_feat = self.personalized_fusion(encoded_features, modal_weights)
+            _, quantized_emb = self.semantic_quantizer(fused_feat)
+
+            # 返回融合特征和语义ID嵌入的拼接
+            item_embedding = torch.cat([fused_feat, quantized_emb], dim=-1)
+            return item_embedding
 
 
 def get_pmat_ablation_model(ablation_module: str, config=None):

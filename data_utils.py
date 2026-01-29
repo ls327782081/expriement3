@@ -1311,3 +1311,306 @@ def pctx_collate_fn(batch):
         'attention_mask': torch.stack(padded_attention_mask),
         'labels': torch.stack(padded_labels)
     }
+
+
+# ==================== PMAT 专用数据集和 collate 函数 ====================
+
+class PMATDataset(Dataset):
+    """
+    PMAT推荐模型专用数据集
+
+    支持：
+    1. 用户历史序列（用于用户兴趣建模）
+    2. 目标物品（正样本）
+    3. 负样本采样（用于BPR损失）
+    """
+
+    def __init__(
+        self,
+        data: Dict[str, Any],
+        sequence_key: str,
+        max_history_len: int = 50,
+        num_negative_samples: int = 4,
+        logger: logging.Logger = None
+    ):
+        """
+        Args:
+            data: 包含所有数据的字典
+            sequence_key: 序列数据的键名（train_sequences/val_sequences/test_sequences）
+            max_history_len: 最大历史长度
+            num_negative_samples: 每个正样本对应的负样本数量
+            logger: 日志记录器
+        """
+        self.logger = logger or logging.getLogger(__name__)
+        self.max_history_len = max_history_len
+        self.num_negative_samples = num_negative_samples
+
+        # 获取序列数据
+        self.sequences = data.get(sequence_key, {})
+
+        # 获取特征
+        self.text_features = data.get('text_features')
+        self.image_features = data.get('image_features')
+        self.num_items = data.get('num_items', self.text_features.shape[0])
+
+        # 构建样本列表：每个用户的每个位置都是一个样本
+        # 格式：(user_id, history_items, target_item)
+        self.samples = []
+        self.user_item_set = {}  # 用于负采样时排除用户已交互的物品
+
+        for user_id, seq in self.sequences.items():
+            item_indices = seq['item_indices']
+            self.user_item_set[user_id] = set(item_indices)
+
+            # 每个位置都可以作为一个训练样本
+            # 前面的物品作为历史，当前物品作为目标
+            for idx in range(1, len(item_indices)):  # 从1开始，确保至少有1个历史
+                history = item_indices[:idx]
+                target = item_indices[idx]
+                self.samples.append({
+                    'user_id': user_id,
+                    'history': history,
+                    'target': target
+                })
+
+        self.logger.info(f"PMATDataset initialized: {len(self.samples)} samples from {len(self.sequences)} users")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _sample_negatives(self, user_id: int, num_samples: int) -> List[int]:
+        """采样负样本（用户未交互过的物品）"""
+        user_items = self.user_item_set.get(user_id, set())
+        negatives = []
+
+        while len(negatives) < num_samples:
+            # 随机采样，排除padding item 0
+            neg_item = np.random.randint(1, self.num_items)
+            if neg_item not in user_items and neg_item not in negatives:
+                negatives.append(neg_item)
+
+        return negatives
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        user_id = sample['user_id']
+        history = sample['history']
+        target = sample['target']
+
+        # 截断或填充历史到固定长度
+        if len(history) > self.max_history_len:
+            history = history[-self.max_history_len:]  # 取最近的历史
+
+        history_len = len(history)
+
+        # 获取历史物品的特征
+        history_text_feat = self.text_features[history]
+        history_vision_feat = self.image_features[history]
+
+        # 获取目标物品的特征
+        target_text_feat = self.text_features[target]
+        target_vision_feat = self.image_features[target]
+
+        # 采样负样本
+        negative_items = self._sample_negatives(user_id, self.num_negative_samples)
+        neg_text_feat = self.text_features[negative_items]
+        neg_vision_feat = self.image_features[negative_items]
+
+        return {
+            'user_id': torch.tensor(user_id, dtype=torch.long),
+            'history_items': torch.tensor(history, dtype=torch.long),
+            'history_len': torch.tensor(history_len, dtype=torch.long),
+            'history_text_feat': history_text_feat,
+            'history_vision_feat': history_vision_feat,
+            'target_item': torch.tensor(target, dtype=torch.long),
+            'target_text_feat': target_text_feat,
+            'target_vision_feat': target_vision_feat,
+            'negative_items': torch.tensor(negative_items, dtype=torch.long),
+            'neg_text_feat': neg_text_feat,
+            'neg_vision_feat': neg_vision_feat,
+        }
+
+
+def pmat_collate_fn(batch):
+    """
+    PMAT数据集的collate函数
+    处理变长的用户历史序列，进行padding
+    """
+    user_ids = []
+    history_items_list = []
+    history_lens = []
+    history_text_feat_list = []
+    history_vision_feat_list = []
+    target_items = []
+    target_text_feat_list = []
+    target_vision_feat_list = []
+    negative_items_list = []
+    neg_text_feat_list = []
+    neg_vision_feat_list = []
+
+    # 找到最大历史长度
+    max_history_len = max(item['history_len'].item() for item in batch)
+
+    for item in batch:
+        user_ids.append(item['user_id'])
+        history_lens.append(item['history_len'])
+        target_items.append(item['target_item'])
+        target_text_feat_list.append(item['target_text_feat'])
+        target_vision_feat_list.append(item['target_vision_feat'])
+        negative_items_list.append(item['negative_items'])
+        neg_text_feat_list.append(item['neg_text_feat'])
+        neg_vision_feat_list.append(item['neg_vision_feat'])
+
+        # Padding历史序列
+        history_len = item['history_len'].item()
+        pad_len = max_history_len - history_len
+
+        # Padding history items
+        history_items = item['history_items']
+        if pad_len > 0:
+            history_items = torch.cat([
+                torch.zeros(pad_len, dtype=torch.long),  # 前面padding
+                history_items
+            ])
+        history_items_list.append(history_items)
+
+        # Padding history features
+        history_text = item['history_text_feat']
+        history_vision = item['history_vision_feat']
+
+        if pad_len > 0:
+            text_pad = torch.zeros(pad_len, history_text.shape[-1])
+            vision_pad = torch.zeros(pad_len, history_vision.shape[-1])
+            history_text = torch.cat([text_pad, history_text], dim=0)
+            history_vision = torch.cat([vision_pad, history_vision], dim=0)
+
+        history_text_feat_list.append(history_text)
+        history_vision_feat_list.append(history_vision)
+
+    return {
+        'user_id': torch.stack(user_ids),
+        'history_items': torch.stack(history_items_list),
+        'history_len': torch.stack(history_lens),
+        'history_text_feat': torch.stack(history_text_feat_list),
+        'history_vision_feat': torch.stack(history_vision_feat_list),
+        'target_item': torch.stack(target_items),
+        'target_text_feat': torch.stack(target_text_feat_list),
+        'target_vision_feat': torch.stack(target_vision_feat_list),
+        'negative_items': torch.stack(negative_items_list),
+        'neg_text_feat': torch.stack(neg_text_feat_list),
+        'neg_vision_feat': torch.stack(neg_vision_feat_list),
+    }
+
+
+def get_pmat_dataloader(
+    cache_dir: str,
+    category: str = "Video_Games",
+    batch_size: int = 32,
+    max_history_len: int = 50,
+    num_negative_samples: int = 4,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    quick_mode: bool = False,
+    logger: logging.Logger = None
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
+    """
+    为PMAT推荐模型创建专用的数据加载器
+
+    Args:
+        cache_dir: 缓存目录
+        category: 数据集类别
+        batch_size: 批次大小
+        max_history_len: 最大历史长度
+        num_negative_samples: 负样本数量
+        shuffle: 是否打乱
+        num_workers: 工作进程数
+        quick_mode: 快速模式
+        logger: 日志记录器
+
+    Returns:
+        (train_loader, val_loader, test_loader)
+    """
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("=" * 60)
+    logger.info("Creating PMAT Recommendation DataLoaders")
+    logger.info("=" * 60)
+
+    # 加载数据
+    data = None
+    cache_suffix = "_quick" if quick_mode else ""
+    cache_file_name = f"{cache_dir}/{category}{cache_suffix}.pkl"
+
+    if os.path.exists(cache_file_name):
+        logger.info(f"Loading cached data from {cache_file_name}")
+        with open(cache_file_name, "rb") as f:
+            data = pickle.load(f)
+
+    if data is None:
+        processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)
+        data = processor.load_dataset_for_experiment(
+            test_ratio=0.2,
+            val_ratio=0.1,
+            add_padding_item=True
+        )
+        with open(cache_file_name, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # 更新config
+    config.item_vocab_size = data['num_items']
+    config.user_vocab_size = data['num_users']
+
+    # 创建数据集
+    train_dataset = PMATDataset(
+        data, "train_sequences",
+        max_history_len=max_history_len,
+        num_negative_samples=num_negative_samples,
+        logger=logger
+    )
+    val_dataset = PMATDataset(
+        data, "val_sequences",
+        max_history_len=max_history_len,
+        num_negative_samples=num_negative_samples,
+        logger=logger
+    )
+    test_dataset = PMATDataset(
+        data, "test_sequences",
+        max_history_len=max_history_len,
+        num_negative_samples=num_negative_samples,
+        logger=logger
+    )
+
+    # 创建DataLoader
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=pmat_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=pmat_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=pmat_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}, Test samples: {len(test_dataset)}")
+    logger.info("PMAT dataloaders created successfully!")
+    logger.info("=" * 60)
+
+    return train_loader, val_loader, test_loader

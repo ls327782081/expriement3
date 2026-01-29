@@ -28,13 +28,17 @@
 
 ### 核心创新
 
-1. **PMAT**: 个性化语义ID生成
+1. **PMAT**: 个性化语义ID生成 → **真正的推荐模型**
    - 个性化模态注意力权重分配
    - 兴趣感知的动态ID更新机制
+   - **多任务学习**: BPR推荐损失（主任务）+ 语义ID生成（辅助任务）
+   - **真实用户历史建模**: 使用Transformer编码用户交互序列
 
-2. **MCRL**: ID表征空间优化
+2. **MCRL**: ID表征空间优化 → **真正的推荐模型**
    - 三层对比学习（用户偏好、模态内、模态间）
    - 多任务协同优化
+   - **多任务学习**: BPR推荐损失（主任务）+ 对比学习（辅助任务）
+   - **真实用户历史建模**: 使用Transformer编码用户交互序列
 
 ---
 
@@ -123,6 +127,12 @@ python main.py --mode baseline --epochs 10
 # 消融实验
 python main.py --mode ablation --epochs 10
 
+# ⭐ PMAT推荐模型实验（使用真实用户历史）
+python main.py --mode pmat_rec --epochs 10
+
+# ⭐ MCRL推荐模型实验（使用真实用户历史）
+python main.py --mode mcrl_rec --epochs 10
+
 # 效率分析
 python main.py --mode efficiency
 
@@ -197,6 +207,26 @@ metrics = pmat.evaluate(val_dataloader)
 ---
 
 ## 更新日志
+
+### 2026-01-29 - PMAT/MCRL 改造为真正的推荐模型 ✅
+- ✅ **PMAT 模型改造**
+  - 新增 `UserInterestEncoder`: 使用Transformer编码真实用户历史序列
+  - 新增 `UserItemMatcher`: 计算用户-物品偏好得分
+  - 多任务学习: BPR推荐损失（主任务）+ 语义ID生成损失（辅助任务）
+  - 推荐指标: HR@K, NDCG@K, MRR, AUC
+- ✅ **MCRL 模型改造**
+  - 新增 `MCRLUserEncoder`: 使用Transformer编码真实用户历史序列
+  - 新增 `MCRLItemEncoder`: 从多模态特征编码物品表征
+  - 新增 `MCRLMatcher`: 计算用户-物品偏好得分
+  - 多任务学习: BPR推荐损失（主任务）+ 对比学习损失（辅助任务）
+- ✅ **数据加载器**
+  - 新增 `PMATDataset`: 支持用户历史序列、目标物品、负样本采样
+  - 新增 `get_pmat_dataloader`: PMAT/MCRL专用数据加载器
+- ✅ **实验集成**
+  - 新增 `pmat_rec` 模式: PMAT推荐模型实验
+  - 新增 `mcrl_rec` 模式: MCRL推荐模型实验
+  - 独立运行脚本: `run_pmat_rec.py`, `run_mcrl_rec.py`
+  - 测试脚本: `test_pmat_model.py`, `test_mcrl_model.py`
 
 ### 2026-01-26 - 项目整理与实验完善 ✅
 - ✅ **实验框架完善**

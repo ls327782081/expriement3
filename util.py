@@ -1,17 +1,15 @@
 import os
 import json
 import logging
+import pickle
 from typing import Optional, Dict, Any, Tuple
 
+import numpy as np
 import pandas as pd
 import torch
-import os
-import logging
-from config import config
-import pickle
-import numpy as np
 from sklearn.preprocessing import LabelEncoder
-import json
+
+from config import config
 
 
 def item_id_to_semantic_id(item_ids, id_length, codebook_size, seed=42):
@@ -38,30 +36,6 @@ def item_id_to_semantic_id(item_ids, id_length, codebook_size, seed=42):
             semantic_ids[i, j] = torch.randint(0, codebook_size, (1,))
     
     return semantic_ids
-
-
-def semantic_id_to_item_id(semantic_ids, num_items, seed=42):
-    """
-    Convert semantic ID sequences back to item IDs
-    Args:
-        semantic_ids: Semantic ID sequence (batch_size, id_length)
-        num_items: Number of items
-        seed: Random seed
-    Returns:
-        item_ids: Item ID tensor
-    """
-    torch.manual_seed(seed)
-    batch_size = semantic_ids.size(0)
-    item_ids = torch.zeros(batch_size, dtype=torch.long)
-    
-    for i in range(batch_size):
-        # Simple mapping: convert semantic ID sequence to a number
-        id_sum = 0
-        for j in range(semantic_ids.size(1)):
-            id_sum += semantic_ids[i, j].item() * (j + 1)  # Weight by position
-        item_ids[i] = id_sum % num_items
-    
-    return item_ids
 
 
 def save_checkpoint(model, optimizer, epoch, loss, experiment_name, is_best=False, logger=None):

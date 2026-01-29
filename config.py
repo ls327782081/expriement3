@@ -48,12 +48,17 @@ class BaseConfig:
     short_history_len: int = 10  # 短期历史长度
     long_history_len: int = 50   # 长期历史长度
 
+    # PMAT推荐模型配置（多任务学习）
+    rec_loss_weight: float = 1.0  # 推荐损失（BPR）权重
+    semantic_loss_weight: float = 0.1  # 语义ID生成损失权重
+    max_history_len: int = 50  # 用户历史序列最大长度
+    num_negative_samples: int = 4  # 每个正样本对应的负样本数量
+
     # MCRL特定配置
     mcrl_alpha: float = 1.0  # 模态内对比权重
     mcrl_beta: float = 0.5   # 模态间对比权重
     mcrl_temperature: float = 0.07  # 对比学习温度
     num_positive_samples: int = 5   # 正样本数量
-    num_negative_samples: int = 20  # 负样本数量
 
     # 联合训练配置
     pmat_loss_weight: float = 1.0  # PMAT损失权重
@@ -100,80 +105,6 @@ class BaseConfig:
     top_k_list: List[int] = field(default_factory=lambda: [5, 10, 20, 50])
     eval_top_k: int = 10
 
-    # 数据集配置
-    datasets: Dict = field(default_factory=lambda: {
-        "Amazon-Beauty": {
-            "path": "./data/amazon_beauty",
-            "modalities": ["text", "visual"],
-            "num_items": 12101,
-            "num_users": 22363
-        },
-        "MM-Rec": {
-            "path": "./data/mm_rec",
-            "modalities": ["text", "visual", "audio"],
-            "num_items": 8000,
-            "num_users": 15000
-        },
-        "MovieLens-25M": {
-            "path": "./data/movielens_25m",
-            "modalities": ["text", "visual"],
-            "num_items": 62138,
-            "num_users": 162541
-        }
-    })
-
-    # 当前使用的数据集
-    current_dataset: str = "Amazon-Beauty"
-
-
-@dataclass
-class ExperimentConfig(BaseConfig):
-    """实验专用配置"""
-
-    # 创新点1实验配置
-    exp1_name: str = "Innovation1_PMAT"
-    exp1_baselines: List[str] = field(default_factory=lambda: [
-        "FusID", "MMQ", "PRISM", "AMMRM"
-    ])
-
-    # 创新点2实验配置
-    exp2_name: str = "Innovation2_MCRL"
-    exp2_baselines: List[str] = field(default_factory=lambda: [
-        "LETTER", "CoFiRec"
-    ])
-
-    # 整体系统实验配置
-    full_system_name: str = "FullSystem_PMAT_MCRL"
-    full_system_baselines: List[str] = field(default_factory=lambda: [
-        "Pctx", "MMQ", "FusID", "PRISM", "AMMRM", "CoFiRec", "LETTER"
-    ])
-
-    # ID质量评估指标
-    id_quality_metrics: List[str] = field(default_factory=lambda: [
-        "id_uniqueness",           # ID唯一性
-        "semantic_consistency",    # 语义一致性
-        "personalization_discrimination"  # 个性化区分度
-    ])
-
-    # 推荐性能指标
-    recommendation_metrics: List[str] = field(default_factory=lambda: [
-        "recall",      # 召回率
-        "ndcg",        # NDCG
-        "mrr",         # MRR
-        "hit_rate",    # 命中率
-        "coverage",    # 覆盖率
-        "diversity"    # 多样性
-    ])
-
-    # 效率指标
-    efficiency_metrics: List[str] = field(default_factory=lambda: [
-        "id_generation_time",   # ID生成时间
-        "retrieval_latency",    # 检索延迟
-        "memory_usage",         # 内存占用
-        "throughput"            # 吞吐量
-    ])
-
 
 # 实例化配置
 config = BaseConfig()
-exp_config = ExperimentConfig()

@@ -15,7 +15,7 @@ from collections import defaultdict
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
-from data_utils import get_dataloader, get_pctx_dataloader
+from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader
 from baseline_models import PctxAligned, PRISM, DGMRec
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
@@ -355,15 +355,132 @@ def get_pmat_ablation_model(ablation_module, config=None):
     return PMAT(config, ablation_module=ablation_module)
 
 
+# ==================== 新增：PMAT/MCRL 推荐模型实验 ====================
+
+def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
+    """运行PMAT推荐模型实验（使用真实用户历史）
+
+    这是改造后的PMAT模型，使用：
+    - 真实用户历史序列（替代随机占位符）
+    - BPR推荐损失（主任务）+ 语义ID损失（辅助任务）
+    - 推荐指标：HR@K, NDCG@K, MRR, AUC
+    """
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("\n" + "="*70)
+    logger.info("===== PMAT推荐模型实验（真实用户历史） =====")
+    logger.info("="*70 + "\n")
+
+    # 使用PMAT专用数据加载器
+    logger.info("加载数据（使用get_pmat_dataloader）...")
+    train_loader, val_loader, test_loader = get_pmat_dataloader(
+        cache_dir="./data",
+        category=config.category,
+        batch_size=config.batch_size,
+        max_history_len=config.max_history_len,
+        num_negative_samples=config.num_negative_samples,
+        shuffle=True,
+        quick_mode=quick_mode,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
+
+    # 创建模型
+    logger.info("创建PMAT推荐模型...")
+    model = PMAT(config).to(config.device)
+
+    # 训练
+    logger.info("开始训练...")
+    model = train_model(model, train_loader, val_loader, "PMAT_Rec", logger=logger)
+
+    # 评估
+    logger.info("评估模型...")
+    model.eval()
+    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+
+    logger.info("\nPMAT推荐模型评估结果:")
+    for k, v in metrics.items():
+        logger.info(f"  {k}: {v:.4f}")
+
+    # 保存结果
+    results = [{"model": "PMAT_Rec", **metrics}]
+    save_results(results, "pmat_rec_experiment", logger=logger)
+
+    logger.info("\n" + "="*70)
+    logger.info("PMAT推荐模型实验完成")
+    logger.info("="*70 + "\n")
+
+    return metrics
+
+
+def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
+    """运行MCRL推荐模型实验（使用真实用户历史）
+
+    这是改造后的MCRL模型，使用：
+    - 真实用户历史序列（替代随机占位符）
+    - BPR推荐损失（主任务）+ 对比学习损失（辅助任务）
+    - 推荐指标：HR@K, NDCG@K, MRR, AUC
+    """
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    logger.info("\n" + "="*70)
+    logger.info("===== MCRL推荐模型实验（真实用户历史） =====")
+    logger.info("="*70 + "\n")
+
+    # 使用PMAT专用数据加载器（MCRL复用相同格式）
+    logger.info("加载数据（使用get_pmat_dataloader）...")
+    train_loader, val_loader, test_loader = get_pmat_dataloader(
+        cache_dir="./data",
+        category=config.category,
+        batch_size=config.batch_size,
+        max_history_len=config.max_history_len,
+        num_negative_samples=config.num_negative_samples,
+        shuffle=True,
+        quick_mode=quick_mode,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
+
+    # 创建模型
+    logger.info("创建MCRL推荐模型...")
+    model = MCRL(config).to(config.device)
+
+    # 训练
+    logger.info("开始训练...")
+    model = train_model(model, train_loader, val_loader, "MCRL_Rec", logger=logger)
+
+    # 评估
+    logger.info("评估模型...")
+    model.eval()
+    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+
+    logger.info("\nMCRL推荐模型评估结果:")
+    for k, v in metrics.items():
+        logger.info(f"  {k}: {v:.4f}")
+
+    # 保存结果
+    results = [{"model": "MCRL_Rec", **metrics}]
+    save_results(results, "mcrl_rec_experiment", logger=logger)
+
+    logger.info("\n" + "="*70)
+    logger.info("MCRL推荐模型实验完成")
+    logger.info("="*70 + "\n")
+
+    return metrics
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='PMAT & MCRL 实验')
-    
+
     # 模式选择
     parser.add_argument('--mode', type=str, default='quick',
                         choices=['quick', 'full', 'baseline', 'ablation', 'hyper', 'mcrl',
-                                'efficiency', 'robustness', 'multi_dataset', 'complete'],
-                        help='实验模式: quick(快速测试)/full(完整实验)/efficiency(效率分析)/robustness(鲁棒性)/multi_dataset(多数据集)/complete(完整实验)')
+                                'efficiency', 'robustness', 'multi_dataset', 'complete',
+                                'pmat_rec', 'mcrl_rec'],
+                        help='实验模式: quick(快速测试)/full(完整实验)/pmat_rec(PMAT推荐)/mcrl_rec(MCRL推荐)/efficiency(效率分析)/robustness(鲁棒性)/multi_dataset(多数据集)/complete(完整实验)')
     
     # 数据集
     parser.add_argument('--dataset', type=str, default='mock',
@@ -644,8 +761,14 @@ if __name__ == "__main__":
         logger.info("超参实验模式")
         run_hyper_param_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'mcrl':
-        logger.info("MCRL实验模式")
+        logger.info("MCRL实验模式（旧版，使用随机数据）")
         run_mcrl_experiment(logger=logger, quick_model=(args.dataset=='mock'))
+    elif args.mode == 'pmat_rec':
+        logger.info("PMAT推荐模型实验模式（使用真实用户历史）")
+        run_pmat_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
+    elif args.mode == 'mcrl_rec':
+        logger.info("MCRL推荐模型实验模式（使用真实用户历史）")
+        run_mcrl_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'efficiency':
         logger.info("效率分析模式")
         run_efficiency_experiment(logger=logger)

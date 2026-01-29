@@ -51,6 +51,20 @@ python main.py --mode full --epochs 10
 python main.py --mode baseline --epochs 10
 ```
 
+### ⭐ 推荐模型实验（新增）
+
+```bash
+# PMAT推荐模型实验（使用真实用户历史）
+python main.py --mode pmat_rec --epochs 10
+
+# MCRL推荐模型实验（使用真实用户历史）
+python main.py --mode mcrl_rec --epochs 10
+
+# 快速测试模式
+python main.py --mode pmat_rec --dataset mock
+python main.py --mode mcrl_rec --dataset mock
+```
+
 ### 高级实验
 
 ```bash
@@ -83,6 +97,8 @@ python main.py --mode complete --epochs 10 --device cuda
 results/
 ├── baseline_results.csv              # 基线对比结果
 ├── baseline_results.json
+├── pmat_rec_experiment_results.json  # ⭐ PMAT推荐模型结果
+├── mcrl_rec_experiment_results.json  # ⭐ MCRL推荐模型结果
 ├── PMAT_ablation_results.json        # PMAT消融结果
 ├── MCRL_ablation_results.json        # MCRL消融结果
 ├── efficiency_analysis_results.json  # 效率分析结果
