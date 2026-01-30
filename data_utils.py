@@ -11,20 +11,13 @@ import torch
 import requests
 from PIL import Image
 from io import BytesIO
-try:
-    import datasets
-    from datasets import load_dataset
-    HAS_DATASETS = True
-except ImportError:
-    HAS_DATASETS = False
-    print("Warning: 'datasets' library not found. Only mock dataset mode is available.")
+import datasets
+from datasets import load_dataset
+HAS_DATASETS = True
 
-try:
-    from transformers import AutoTokenizer, AutoModel, CLIPProcessor, CLIPModel
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
-    print("Warning: 'transformers' library not found. Feature extraction will be limited.")
+from transformers import AutoTokenizer, AutoModel, CLIPProcessor, CLIPModel
+
+HAS_TRANSFORMERS = True
 
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
