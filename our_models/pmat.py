@@ -26,54 +26,46 @@ from util import item_id_to_semantic_id
 
 class UserModalAttention(nn.Module):
     """用户-模态偏好感知器
-    
-    根据用户历史交互学习对不同模态的偏好权重
+
+    根据用户兴趣表征学习对不同模态的偏好权重
     理论保证：个性化权重能减少ID的语义漂移
+
+    修复说明：
+    - 原设计接收用户历史序列，但实际调用时传入的是已编码的用户兴趣向量
+    - 修改为直接接收用户兴趣向量，移除冗余的LSTM编码
     """
-    
+
     def __init__(self, user_dim: int, num_modalities: int, hidden_dim: int):
         super().__init__()
         self.num_modalities = num_modalities
-        
-        # 用户历史编码器
-        self.user_history_encoder = nn.LSTM(
-            input_size=user_dim,
-            hidden_size=hidden_dim,
-            num_layers=2,
-            batch_first=True,
-            dropout=0.1
-        )
-        
-        # 模态偏好预测器
+        self.hidden_dim = hidden_dim
+
+        # 模态偏好预测器（直接从用户兴趣向量预测）
         self.modal_preference_net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(user_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(hidden_dim, num_modalities)
         )
-        
+
         # 温度参数（可学习）
         self.temperature = nn.Parameter(torch.ones(1))
-        
-    def forward(self, user_history: torch.Tensor) -> torch.Tensor:
+
+    def forward(self, user_interest: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            user_history: (batch, seq_len, user_dim) 用户历史交互序列
-            
+            user_interest: (batch, user_dim) 用户兴趣表征（已由UserInterestEncoder编码）
+
         Returns:
             modal_weights: (batch, num_modalities) 个性化模态权重
         """
-        # 编码用户历史
-        _, (h_n, _) = self.user_history_encoder(user_history)
-        user_repr = h_n[-1]  # (batch, hidden_dim)
-        
         # 预测模态偏好
-        logits = self.modal_preference_net(user_repr)  # (batch, num_modalities)
-        
-        # 温度缩放的softmax
-        modal_weights = F.softmax(logits / self.temperature, dim=-1)
-        
+        logits = self.modal_preference_net(user_interest)  # (batch, num_modalities)
+
+        # 温度缩放的softmax（softmax保证输出和为1，避免除零问题）
+        modal_weights = F.softmax(logits / (self.temperature + 1e-8), dim=-1)
+
         return modal_weights
 
 
@@ -357,6 +349,11 @@ class UserInterestEncoder(nn.Module):
         self.config = config
         self.hidden_dim = config.hidden_dim
 
+        # 从配置获取最大序列长度，默认512
+        self.max_seq_len = getattr(config, 'max_history_len', 50)
+        # 位置编码长度设为max_seq_len的2倍，确保足够
+        self.max_position_len = max(512, self.max_seq_len * 2)
+
         # 历史物品的多模态特征融合
         self.history_text_proj = nn.Linear(config.text_dim, config.hidden_dim)
         self.history_visual_proj = nn.Linear(config.visual_dim, config.hidden_dim)
@@ -379,8 +376,8 @@ class UserInterestEncoder(nn.Module):
         )
         self.sequence_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
 
-        # 位置编码
-        self.position_embedding = nn.Embedding(512, config.hidden_dim)  # 最大序列长度512
+        # 位置编码（使用配置的最大长度）
+        self.position_embedding = nn.Embedding(self.max_position_len, config.hidden_dim)
 
         # 用户兴趣聚合（attention pooling）
         self.interest_query = nn.Parameter(torch.randn(1, 1, config.hidden_dim))
@@ -417,8 +414,10 @@ class UserInterestEncoder(nn.Module):
         combined = torch.cat([text_proj, visual_proj], dim=-1)  # (batch, seq, hidden*2)
         fused_history = self.modal_fusion(combined)  # (batch, seq, hidden)
 
-        # 3. 添加位置编码
+        # 3. 添加位置编码（处理序列长度超过位置编码表的情况）
         positions = torch.arange(max_seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        # 截断位置索引，防止越界
+        positions = positions.clamp(max=self.max_position_len - 1)
         pos_emb = self.position_embedding(positions)
         fused_history = fused_history + pos_emb
 
@@ -581,41 +580,83 @@ class PMAT(AbstractTrainableModel):
         self.semantic_loss_weight = getattr(config, 'semantic_loss_weight', 0.1)  # 语义ID损失权重
         self.consistency_weight = config.consistency_weight
 
+    def _get_modal_weights(
+        self,
+        user_interest: torch.Tensor,
+        batch_size: int,
+        device: torch.device,
+        num_modalities: int = 2
+    ) -> torch.Tensor:
+        """获取模态权重（统一处理个性化和非个性化情况）
+
+        Args:
+            user_interest: (batch, hidden_dim) 用户兴趣
+            batch_size: 批次大小
+            device: 设备
+            num_modalities: 当前使用的模态数量
+
+        Returns:
+            modal_weights: (batch, num_modalities) 归一化的模态权重
+        """
+        if self.ablation_mode != 'no_personalization':
+            # 使用用户兴趣计算模态权重（UserModalAttention已修改为直接接收用户兴趣向量）
+            full_modal_weights = self.user_modal_attention(user_interest)  # (batch, config.num_modalities)
+
+            # 根据实际使用的模态数量截取权重
+            modal_weights = full_modal_weights[:, :num_modalities]
+
+            # 安全的归一化（处理除零情况）
+            weight_sum = modal_weights.sum(dim=1, keepdim=True)
+            # 如果权重和为0，使用均匀分布
+            weight_sum = torch.where(
+                weight_sum > 1e-8,
+                weight_sum,
+                torch.ones_like(weight_sum)
+            )
+            modal_weights = modal_weights / weight_sum
+        else:
+            # 消融模式：使用均匀权重
+            modal_weights = torch.ones(batch_size, num_modalities, device=device) / num_modalities
+
+        return modal_weights
+
     def encode_item(
         self,
         text_feat: torch.Tensor,
         vision_feat: torch.Tensor,
-        user_interest: torch.Tensor
+        user_interest: torch.Tensor,
+        short_history: Optional[torch.Tensor] = None,
+        long_history: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """编码物品特征
+
+        支持动态ID更新（当提供短期和长期历史时）
 
         Args:
             text_feat: (batch, text_dim) 或 (batch, num_items, text_dim)
             vision_feat: (batch, visual_dim) 或 (batch, num_items, visual_dim)
             user_interest: (batch, hidden_dim) 用户兴趣（用于个性化融合）
+            short_history: (batch, short_len, hidden_dim) 短期历史（可选，用于动态更新）
+            long_history: (batch, long_len, hidden_dim) 长期历史（可选，用于动态更新）
 
         Returns:
             fused_feat: 融合后的物品特征
             semantic_ids_logits: 语义ID的logits
             quantized_emb: 量化后的嵌入
         """
+        device = text_feat.device
+
         # 处理维度
         if text_feat.dim() == 2:
             # 单个物品
+            batch_size = user_interest.size(0)
             item_features = {
                 'text': text_feat.float(),
                 'visual': vision_feat.float()
             }
 
             # 计算个性化模态权重
-            batch_size = user_interest.size(0)
-            if self.ablation_mode != 'no_personalization':
-                # 使用用户兴趣计算模态权重
-                full_modal_weights = self.user_modal_attention(user_interest.unsqueeze(1))
-                modal_weights = full_modal_weights[:, :2]  # text + visual
-                modal_weights = modal_weights / modal_weights.sum(dim=1, keepdim=True)
-            else:
-                modal_weights = torch.ones(batch_size, 2, device=text_feat.device) / 2
+            modal_weights = self._get_modal_weights(user_interest, batch_size, device, num_modalities=2)
 
             # 编码和融合
             encoded_features = self.multimodal_encoder(item_features)
@@ -623,6 +664,13 @@ class PMAT(AbstractTrainableModel):
 
             # 生成语义ID
             semantic_ids_logits, quantized_emb = self.semantic_quantizer(fused_feat)
+
+            # ===== 动态ID更新（核心创新点）=====
+            if self.ablation_mode != 'no_dynamic_update' and short_history is not None and long_history is not None:
+                # 检测兴趣漂移
+                drift_score = self.dynamic_updater.detect_drift(short_history, long_history)
+                # 根据漂移分数动态更新语义ID嵌入
+                quantized_emb = self.dynamic_updater.update(quantized_emb, fused_feat, drift_score)
 
         else:
             # 多个物品: (batch, num_items, dim)
@@ -638,14 +686,9 @@ class PMAT(AbstractTrainableModel):
             }
 
             # 计算模态权重（扩展到所有物品）
-            if self.ablation_mode != 'no_personalization':
-                full_modal_weights = self.user_modal_attention(user_interest.unsqueeze(1))
-                modal_weights = full_modal_weights[:, :2]
-                modal_weights = modal_weights / modal_weights.sum(dim=1, keepdim=True)
-                # 扩展到所有物品
-                modal_weights = modal_weights.unsqueeze(1).expand(-1, num_items, -1).reshape(-1, 2)
-            else:
-                modal_weights = torch.ones(batch_size * num_items, 2, device=text_feat.device) / 2
+            modal_weights = self._get_modal_weights(user_interest, batch_size, device, num_modalities=2)
+            # 扩展到所有物品
+            modal_weights = modal_weights.unsqueeze(1).expand(-1, num_items, -1).reshape(-1, 2)
 
             # 编码和融合
             encoded_features = self.multimodal_encoder(item_features)
@@ -659,7 +702,76 @@ class PMAT(AbstractTrainableModel):
             semantic_ids_logits = semantic_ids_logits.view(batch_size, num_items, self.config.id_length, -1)
             quantized_emb = quantized_emb.view(batch_size, num_items, -1)
 
+            # ===== 动态ID更新（多物品情况）=====
+            if self.ablation_mode != 'no_dynamic_update' and short_history is not None and long_history is not None:
+                drift_score = self.dynamic_updater.detect_drift(short_history, long_history)
+                # 对每个物品应用更新
+                for i in range(num_items):
+                    quantized_emb[:, i, :] = self.dynamic_updater.update(
+                        quantized_emb[:, i, :], fused_feat[:, i, :], drift_score
+                    )
+
         return fused_feat, semantic_ids_logits, quantized_emb
+
+    def _validate_batch(self, batch: Dict[str, torch.Tensor]) -> None:
+        """验证batch数据的完整性
+
+        Args:
+            batch: 输入的batch数据
+
+        Raises:
+            KeyError: 如果缺少必要的键
+        """
+        required_keys = [
+            'history_text_feat', 'history_vision_feat', 'history_len',
+            'target_text_feat', 'target_vision_feat', 'target_item',
+            'neg_text_feat', 'neg_vision_feat', 'negative_items'
+        ]
+        missing_keys = [k for k in required_keys if k not in batch]
+        if missing_keys:
+            raise KeyError(f"Batch缺少必要的键: {missing_keys}。"
+                          f"期望的键: {required_keys}")
+
+    def _prepare_dynamic_update_inputs(
+        self,
+        history_text_feat: torch.Tensor,
+        history_vision_feat: torch.Tensor,
+        history_len: torch.Tensor
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """准备动态更新所需的短期和长期历史
+
+        Args:
+            history_text_feat: (batch, max_seq_len, text_dim)
+            history_vision_feat: (batch, max_seq_len, visual_dim)
+            history_len: (batch,)
+
+        Returns:
+            short_history: (batch, short_len, hidden_dim) 或 None
+            long_history: (batch, long_len, hidden_dim) 或 None
+        """
+        if self.ablation_mode == 'no_dynamic_update':
+            return None, None
+
+        batch_size, max_seq_len, _ = history_text_feat.shape
+        device = history_text_feat.device
+
+        # 获取短期和长期历史长度配置
+        short_len = min(getattr(self.config, 'short_history_len', 10), max_seq_len)
+        long_len = max_seq_len
+
+        # 投影历史特征到hidden_dim
+        text_proj = self.user_interest_encoder.history_text_proj(history_text_feat)
+        visual_proj = self.user_interest_encoder.history_visual_proj(history_vision_feat)
+        combined = torch.cat([text_proj, visual_proj], dim=-1)
+        history_hidden = self.user_interest_encoder.modal_fusion(combined)  # (batch, seq, hidden)
+
+        # 提取短期历史（最近的交互）
+        short_history = history_hidden[:, -short_len:, :]  # (batch, short_len, hidden)
+
+        # 长期历史就是全部历史
+        long_history = history_hidden  # (batch, long_len, hidden)
+
+        return short_history, long_history
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """前向传播
@@ -678,7 +790,13 @@ class PMAT(AbstractTrainableModel):
 
         Returns:
             outputs: 包含各种输出的字典
+
+        Raises:
+            KeyError: 如果batch缺少必要的键
         """
+        # 验证batch数据完整性
+        self._validate_batch(batch)
+
         # 1. 编码用户兴趣（使用真实历史序列）
         user_interest = self.user_interest_encoder(
             batch['history_text_feat'],
@@ -686,21 +804,32 @@ class PMAT(AbstractTrainableModel):
             batch['history_len']
         )  # (batch, hidden_dim)
 
-        # 2. 编码正样本（目标物品）
+        # 2. 准备动态更新所需的历史数据
+        short_history, long_history = self._prepare_dynamic_update_inputs(
+            batch['history_text_feat'],
+            batch['history_vision_feat'],
+            batch['history_len']
+        )
+
+        # 3. 编码正样本（目标物品）- 支持动态ID更新
         pos_fused_feat, pos_semantic_logits, pos_quantized_emb = self.encode_item(
             batch['target_text_feat'],
             batch['target_vision_feat'],
-            user_interest
+            user_interest,
+            short_history=short_history,
+            long_history=long_history
         )
 
-        # 3. 编码负样本
+        # 4. 编码负样本
         neg_fused_feat, neg_semantic_logits, neg_quantized_emb = self.encode_item(
             batch['neg_text_feat'],
             batch['neg_vision_feat'],
-            user_interest
+            user_interest,
+            short_history=short_history,
+            long_history=long_history
         )
 
-        # 4. 计算用户-物品匹配分数
+        # 5. 计算用户-物品匹配分数
         # 正样本分数
         pos_scores = self.user_item_matcher(
             user_interest, pos_fused_feat, pos_quantized_emb
@@ -738,26 +867,46 @@ class PMAT(AbstractTrainableModel):
             losses: 各项损失的字典
         """
         losses = {}
+        device = outputs['pos_scores'].device
 
         # ===== 1. BPR推荐损失（主任务）=====
         pos_scores = outputs['pos_scores']  # (batch,)
         neg_scores = outputs['neg_scores']  # (batch, num_neg)
 
-        # BPR loss: -log(sigmoid(pos - neg))
-        # 对每个负样本计算
-        pos_scores_expanded = pos_scores.unsqueeze(1)  # (batch, 1)
-        bpr_loss = -torch.log(torch.sigmoid(pos_scores_expanded - neg_scores) + 1e-8)
-        bpr_loss = bpr_loss.mean()
+        # 处理负样本为空的情况
+        if neg_scores.numel() == 0 or neg_scores.size(1) == 0:
+            # 没有负样本时，使用margin loss作为替代
+            # 假设正样本分数应该大于0
+            bpr_loss = F.relu(1.0 - pos_scores).mean()
+        else:
+            # BPR loss: -log(sigmoid(pos - neg))
+            # 对每个负样本计算
+            pos_scores_expanded = pos_scores.unsqueeze(1)  # (batch, 1)
+            bpr_loss = -torch.log(torch.sigmoid(pos_scores_expanded - neg_scores) + 1e-8)
+            bpr_loss = bpr_loss.mean()
+
         losses['bpr_loss'] = self.rec_loss_weight * bpr_loss
 
         # ===== 2. 语义ID生成损失（辅助任务）=====
-        # 将item_id转换为语义ID目标
         target_items = outputs['target_item']
-        target_semantic_ids = item_id_to_semantic_id(
-            target_items,
-            self.config.id_length,
-            self.config.codebook_size
-        ).to(target_items.device)
+
+        # 安全地转换item_id为语义ID（带容错处理）
+        try:
+            target_semantic_ids = item_id_to_semantic_id(
+                target_items,
+                self.config.id_length,
+                self.config.codebook_size
+            ).to(device)
+        except Exception as e:
+            # 如果转换失败，使用随机目标（降级处理）
+            import warnings
+            warnings.warn(f"语义ID转换失败: {e}，使用随机目标作为降级处理")
+            batch_size = target_items.size(0)
+            target_semantic_ids = torch.randint(
+                0, self.config.codebook_size,
+                (batch_size, self.config.id_length),
+                device=device
+            )
 
         # 正样本的语义ID损失
         pos_semantic_logits = outputs['pos_semantic_logits']  # (batch, id_length, codebook_size)

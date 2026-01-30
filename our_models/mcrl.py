@@ -179,17 +179,17 @@ class IntraModalContrastive(nn.Module):
             # 计算相似度矩阵
             sim_matrix = torch.mm(id_proj, modal_proj.t())  # (batch, batch)
             sim_matrix = sim_matrix / self.temperature
-            
+
             # 对角线为正样本，其他为负样本
             labels = torch.arange(sim_matrix.size(0), device=sim_matrix.device)
-            
-            # 对比损失
-            modal_loss = F.cross_entropy(sim_matrix, labels)
-            
-            # 根据模态权重加权
-            modal_weight = modal_weights[:, idx].mean()  # 该模态的平均权重
-            total_loss += modal_weight * modal_loss
-        
+
+            # 对比损失（按样本计算，保留batch维度）
+            modal_loss = F.cross_entropy(sim_matrix, labels, reduction='none')  # (batch,)
+
+            # 根据模态权重加权（保留样本级别的权重差异）
+            weighted_modal_loss = modal_loss * modal_weights[:, idx]  # (batch,)
+            total_loss += weighted_modal_loss.mean()
+
         return total_loss / len(modality_list)
 
 
@@ -197,15 +197,16 @@ class InterModalContrastive(nn.Module):
     """模态间对比学习模块
     理论依据：定理4，对齐不同模态的互补信息
     """
-    
-    def __init__(self, hidden_dim: int, num_modalities: int):
+
+    def __init__(self, hidden_dim: int, num_modalities: int, temperature: float = 0.07):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_modalities = num_modalities
-        
+        self.temperature = temperature  # 温度系数（用于数值稳定性）
+
         # 模态间对齐网络
         self.alignment_nets = nn.ModuleDict()
-        
+
         # 适配器，将不同模态映射到相同维度
         self.modal_adapters = nn.ModuleDict()
 
@@ -261,25 +262,46 @@ class InterModalContrastive(nn.Module):
                 
                 # 正样本：同一物品的不同模态
                 pos_pairs = torch.cat([feat_i, feat_j], dim=-1)  # (batch, 2*hidden_dim)
-                
-                # 负样本：不同物品的模态对（随机打乱）
-                perm = torch.randperm(feat_j.size(0))
+
+                # 负样本：不同物品的模态对（随机打乱，确保不与正样本重合）
+                batch_size = feat_j.size(0)
+                perm = torch.randperm(batch_size, device=feat_j.device)
+                # 确保负样本不是同一物品（当batch_size > 1时）
+                if batch_size > 1:
+                    indices = torch.arange(batch_size, device=feat_j.device)
+                    collision_mask = (perm == indices)
+                    # 最多尝试10次避免死循环
+                    for _ in range(10):
+                        if not collision_mask.any():
+                            break
+                        # 将冲突位置的索引循环移位
+                        perm[collision_mask] = (perm[collision_mask] + 1) % batch_size
+                        collision_mask = (perm == indices)
+
                 neg_pairs = torch.cat([feat_i, feat_j[perm]], dim=-1)  # (batch, 2*hidden_dim)
-                
+
                 # 对齐网络
                 alignment_net = self.alignment_nets[key]
-                
+
                 # 计算对齐分数
                 pos_scores = alignment_net(pos_pairs).squeeze(-1)  # (batch,)
                 neg_scores = alignment_net(neg_pairs).squeeze(-1)  # (batch,)
-                
+
                 # 对比损失（最大化正样本分数，最小化负样本分数）
-                pair_loss = -torch.log(torch.sigmoid(pos_scores - neg_scores)).mean()
+                # 添加数值稳定性：裁剪极端值，增大epsilon
+                score_diff = torch.clamp(pos_scores - neg_scores, min=-50, max=50)
+                pair_loss = -torch.log(torch.sigmoid(score_diff) + 1e-6).mean()
                 
                 total_loss += pair_loss
                 num_pairs += 1
-        
-        return total_loss / max(num_pairs, 1)
+
+        # 处理单模态场景（无模态对可计算）
+        if num_pairs == 0:
+            import warnings
+            warnings.warn("InterModalContrastive: 只有单模态，无法计算模态间对比损失，返回0")
+            return torch.tensor(0.0, device=next(self.parameters()).device, requires_grad=True)
+
+        return total_loss / num_pairs
 
 
 # ==================== 新增：用户兴趣编码器 ====================
@@ -306,9 +328,10 @@ class MCRLUserEncoder(nn.Module):
             nn.Dropout(0.1)
         )
 
-        # 位置编码
-        max_seq_len = getattr(config, 'max_history_len', 50)
-        self.position_embedding = nn.Embedding(max_seq_len, hidden_dim)
+        # 位置编码（增加安全边距，与PMAT一致）
+        self.max_seq_len = getattr(config, 'max_history_len', 50)
+        self.max_position_len = max(512, self.max_seq_len * 2)
+        self.position_embedding = nn.Embedding(self.max_position_len, hidden_dim)
 
         # Transformer编码器
         encoder_layer = nn.TransformerEncoderLayer(
@@ -350,13 +373,17 @@ class MCRLUserEncoder(nn.Module):
         combined = torch.cat([text_proj, visual_proj], dim=-1)
         fused_history = self.modal_fusion(combined)
 
-        # 添加位置编码
+        # 添加位置编码（处理序列长度超过位置编码表的情况）
         positions = torch.arange(max_seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        # 截断位置索引，防止越界
+        positions = positions.clamp(max=self.max_position_len - 1)
         pos_emb = self.position_embedding(positions)
         fused_history = fused_history + pos_emb
 
         # 创建attention mask
-        mask = torch.arange(max_seq_len, device=device).unsqueeze(0) < (max_seq_len - history_len.unsqueeze(1))
+        # mask = True 表示该位置是padding，需要被mask
+        # history_len表示有效长度，超过有效长度的位置应该被mask
+        mask = torch.arange(max_seq_len, device=device).unsqueeze(0) >= history_len.unsqueeze(1)
 
         # Transformer编码
         encoded_history = self.sequence_encoder(fused_history, src_key_padding_mask=mask)
@@ -537,7 +564,8 @@ class MCRL(AbstractTrainableModel):
 
         self.inter_modal_cl = InterModalContrastive(
             hidden_dim=config.hidden_dim,
-            num_modalities=config.num_modalities
+            num_modalities=config.num_modalities,
+            temperature=self.temperature
         )
 
         # ID表征优化器（对比学习优化后的表征）
@@ -547,6 +575,15 @@ class MCRL(AbstractTrainableModel):
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(config.hidden_dim, config.hidden_dim)
+        )
+
+        # 可学习的模态权重模块（基于用户和物品表征动态计算模态权重）
+        self.modal_weight_learner = nn.Sequential(
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(config.hidden_dim, config.num_modalities),
+            nn.Softmax(dim=-1)
         )
 
         # 注册模态
@@ -560,6 +597,25 @@ class MCRL(AbstractTrainableModel):
         for modality, dim in modal_dims.items():
             self.intra_modal_cl.add_modality(modality, dim)
             self.inter_modal_cl.add_modality(modality, dim)
+
+    def _validate_batch(self, batch: Dict[str, torch.Tensor]) -> None:
+        """验证batch数据的完整性
+
+        Args:
+            batch: 输入的batch数据
+
+        Raises:
+            KeyError: 如果缺少必要的键
+        """
+        required_keys = [
+            'history_text_feat', 'history_vision_feat', 'history_len',
+            'target_text_feat', 'target_vision_feat',
+            'neg_text_feat', 'neg_vision_feat'
+        ]
+        missing_keys = [k for k in required_keys if k not in batch]
+        if missing_keys:
+            raise KeyError(f"Batch缺少必要的键: {missing_keys}。"
+                          f"期望的键: {required_keys}")
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """前向传播
@@ -576,7 +632,13 @@ class MCRL(AbstractTrainableModel):
 
         Returns:
             outputs: 包含各种输出的字典
+
+        Raises:
+            KeyError: 如果batch缺少必要的键
         """
+        # 验证batch数据完整性
+        self._validate_batch(batch)
+
         # 1. 编码用户兴趣（使用真实历史序列）
         user_repr = self.user_encoder(
             batch['history_text_feat'],
@@ -606,7 +668,10 @@ class MCRL(AbstractTrainableModel):
             'visual': batch['target_vision_feat'],
             'text': batch['target_text_feat']
         }
-        modal_weights = torch.ones(user_repr.size(0), self.num_modalities, device=user_repr.device) / self.num_modalities
+
+        # 使用可学习的模态权重（基于用户和物品表征动态计算）
+        weight_input = torch.cat([user_repr, pos_item_repr], dim=-1)  # (batch, hidden_dim * 2)
+        modal_weights = self.modal_weight_learner(weight_input)  # (batch, num_modalities)
 
         # 优化物品表征
         optimized_pos_repr = self.id_optimizer(pos_item_repr) + pos_item_repr
@@ -629,6 +694,11 @@ class MCRL(AbstractTrainableModel):
 
         # Layer 3: 模态间对比学习
         L_inter = self.inter_modal_cl(modal_features=modal_features)
+
+        # 缓存表征（用于推理时避免重复计算）
+        if not self.training:
+            self._cached_user_repr = user_repr.detach()
+            self._cached_item_repr = optimized_pos_repr.detach()
 
         return {
             'user_repr': user_repr,
@@ -657,9 +727,16 @@ class MCRL(AbstractTrainableModel):
         neg_scores = outputs['neg_scores']  # (batch, num_neg)
 
         # 1. BPR推荐损失
-        # 对每个负样本计算BPR损失
-        pos_scores_expanded = pos_scores.unsqueeze(1)  # (batch, 1)
-        bpr_loss = -torch.log(torch.sigmoid(pos_scores_expanded - neg_scores) + 1e-8).mean()
+        # 处理负样本为空的情况
+        if neg_scores.numel() == 0 or neg_scores.size(1) == 0:
+            # 没有负样本时，使用margin loss作为替代
+            bpr_loss = F.relu(1.0 - pos_scores).mean()
+        else:
+            # 对每个负样本计算BPR损失
+            pos_scores_expanded = pos_scores.unsqueeze(1)  # (batch, 1)
+            # 添加数值稳定性：裁剪极端值，增大epsilon
+            score_diff = torch.clamp(pos_scores_expanded - neg_scores, min=-50, max=50)
+            bpr_loss = -torch.log(torch.sigmoid(score_diff) + 1e-6).mean()
 
         # 2. 对比学习损失
         cl_losses = outputs['contrastive_losses']
@@ -681,20 +758,50 @@ class MCRL(AbstractTrainableModel):
             'total_loss': total_loss
         }
 
-    def get_user_embedding(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """获取用户嵌入（用于召回）"""
+    def get_user_embedding(self, batch: Dict[str, torch.Tensor], use_cache: bool = True) -> torch.Tensor:
+        """获取用户嵌入（用于召回）
+
+        Args:
+            batch: 包含用户历史的批次数据
+            use_cache: 是否使用缓存（推理时可复用forward计算的表征）
+
+        Returns:
+            user_embedding: (batch, hidden_dim)
+        """
+        # 尝试使用缓存（避免重复计算）
+        if use_cache and hasattr(self, '_cached_user_repr') and self._cached_user_repr is not None:
+            return self._cached_user_repr
+
         return self.user_encoder(
             batch['history_text_feat'],
             batch['history_vision_feat'],
             batch['history_len']
         )
 
-    def get_item_embedding(self, text_feat: torch.Tensor, vision_feat: torch.Tensor) -> torch.Tensor:
-        """获取物品嵌入（用于召回）"""
+    def get_item_embedding(self, text_feat: torch.Tensor, vision_feat: torch.Tensor, use_cache: bool = True) -> torch.Tensor:
+        """获取物品嵌入（用于召回）
+
+        Args:
+            text_feat: (num_items, text_dim)
+            vision_feat: (num_items, visual_dim)
+            use_cache: 是否使用缓存（推理时可复用forward计算的表征）
+
+        Returns:
+            item_embedding: (num_items, hidden_dim)
+        """
+        # 尝试使用缓存（避免重复计算）
+        if use_cache and hasattr(self, '_cached_item_repr') and self._cached_item_repr is not None:
+            return self._cached_item_repr
+
         item_repr = self.item_encoder(text_feat, vision_feat)
         # 使用对比学习优化后的表征
         optimized_repr = self.id_optimizer(item_repr) + item_repr
         return optimized_repr
+
+    def clear_cache(self):
+        """清除表征缓存"""
+        self._cached_user_repr = None
+        self._cached_item_repr = None
 
     # ==================== AbstractTrainableModel 抽象方法实现 ====================
 
@@ -716,6 +823,25 @@ class MCRL(AbstractTrainableModel):
         for stage_id, opt_state in state_dict.items():
             if stage_id in self._stage_optimizers:
                 self._stage_optimizers[stage_id].load_state_dict(opt_state)
+
+    def _update_params(self, loss: torch.Tensor, optimizer: torch.optim.Optimizer, scaler=None):
+        """重写参数更新逻辑，添加梯度裁剪
+
+        对比学习 + 推荐损失的组合可能导致梯度爆炸，需要梯度裁剪
+        """
+        optimizer.zero_grad()
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+            optimizer.step()
 
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
         """
