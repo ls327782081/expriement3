@@ -199,54 +199,151 @@ def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
 
 
 # 2. 消融实验
-def run_ablation_experiment(logger=None,quick_mode:bool=False):
-    """运行消融实验"""
+def run_ablation_experiment(logger=None, quick_mode: bool = False):
+    """运行消融实验（PMAT和MCRL）
+
+    PMAT消融模块：
+    - no_personalization: 移除个性化模态权重
+    - no_dynamic_update: 移除动态更新机制
+
+    MCRL消融模块：
+    - no_user_cl: 移除用户偏好对比学习
+    - no_intra_cl: 移除模态内对比学习
+    - no_inter_cl: 移除模态间对比学习
+    """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
-        
-    logger.info("\n===== 开始消融实验 =====")
-    train_loader, val_loader, test_loader = get_dataloader("./data", category=config.category, shuffle=True, logger=logger,
-                                                           quick_mode=quick_mode, num_workers=NUM_WORKS)
+
+    logger.info("\n" + "=" * 70)
+    logger.info("===== 开始消融实验 =====")
+    logger.info("=" * 70 + "\n")
+
+    # 使用PMAT专用数据加载器（MCRL复用相同格式）
+    train_loader, val_loader, test_loader = get_pmat_dataloader(
+        cache_dir="./data",
+        category=config.category,
+        batch_size=config.batch_size,
+        max_history_len=config.max_history_len,
+        num_negative_samples=config.num_negative_samples,
+        shuffle=True,
+        quick_mode=quick_mode,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
 
     results = []
-    # 完整模型
-    logger.info("训练完整PMAT模型")
-    full_model = PMAT(config).to(config.device)
-    full_model = train_model(full_model, train_loader, val_loader, "PMAT_full", logger=logger)
-    full_metrics = evaluate_model(full_model, test_loader, "PMAT_full", logger=logger)
-    results.append(full_metrics)
 
-    # 消融实验：逐个移除模块
-    for ablation_module in config.ablation_modules:
-        logger.info(f"训练消融模型（移除{ablation_module}）")
+    # ==================== PMAT消融实验 ====================
+    logger.info("\n" + "-" * 50)
+    logger.info("PMAT消融实验")
+    logger.info("-" * 50)
+
+    # 完整PMAT模型
+    logger.info("\n训练完整PMAT模型")
+    pmat_full = PMAT(config).to(config.device)
+    pmat_full = train_model(pmat_full, train_loader, val_loader, "PMAT_full", logger=logger)
+    pmat_full.eval()
+    pmat_full_metrics = pmat_full._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+    pmat_full_metrics["model"] = "PMAT_full"
+    results.append(pmat_full_metrics)
+    logger.info(f"PMAT完整模型: HR@10={pmat_full_metrics.get('HR@10', 0):.4f}, NDCG@10={pmat_full_metrics.get('NDCG@10', 0):.4f}")
+
+    # PMAT消融实验
+    from our_models.pmat import get_pmat_ablation_model
+    for ablation_module in config.pmat_ablation_modules:
+        logger.info(f"\n训练PMAT消融模型（移除{ablation_module}）")
         ablation_model = get_pmat_ablation_model(ablation_module, config).to(config.device)
         ablation_model = train_model(
             ablation_model, train_loader, val_loader, f"PMAT_ablation_{ablation_module}", logger=logger
         )
-        ablation_metrics = evaluate_model(ablation_model, test_loader, f"PMAT_ablation_{ablation_module}", logger=logger)
+        ablation_model.eval()
+        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+        ablation_metrics["model"] = f"PMAT_w/o_{ablation_module}"
         results.append(ablation_metrics)
+        logger.info(f"PMAT w/o {ablation_module}: HR@10={ablation_metrics.get('HR@10', 0):.4f}, NDCG@10={ablation_metrics.get('NDCG@10', 0):.4f}")
+
+    # ==================== MCRL消融实验 ====================
+    logger.info("\n" + "-" * 50)
+    logger.info("MCRL消融实验")
+    logger.info("-" * 50)
+
+    # 完整MCRL模型
+    logger.info("\n训练完整MCRL模型")
+    mcrl_full = MCRL(config).to(config.device)
+    mcrl_full = train_model(mcrl_full, train_loader, val_loader, "MCRL_full", logger=logger)
+    mcrl_full.eval()
+    mcrl_full_metrics = mcrl_full._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+    mcrl_full_metrics["model"] = "MCRL_full"
+    results.append(mcrl_full_metrics)
+    logger.info(f"MCRL完整模型: HR@10={mcrl_full_metrics.get('HR@10', 0):.4f}, NDCG@10={mcrl_full_metrics.get('NDCG@10', 0):.4f}")
+
+    # MCRL消融实验
+    from our_models.mcrl import get_mcrl_ablation_model
+    for ablation_module in config.mcrl_ablation_modules:
+        logger.info(f"\n训练MCRL消融模型（移除{ablation_module}）")
+        ablation_model = get_mcrl_ablation_model(ablation_module, config).to(config.device)
+        ablation_model = train_model(
+            ablation_model, train_loader, val_loader, f"MCRL_ablation_{ablation_module}", logger=logger
+        )
+        ablation_model.eval()
+        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+        ablation_metrics["model"] = f"MCRL_w/o_{ablation_module}"
+        results.append(ablation_metrics)
+        logger.info(f"MCRL w/o {ablation_module}: HR@10={ablation_metrics.get('HR@10', 0):.4f}, NDCG@10={ablation_metrics.get('NDCG@10', 0):.4f}")
 
     # 保存结果
     save_results(results, "ablation", logger=logger)
 
+    logger.info("\n" + "=" * 70)
+    logger.info("消融实验完成")
+    logger.info("=" * 70 + "\n")
+
+    return results
+
 
 # 3. 超参实验
-def run_hyper_param_experiment(logger=None,quick_mode:bool=False):
-    """运行超参实验"""
+def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
+    """运行超参实验（PMAT和MCRL）
+
+    PMAT超参：id_length, lr, codebook_size
+    MCRL超参：mcrl_alpha, mcrl_beta, lr
+    """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
-        
-    logger.info("\n===== 开始超参实验 =====")
-    train_loader,val_loader, test_loader  = get_dataloader("./data", category=config.category, shuffle=True, logger=logger,
-                                                           quick_mode=quick_mode, num_workers=NUM_WORKS)
 
+    logger.info("\n" + "=" * 70)
+    logger.info("===== 开始超参实验 =====")
+    logger.info("=" * 70 + "\n")
+
+    # 使用PMAT专用数据加载器
+    train_loader, val_loader, test_loader = get_pmat_dataloader(
+        cache_dir="./data",
+        category=config.category,
+        batch_size=config.batch_size,
+        max_history_len=config.max_history_len,
+        num_negative_samples=config.num_negative_samples,
+        shuffle=True,
+        quick_mode=quick_mode,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
 
     results = []
-    # 遍历超参组合
+
+    # ==================== PMAT超参实验 ====================
+    logger.info("\n" + "-" * 50)
+    logger.info("PMAT超参实验")
+    logger.info("-" * 50)
+
+    # 保存原始配置
+    original_id_length = config.id_length
+    original_lr = config.lr
+    original_codebook_size = config.codebook_size
+
     for id_length in config.hyper_param_search["id_length"]:
         for lr in config.hyper_param_search["lr"]:
             for codebook_size in config.hyper_param_search["codebook_size"]:
-                logger.info(f"\n超参组合：id_length={id_length}, lr={lr}, codebook_size={codebook_size}")
+                logger.info(f"\nPMAT超参组合：id_length={id_length}, lr={lr}, codebook_size={codebook_size}")
                 # 更新配置
                 config.id_length = id_length
                 config.lr = lr
@@ -258,24 +355,67 @@ def run_hyper_param_experiment(logger=None,quick_mode:bool=False):
                 model = train_model(model, train_loader, val_loader, exp_name, logger=logger)
 
                 # 评估
-                metrics = evaluate_model(model, test_loader, exp_name, logger=logger)
-                # 添加超参信息
+                model.eval()
+                metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+                metrics["model"] = exp_name
                 metrics["id_length"] = id_length
                 metrics["lr"] = lr
                 metrics["codebook_size"] = codebook_size
                 results.append(metrics)
+                logger.info(f"  HR@10={metrics.get('HR@10', 0):.4f}, NDCG@10={metrics.get('NDCG@10', 0):.4f}")
+
+    # 恢复原始配置
+    config.id_length = original_id_length
+    config.lr = original_lr
+    config.codebook_size = original_codebook_size
+
+    # ==================== MCRL超参实验 ====================
+    logger.info("\n" + "-" * 50)
+    logger.info("MCRL超参实验")
+    logger.info("-" * 50)
+
+    # 保存原始配置
+    original_alpha = config.mcrl_alpha
+    original_beta = config.mcrl_beta
+    original_lr = config.lr
+
+    for alpha in config.hyper_param_search["mcrl_alpha"]:
+        for beta in config.hyper_param_search["mcrl_beta"]:
+            for lr in config.hyper_param_search["lr"]:
+                logger.info(f"\nMCRL超参组合：alpha={alpha}, beta={beta}, lr={lr}")
+                # 更新配置
+                config.mcrl_alpha = alpha
+                config.mcrl_beta = beta
+                config.lr = lr
+
+                # 训练模型
+                model = MCRL(config).to(config.device)
+                exp_name = f"MCRL_hyper_a{alpha}_b{beta}_lr{lr}"
+                model = train_model(model, train_loader, val_loader, exp_name, logger=logger)
+
+                # 评估
+                model.eval()
+                metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+                metrics["model"] = exp_name
+                metrics["mcrl_alpha"] = alpha
+                metrics["mcrl_beta"] = beta
+                metrics["lr"] = lr
+                results.append(metrics)
+                logger.info(f"  HR@10={metrics.get('HR@10', 0):.4f}, NDCG@10={metrics.get('NDCG@10', 0):.4f}")
+
+    # 恢复原始配置
+    config.mcrl_alpha = original_alpha
+    config.mcrl_beta = original_beta
+    config.lr = original_lr
 
     # 保存结果
     save_results(results, "hyper_param", logger=logger)
 
+    logger.info("\n" + "=" * 70)
+    logger.info("超参实验完成")
+    logger.info("=" * 70 + "\n")
 
-def get_pmat_ablation_model(ablation_module, config=None):
-    """获取PMAT消融模型"""
-    from our_models.pmat import PMAT
-    if config is None:
-        from config import config as default_config
-        config = default_config
-    return PMAT(config, ablation_module=ablation_module)
+    return results
 
 
 # ==================== 新增：PMAT/MCRL 推荐模型实验 ====================
@@ -400,21 +540,20 @@ def parse_args():
 
     # 模式选择
     parser.add_argument('--mode', type=str, default='quick',
-                        choices=['quick', 'full', 'baseline', 'ablation', 'hyper', 'mcrl',
-                                'efficiency', 'robustness', 'multi_dataset', 'complete',
+                        choices=['quick', 'full', 'baseline', 'ablation', 'hyper',
                                 'pmat_rec', 'mcrl_rec'],
-                        help='实验模式: quick(快速测试)/full(完整实验)/pmat_rec(PMAT推荐)/mcrl_rec(MCRL推荐)/efficiency(效率分析)/robustness(鲁棒性)/multi_dataset(多数据集)/complete(完整实验)')
-    
+                        help='实验模式: quick(快速测试)/full(完整实验)/baseline(基线对比)/ablation(消融实验)/hyper(超参实验)/pmat_rec(PMAT推荐)/mcrl_rec(MCRL推荐)')
+
     # 数据集
     parser.add_argument('--dataset', type=str, default='mock',
                         choices=['mock', 'amazon', 'movielens'],
                         help='数据集类型')
-    
+
     # 模型选择
     parser.add_argument('--model', type=str, default='pmat',
                         choices=['pmat', 'mcrl', 'all'],
                         help='模型选择')
-    
+
     # 训练参数
     parser.add_argument('--epochs', type=int, default=None,
                         help='训练轮数')
@@ -425,7 +564,7 @@ def parse_args():
     parser.add_argument('--device', type=str, default=None,
                         choices=['cpu', 'cuda'],
                         help='设备 (默认: 自动检测)')
-    
+
     # 其他
     parser.add_argument('--seed', type=int, default=42,
                         help='随机种子')
@@ -435,172 +574,6 @@ def parse_args():
                         help='日志保存目录')
 
     return parser.parse_args()
-
-
-def run_efficiency_experiment(logger=None):
-    """效率分析实验"""
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
-
-    logger.info("\n" + "="*80)
-    logger.info("效率分析实验")
-    logger.info("="*80)
-
-    from experiment_framework import ExperimentFramework
-
-    # 初始化实验框架
-    framework = ExperimentFramework(results_dir="./results", logger=logger)
-
-    # 加载数据
-    train_loader = get_dataloader(config.category, split="train")
-    val_loader = get_dataloader(config.category, split="val")
-
-    # 初始化所有模型
-    models = [
-        ("PMAT", PMAT(config)),
-        ("MCRL", MCRL(config)),
-        ("PctxAligned", PctxAligned(config)),
-        ("PRISM", PRISM(config)),
-        ("DGMRec", DGMRec(config)),
-    ]
-
-    # 运行效率分析
-    results = framework.run_efficiency_analysis(
-        models=models,
-        train_loader=train_loader,
-        val_loader=val_loader
-    )
-
-    logger.info("\n效率分析结果:")
-    for model_name, metrics in results.items():
-        logger.info(f"\n{model_name}:")
-        logger.info(f"  训练时间: {metrics['train_time_per_epoch']:.2f}s/epoch")
-        logger.info(f"  推理时间: {metrics['inference_time_per_sample']*1000:.2f}ms/sample")
-        logger.info(f"  内存占用: {metrics['memory_usage_mb']:.2f}MB")
-        logger.info(f"  参数量: {metrics['num_parameters']:,}")
-
-    return results
-
-
-def run_robustness_experiment(logger=None):
-    """鲁棒性分析实验"""
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
-
-    logger.info("\n" + "="*80)
-    logger.info("鲁棒性分析实验")
-    logger.info("="*80)
-
-    from experiment_framework import ExperimentFramework
-
-    # 初始化实验框架
-    framework = ExperimentFramework(results_dir="./results", logger=logger)
-
-    # 准备不同稀疏度的数据集
-    # 注意：这里需要实现数据稀疏度控制
-    logger.info("准备不同稀疏度的数据集...")
-
-    datasets_by_sparsity = []
-    for sparsity in [0.2, 0.5, 0.8]:
-        logger.info(f"  准备稀疏度 {sparsity} 的数据...")
-        # 这里简化处理，实际应该根据稀疏度过滤数据
-        train_loader = get_dataloader(config.category, split="train")
-        val_loader = get_dataloader(config.category, split="val")
-        datasets_by_sparsity.append((f"Sparsity_{sparsity}", train_loader, val_loader))
-
-    # 运行鲁棒性分析
-    results = framework.run_robustness_analysis(
-        model_class=PMAT,
-        datasets_by_sparsity=datasets_by_sparsity,
-        config=config
-    )
-
-    logger.info("\n鲁棒性分析结果:")
-    for sparsity, metrics in results.items():
-        logger.info(f"\n{sparsity}:")
-        logger.info(f"  Recall@10: {metrics.get('Recall@10', 0):.4f}")
-        logger.info(f"  NDCG@10: {metrics.get('NDCG@10', 0):.4f}")
-
-    return results
-
-
-def run_multi_dataset_experiment(logger=None):
-    """多数据集验证实验"""
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
-
-    logger.info("\n" + "="*80)
-    logger.info("多数据集验证实验")
-    logger.info("="*80)
-
-    from experiment_framework import ExperimentFramework
-
-    # 初始化实验框架
-    framework = ExperimentFramework(results_dir="./results", logger=logger)
-
-    # 准备多个数据集
-    datasets = []
-    for dataset_name in ["Video_Games", "Beauty", "Sports"]:
-        logger.info(f"准备数据集: {dataset_name}")
-        try:
-            train_loader = get_dataloader(dataset_name, split="train")
-            val_loader = get_dataloader(dataset_name, split="val")
-            datasets.append((dataset_name, train_loader, val_loader))
-        except Exception as e:
-            logger.warning(f"无法加载数据集 {dataset_name}: {e}")
-
-    if not datasets:
-        logger.error("没有可用的数据集！")
-        return {}
-
-    # 运行多数据集实验
-    results = framework.run_multi_dataset_experiments(
-        model_class=PMAT,
-        datasets=datasets,
-        config=config
-    )
-
-    logger.info("\n多数据集验证结果:")
-    for dataset, metrics in results.items():
-        logger.info(f"\n{dataset}:")
-        logger.info(f"  Recall@10: {metrics.get('Recall@10', 0):.4f}")
-        logger.info(f"  NDCG@10: {metrics.get('NDCG@10', 0):.4f}")
-
-    return results
-
-
-def run_complete_experiments(logger=None):
-    """运行所有完整实验"""
-    if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
-
-    logger.info("\n" + "="*80)
-    logger.info("运行所有完整实验")
-    logger.info("="*80)
-
-    # 1. 基线对比实验
-    logger.info("\n[1/5] 基线对比实验")
-    run_baseline_experiment(logger=logger, quick_mode=False)
-
-    # 2. 消融实验
-    logger.info("\n[2/5] 消融实验")
-    run_ablation_experiment(logger=logger, quick_mode=False)
-
-    # 3. 效率分析
-    logger.info("\n[3/5] 效率分析")
-    run_efficiency_experiment(logger=logger)
-
-    # 4. 鲁棒性分析
-    logger.info("\n[4/5] 鲁棒性分析")
-    run_robustness_experiment(logger=logger)
-
-    # 5. 多数据集验证
-    logger.info("\n[5/5] 多数据集验证")
-    run_multi_dataset_experiment(logger=logger)
-
-    logger.info("\n" + "="*80)
-    logger.info("所有完整实验已完成！")
-    logger.info("="*80)
 
 
 def apply_args_to_config(args):
@@ -663,41 +636,27 @@ if __name__ == "__main__":
 
     # 根据模式运行实验
     if args.mode == 'quick':
-        logger.info("快速测试模式 - 运行所有实验（抽样数据）")
-        # run_baseline_experiment(logger=logger, quick_mode=True)
+        logger.info("快速测试模式 - 运行PMAT和MCRL推荐实验（抽样数据）")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=True)
         run_mcrl_recommendation_experiment(logger=logger, quick_mode=True)
     elif args.mode == 'full':
-        logger.info("完整实验模式 - 运行所有实验")
-        # run_baseline_experiment(logger=logger, quick_mode=False)
+        logger.info("完整实验模式 - 运行PMAT和MCRL推荐实验")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=False)
         run_mcrl_recommendation_experiment(logger=logger, quick_mode=False)
     elif args.mode == 'baseline':
         logger.info("基线实验模式")
         run_baseline_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'ablation':
-        logger.info("消融实验模式")
+        logger.info("消融实验模式 - PMAT和MCRL消融实验")
         run_ablation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'hyper':
-        logger.info("超参实验模式")
+        logger.info("超参实验模式 - PMAT和MCRL超参实验")
         run_hyper_param_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'pmat_rec':
-        logger.info("PMAT推荐模型实验模式（使用真实用户历史）")
+        logger.info("PMAT推荐模型实验模式")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'mcrl_rec':
-        logger.info("MCRL推荐模型实验模式（使用真实用户历史）")
+        logger.info("MCRL推荐模型实验模式")
         run_mcrl_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
-    elif args.mode == 'efficiency':
-        logger.info("效率分析模式")
-        run_efficiency_experiment(logger=logger)
-    elif args.mode == 'robustness':
-        logger.info("鲁棒性分析模式")
-        run_robustness_experiment(logger=logger)
-    elif args.mode == 'multi_dataset':
-        logger.info("多数据集验证模式")
-        run_multi_dataset_experiment(logger=logger)
-    elif args.mode == 'complete':
-        logger.info("完整实验模式 - 运行所有实验")
-        run_complete_experiments(logger=logger)
 
     logger.info("所有实验完成！")

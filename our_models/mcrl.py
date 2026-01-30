@@ -26,19 +26,22 @@ from util import item_id_to_semantic_id
 class UserPreferenceContrastive(nn.Module):
     """用户偏好对比学习模块
     理论依据：定理4，提升ID判别性
+
+    优化：支持多正样本（目标物品 + 用户历史相似物品），提升对比学习泛化能力
     """
-    
-    def __init__(self, hidden_dim: int, temperature: float = 0.07):
+
+    def __init__(self, hidden_dim: int, temperature: float = 0.07, top_k_positives: int = 3):
         super().__init__()
         self.temperature = temperature
-        
+        self.top_k_positives = top_k_positives  # 从历史中选择的额外正样本数量
+
         # ID表征投影器
         self.id_projector = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-        
+
         # 用户偏好编码器
         self.user_encoder = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -46,81 +49,150 @@ class UserPreferenceContrastive(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-        
+
+    def _select_similar_positives(
+        self,
+        target_repr: torch.Tensor,
+        history_repr: torch.Tensor,
+        history_mask: torch.Tensor
+    ) -> torch.Tensor:
+        """从用户历史中选择与目标物品最相似的物品作为额外正样本
+
+        Args:
+            target_repr: (batch, hidden_dim) 目标物品表征
+            history_repr: (batch, seq_len, hidden_dim) 历史物品表征
+            history_mask: (batch, seq_len) 历史序列mask，1表示有效位置
+
+        Returns:
+            similar_positives: (batch, top_k, hidden_dim) 选中的相似正样本
+        """
+        batch_size, seq_len, hidden_dim = history_repr.shape
+
+        # 计算目标物品与历史物品的相似度
+        target_norm = F.normalize(target_repr, dim=-1)  # (batch, hidden_dim)
+        history_norm = F.normalize(history_repr, dim=-1)  # (batch, seq_len, hidden_dim)
+
+        # (batch, seq_len)
+        similarity = torch.bmm(
+            history_norm,  # (batch, seq_len, hidden_dim)
+            target_norm.unsqueeze(-1)  # (batch, hidden_dim, 1)
+        ).squeeze(-1)
+
+        # 将无效位置的相似度设为极小值
+        similarity = similarity.masked_fill(~history_mask.bool(), float('-inf'))
+
+        # 选择top-k相似的历史物品
+        k = min(self.top_k_positives, seq_len)
+        _, top_indices = torch.topk(similarity, k=k, dim=-1)  # (batch, k)
+
+        # 收集top-k历史物品表征
+        # (batch, k, hidden_dim)
+        similar_positives = torch.gather(
+            history_repr,
+            dim=1,
+            index=top_indices.unsqueeze(-1).expand(-1, -1, hidden_dim)
+        )
+
+        return similar_positives
+
     def forward(
         self,
         id_embeddings: torch.Tensor,
         user_embeddings: torch.Tensor,
         positive_ids: torch.Tensor,
-        negative_ids: torch.Tensor
+        negative_ids: torch.Tensor,
+        history_item_repr: torch.Tensor = None,
+        history_mask: torch.Tensor = None
     ) -> torch.Tensor:
         """
         Args:
             id_embeddings: (batch, hidden_dim) 当前物品ID嵌入
             user_embeddings: (batch, hidden_dim) 用户嵌入
-            positive_ids: (batch, num_pos, hidden_dim) 正样本ID
+            positive_ids: (batch, num_pos, hidden_dim) 正样本ID（目标物品）
             negative_ids: (batch, num_neg, hidden_dim) 负样本ID
-            
+            history_item_repr: (batch, seq_len, hidden_dim) 用户历史物品表征（可选）
+            history_mask: (batch, seq_len) 历史序列mask（可选）
+
         Returns:
             loss: 用户偏好对比损失
         """
         batch_size = id_embeddings.size(0)
-        
+
         # 投影ID嵌入
         id_proj = self.id_projector(id_embeddings)  # (batch, hidden_dim)
         id_proj = F.normalize(id_proj, dim=-1)
-        
+
         # 编码用户偏好
         user_repr = self.user_encoder(user_embeddings)  # (batch, hidden_dim)
         user_repr = F.normalize(user_repr, dim=-1)
-        
+
+        # 如果提供了历史物品表征，选择相似物品作为额外正样本
+        if history_item_repr is not None and history_mask is not None:
+            similar_positives = self._select_similar_positives(
+                id_embeddings, history_item_repr, history_mask
+            )  # (batch, top_k, hidden_dim)
+            # 合并目标物品和历史相似物品作为正样本
+            positive_ids = torch.cat([positive_ids, similar_positives], dim=1)
+
         # 投影正负样本
         pos_proj = self.id_projector(positive_ids)  # (batch, num_pos, hidden_dim)
         pos_proj = F.normalize(pos_proj, dim=-1)
-        
+
         neg_proj = self.id_projector(negative_ids)  # (batch, num_neg, hidden_dim)
         neg_proj = F.normalize(neg_proj, dim=-1)
-        
+
         # 计算相似度（考虑用户偏好）
         # 用户偏好加权的相似度
         id_user_weighted = id_proj + 0.5 * user_repr  # 融合用户信息
         id_user_weighted = F.normalize(id_user_weighted, dim=-1)
-        
+
         # 正样本相似度
         pos_sim = torch.bmm(
             id_user_weighted.unsqueeze(1),  # (batch, 1, hidden_dim)
             pos_proj.transpose(1, 2)         # (batch, hidden_dim, num_pos)
         ).squeeze(1)  # (batch, num_pos)
-        
+
         # 负样本相似度
         neg_sim = torch.bmm(
             id_user_weighted.unsqueeze(1),  # (batch, 1, hidden_dim)
             neg_proj.transpose(1, 2)         # (batch, hidden_dim, num_neg)
         ).squeeze(1)  # (batch, num_neg)
-        
+
         # InfoNCE损失
         pos_exp = torch.exp(pos_sim / self.temperature)  # (batch, num_pos)
         neg_exp = torch.exp(neg_sim / self.temperature)  # (batch, num_neg)
-        
+
         # 对每个正样本计算损失
         loss = -torch.log(
             pos_exp / (pos_exp + neg_exp.sum(dim=-1, keepdim=True))
         ).mean()
-        
+
         return loss
 
 
 class IntraModalContrastive(nn.Module):
     """模态内对比学习模块
     理论依据：定理4，增强单模态内的语义判别性
+
+    优化：引入难负样本挖掘机制，筛选与正样本相似度较高的样本作为难负样本，
+    同时过滤潜在的噪声负样本（相似度过高的可能是同类物品）
     """
-    
-    def __init__(self, hidden_dim: int, num_modalities: int, temperature: float = 0.1):
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_modalities: int,
+        temperature: float = 0.1,
+        hard_negative_ratio: float = 0.5,
+        similarity_threshold: float = 0.9
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_modalities = num_modalities
         self.temperature = temperature
-        
+        self.hard_negative_ratio = hard_negative_ratio  # 难负样本占比
+        self.similarity_threshold = similarity_threshold  # 过滤噪声负样本的阈值
+
         # 每个模态的投影器
         self.modal_projectors = nn.ModuleDict()
         self.modal_adapters = nn.ModuleDict()  # 适配不同模态维度到hidden_dim
@@ -132,56 +204,122 @@ class IntraModalContrastive(nn.Module):
             adapter = nn.Linear(modality_dim, self.hidden_dim)
         else:
             adapter = nn.Identity()
-        
+
         self.modal_adapters[modality_name] = adapter
-        
+
         # 投影器：将hidden_dim映射到子空间
         projector = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.ReLU(),
             nn.Linear(self.hidden_dim, self.hidden_dim // self.num_modalities)
         )
-        
+
         self.modal_projectors[modality_name] = projector
+
+    def _hard_negative_mining(
+        self,
+        sim_matrix: torch.Tensor,
+        labels: torch.Tensor
+    ) -> torch.Tensor:
+        """难负样本挖掘
+
+        策略：
+        1. 过滤相似度过高的潜在噪声负样本（可能是同类物品）
+        2. 从剩余负样本中选择相似度较高的作为难负样本
+        3. 对难负样本给予更高的权重
+
+        Args:
+            sim_matrix: (batch, batch) 相似度矩阵
+            labels: (batch,) 正样本标签（对角线索引）
+
+        Returns:
+            weighted_sim_matrix: (batch, batch) 加权后的相似度矩阵
+        """
+        batch_size = sim_matrix.size(0)
+        device = sim_matrix.device
+
+        # 创建mask：对角线为正样本，其他为负样本
+        pos_mask = torch.eye(batch_size, dtype=torch.bool, device=device)
+        neg_mask = ~pos_mask
+
+        # 获取负样本相似度
+        neg_sim = sim_matrix.clone()
+        neg_sim[pos_mask] = float('-inf')  # 屏蔽正样本
+
+        # 过滤噪声负样本：相似度过高的可能是同类物品（false negatives）
+        # 将这些样本的相似度降低，减少其对损失的贡献
+        noise_mask = (neg_sim > self.similarity_threshold / self.temperature) & neg_mask
+
+        # 难负样本挖掘：选择相似度较高但不是噪声的负样本
+        # 计算每个样本的负样本相似度排名
+        neg_sim_for_ranking = neg_sim.clone()
+        neg_sim_for_ranking[noise_mask] = float('-inf')  # 排除噪声负样本
+
+        # 选择top-k难负样本
+        num_hard_negatives = max(1, int(batch_size * self.hard_negative_ratio))
+        _, hard_neg_indices = torch.topk(neg_sim_for_ranking, k=num_hard_negatives, dim=-1)
+
+        # 创建难负样本权重矩阵
+        hard_neg_weight = torch.ones_like(sim_matrix)
+
+        # 对难负样本增加权重（提升对比学习难度）
+        hard_neg_mask = torch.zeros_like(sim_matrix, dtype=torch.bool)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_hard_negatives)
+        hard_neg_mask[batch_indices, hard_neg_indices] = True
+        hard_neg_weight[hard_neg_mask] = 1.5  # 难负样本权重提升
+
+        # 对噪声负样本降低权重（减少false negatives的影响）
+        hard_neg_weight[noise_mask] = 0.5
+
+        # 应用权重到相似度矩阵
+        weighted_sim_matrix = sim_matrix * hard_neg_weight
+
+        return weighted_sim_matrix
 
     def forward(
         self,
         id_embeddings: torch.Tensor,
         modal_features: Dict[str, torch.Tensor],
-        modal_weights: torch.Tensor
+        modal_weights: torch.Tensor,
+        use_hard_negative_mining: bool = True
     ) -> torch.Tensor:
         """
         Args:
             id_embeddings: (batch, hidden_dim) ID嵌入
             modal_features: {'visual': (batch, dim), 'text': (batch, dim), ...}
             modal_weights: (batch, num_modalities) 模态权重
-            
+            use_hard_negative_mining: 是否使用难负样本挖掘
+
         Returns:
             loss: 模态内对比损失
         """
         total_loss = 0.0
         modality_list = sorted(modal_features.keys())
-        
+
         for idx, modality in enumerate(modality_list):
             # 适配模态特征到hidden_dim
             adapter = self.modal_adapters[modality]
             modal_feat = adapter(modal_features[modality])  # (batch, hidden_dim)
-            
+
             # 投影
             projector = self.modal_projectors[modality]
             modal_proj = projector(modal_feat)  # (batch, hidden_dim // num_modalities)
             modal_proj = F.normalize(modal_proj, dim=-1)
-            
+
             # ID嵌入投影到该模态空间
             id_proj = projector(id_embeddings)
             id_proj = F.normalize(id_proj, dim=-1)
-            
+
             # 计算相似度矩阵
             sim_matrix = torch.mm(id_proj, modal_proj.t())  # (batch, batch)
             sim_matrix = sim_matrix / self.temperature
 
             # 对角线为正样本，其他为负样本
             labels = torch.arange(sim_matrix.size(0), device=sim_matrix.device)
+
+            # 难负样本挖掘
+            if use_hard_negative_mining and self.training:
+                sim_matrix = self._hard_negative_mining(sim_matrix, labels)
 
             # 对比损失（按样本计算，保留batch维度）
             modal_loss = F.cross_entropy(sim_matrix, labels, reduction='none')  # (batch,)
@@ -217,7 +355,7 @@ class InterModalContrastive(nn.Module):
             adapter = nn.Linear(modality_dim, self.hidden_dim)
         else:
             adapter = nn.Identity()
-        
+
         self.modal_adapters[modality_name] = adapter
 
     def forward(
@@ -227,7 +365,7 @@ class InterModalContrastive(nn.Module):
         """
         Args:
             modal_features: {'visual': (batch, dim), 'text': (batch, dim), ...}
-            
+
         Returns:
             loss: 模态间对比损失
         """
@@ -236,21 +374,21 @@ class InterModalContrastive(nn.Module):
         for modality, feat in modal_features.items():
             adapter = self.modal_adapters[modality]
             adapted_features[modality] = adapter(feat)
-        
+
         total_loss = 0.0
         num_pairs = 0
-        
+
         modality_list = sorted(adapted_features.keys())
-        
+
         # 遍历所有模态对
         for i in range(len(modality_list)):
             for j in range(i + 1, len(modality_list)):
                 mod_i = modality_list[i]
                 mod_j = modality_list[j]
-                
+
                 feat_i = adapted_features[mod_i]  # (batch, hidden_dim)
                 feat_j = adapted_features[mod_j]  # (batch, hidden_dim)
-                
+
                 # 为这对模态创建对齐网络（如果不存在）
                 key = f"{mod_i}_{mod_j}"
                 if key not in self.alignment_nets:
@@ -259,7 +397,7 @@ class InterModalContrastive(nn.Module):
                         nn.ReLU(),
                         nn.Linear(self.hidden_dim, 1)
                     ).to(feat_i.device)
-                
+
                 # 正样本：同一物品的不同模态
                 pos_pairs = torch.cat([feat_i, feat_j], dim=-1)  # (batch, 2*hidden_dim)
 
@@ -291,7 +429,7 @@ class InterModalContrastive(nn.Module):
                 # 添加数值稳定性：裁剪极端值，增大epsilon
                 score_diff = torch.clamp(pos_scores - neg_scores, min=-50, max=50)
                 pair_loss = -torch.log(torch.sigmoid(score_diff) + 1e-6).mean()
-                
+
                 total_loss += pair_loss
                 num_pairs += 1
 
@@ -523,10 +661,23 @@ class MCRL(AbstractTrainableModel):
     def __init__(
         self,
         config,
+        ablation_mode: Optional[str] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
+        """初始化MCRL模型
+
+        Args:
+            config: 配置对象
+            ablation_mode: 消融模式，可选值：
+                - None: 完整模型
+                - "no_user_cl": 移除用户偏好对比学习
+                - "no_intra_cl": 移除模态内对比学习
+                - "no_inter_cl": 移除模态间对比学习
+            device: 设备
+        """
         super().__init__(device=device)
         self.config = config
+        self.ablation_mode = ablation_mode
 
         # 从配置中获取参数
         self.alpha = getattr(config, 'mcrl_alpha', 0.5)  # 模态内对比权重
@@ -636,6 +787,10 @@ class MCRL(AbstractTrainableModel):
         Raises:
             KeyError: 如果batch缺少必要的键
         """
+        # 训练模式下自动清理缓存，避免内存泄露
+        if self.training:
+            self.clear_cache()
+
         # 验证batch数据完整性
         self._validate_batch(batch)
 
@@ -658,11 +813,21 @@ class MCRL(AbstractTrainableModel):
             batch['neg_vision_feat']
         )  # (batch, num_neg, hidden_dim)
 
-        # 4. 计算用户-物品匹配分数
+        # 4. 编码历史物品表征（用于对比学习的多正样本）
+        batch_size, seq_len, _ = batch['history_text_feat'].shape
+        history_text_flat = batch['history_text_feat'].view(batch_size * seq_len, -1)
+        history_vision_flat = batch['history_vision_feat'].view(batch_size * seq_len, -1)
+        history_item_repr = self.item_encoder(history_text_flat, history_vision_flat)
+        history_item_repr = history_item_repr.view(batch_size, seq_len, -1)  # (batch, seq_len, hidden_dim)
+
+        # 创建历史序列mask
+        history_mask = torch.arange(seq_len, device=batch['history_len'].device).unsqueeze(0) < batch['history_len'].unsqueeze(1)
+
+        # 5. 计算用户-物品匹配分数
         pos_scores = self.matcher(user_repr, pos_item_repr)  # (batch,)
         neg_scores = self.matcher(user_repr, neg_item_repr)  # (batch, num_neg)
 
-        # 5. 对比学习（使用真实物品表征）
+        # 6. 对比学习（使用真实物品表征）
         # 准备模态特征
         modal_features = {
             'visual': batch['target_vision_feat'],
@@ -676,29 +841,41 @@ class MCRL(AbstractTrainableModel):
         # 优化物品表征
         optimized_pos_repr = self.id_optimizer(pos_item_repr) + pos_item_repr
 
-        # 对比学习损失
-        # Layer 1: 用户偏好对比学习
-        L_user = self.user_preference_cl(
-            id_embeddings=pos_item_repr,
-            user_embeddings=user_repr,
-            positive_ids=pos_item_repr.unsqueeze(1),  # 正样本是目标物品本身
-            negative_ids=neg_item_repr  # 负样本
-        )
+        # 对比学习损失（根据消融模式选择性计算）
+        # Layer 1: 用户偏好对比学习（使用历史相似物品作为额外正样本）
+        if self.ablation_mode != 'no_user_cl':
+            L_user = self.user_preference_cl(
+                id_embeddings=pos_item_repr,
+                user_embeddings=user_repr,
+                positive_ids=pos_item_repr.unsqueeze(1),  # 目标物品作为主正样本
+                negative_ids=neg_item_repr,
+                history_item_repr=history_item_repr,  # 历史物品表征
+                history_mask=history_mask  # 历史序列mask
+            )
+        else:
+            L_user = torch.tensor(0.0, device=pos_item_repr.device)
 
         # Layer 2: 模态内对比学习
-        L_intra = self.intra_modal_cl(
-            id_embeddings=pos_item_repr,
-            modal_features=modal_features,
-            modal_weights=modal_weights
-        )
+        if self.ablation_mode != 'no_intra_cl':
+            L_intra = self.intra_modal_cl(
+                id_embeddings=pos_item_repr,
+                modal_features=modal_features,
+                modal_weights=modal_weights
+            )
+        else:
+            L_intra = torch.tensor(0.0, device=pos_item_repr.device)
 
         # Layer 3: 模态间对比学习
-        L_inter = self.inter_modal_cl(modal_features=modal_features)
+        if self.ablation_mode != 'no_inter_cl':
+            L_inter = self.inter_modal_cl(modal_features=modal_features)
+        else:
+            L_inter = torch.tensor(0.0, device=pos_item_repr.device)
 
         # 缓存表征（用于推理时避免重复计算）
         if not self.training:
             self._cached_user_repr = user_repr.detach()
             self._cached_item_repr = optimized_pos_repr.detach()
+            self._cache_timestamp = torch.tensor(1)  # 标记缓存已更新
 
         return {
             'user_repr': user_repr,
@@ -768,6 +945,9 @@ class MCRL(AbstractTrainableModel):
         Returns:
             user_embedding: (batch, hidden_dim)
         """
+        # 检查缓存过期
+        self.check_cache_expiry()
+
         # 尝试使用缓存（避免重复计算）
         if use_cache and hasattr(self, '_cached_user_repr') and self._cached_user_repr is not None:
             return self._cached_user_repr
@@ -789,6 +969,9 @@ class MCRL(AbstractTrainableModel):
         Returns:
             item_embedding: (num_items, hidden_dim)
         """
+        # 检查缓存过期
+        self.check_cache_expiry()
+
         # 尝试使用缓存（避免重复计算）
         if use_cache and hasattr(self, '_cached_item_repr') and self._cached_item_repr is not None:
             return self._cached_item_repr
@@ -799,9 +982,42 @@ class MCRL(AbstractTrainableModel):
         return optimized_repr
 
     def clear_cache(self):
-        """清除表征缓存"""
+        """清除表征缓存
+
+        优化：添加缓存过期机制，避免内存泄露
+        - 训练模式下在forward开始时自动调用
+        - 推理模式下可手动调用或通过check_cache_expiry自动清理
+        """
+        if hasattr(self, '_cached_user_repr'):
+            del self._cached_user_repr
+        if hasattr(self, '_cached_item_repr'):
+            del self._cached_item_repr
+        if hasattr(self, '_cache_timestamp'):
+            del self._cache_timestamp
+
         self._cached_user_repr = None
         self._cached_item_repr = None
+        self._cache_timestamp = None
+
+    def check_cache_expiry(self, max_cache_calls: int = 100):
+        """检查缓存是否过期，过期则自动清理
+
+        Args:
+            max_cache_calls: 缓存最大使用次数，超过则清理
+
+        Returns:
+            bool: 缓存是否被清理
+        """
+        if not hasattr(self, '_cache_access_count'):
+            self._cache_access_count = 0
+
+        self._cache_access_count += 1
+
+        if self._cache_access_count >= max_cache_calls:
+            self.clear_cache()
+            self._cache_access_count = 0
+            return True
+        return False
 
     # ==================== AbstractTrainableModel 抽象方法实现 ====================
 
@@ -977,3 +1193,25 @@ class MCRL(AbstractTrainableModel):
         metrics['AUC'] = auc
 
         return metrics
+
+
+
+def get_mcrl_ablation_model(ablation_module: str, config=None):
+    """
+    获取MCRL消融实验模型
+
+    Args:
+        ablation_module: 要移除的模块名称
+            - "no_user_cl": 移除用户偏好对比学习
+            - "no_intra_cl": 移除模态内对比学习
+            - "no_inter_cl": 移除模态间对比学习
+        config: 配置对象
+
+    Returns:
+        MCRL消融模型实例
+    """
+    if config is None:
+        from config import config as default_config
+        config = default_config
+
+    return MCRL(config, ablation_mode=ablation_module)

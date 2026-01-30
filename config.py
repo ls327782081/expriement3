@@ -81,13 +81,17 @@ class BaseConfig:
         # 待实现: AMMRM, CoFiRec, LETTER
     ])
 
-    # 消融实验模块
-    ablation_modules: List[str] = field(default_factory=lambda: [
+    # PMAT消融实验模块
+    pmat_ablation_modules: List[str] = field(default_factory=lambda: [
         "no_personalization",   # 移除个性化模态权重
-        "no_dynamic_update",    # 移除动态更新
-        "no_user_cl",          # 移除用户偏好对比
-        "no_intra_cl",         # 移除模态内对比
-        "no_inter_cl"          # 移除模态间对比
+        "no_dynamic_update",    # 移除动态更新机制
+    ])
+
+    # MCRL消融实验模块
+    mcrl_ablation_modules: List[str] = field(default_factory=lambda: [
+        "no_user_cl",          # 移除用户偏好对比学习
+        "no_intra_cl",         # 移除模态内对比学习
+        "no_inter_cl"          # 移除模态间对比学习
     ])
 
     # 超参数搜索空间

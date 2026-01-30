@@ -244,27 +244,51 @@ class DynamicIDUpdater(nn.Module):
         new_features: torch.Tensor,
         drift_score: torch.Tensor
     ) -> torch.Tensor:
-        """增量更新ID
-        
+        """增量更新ID（支持单物品和多物品批量更新）
+
         Args:
-            current_id_emb: (batch, dim) 当前ID嵌入
-            new_features: (batch, dim) 新特征
+            current_id_emb: (batch, dim) 或 (batch, num_items, dim) 当前ID嵌入
+            new_features: (batch, dim) 或 (batch, num_items, dim) 新特征
             drift_score: (batch,) 漂移分数
-            
+
         Returns:
-            updated_id_emb: (batch, dim) 更新后的ID嵌入
+            updated_id_emb: 与输入相同形状的更新后ID嵌入
         """
-        # 计算更新门控
-        combined = torch.cat([current_id_emb, new_features], dim=-1)
-        gate = self.update_gate(combined)  # (batch, dim)
-        
-        # 根据漂移分数决定更新强度
-        drift_mask = (drift_score > self.drift_threshold).float().unsqueeze(-1)
-        effective_gate = gate * drift_mask
-        
-        # 增量更新
-        updated_id_emb = (1 - effective_gate) * current_id_emb + effective_gate * new_features
-        
+        # 处理多物品情况：向量化操作替代循环
+        if current_id_emb.dim() == 3:
+            # (batch, num_items, dim) -> 展平处理
+            batch_size, num_items, dim = current_id_emb.shape
+
+            # 展平为 (batch * num_items, dim)
+            current_flat = current_id_emb.view(-1, dim)
+            new_flat = new_features.view(-1, dim)
+
+            # 计算更新门控
+            combined = torch.cat([current_flat, new_flat], dim=-1)
+            gate = self.update_gate(combined)  # (batch * num_items, dim)
+
+            # 扩展drift_score到所有物品: (batch,) -> (batch * num_items,)
+            drift_expanded = drift_score.unsqueeze(1).expand(-1, num_items).reshape(-1)
+            drift_mask = (drift_expanded > self.drift_threshold).float().unsqueeze(-1)
+            effective_gate = gate * drift_mask
+
+            # 增量更新
+            updated_flat = (1 - effective_gate) * current_flat + effective_gate * new_flat
+
+            # 恢复形状
+            updated_id_emb = updated_flat.view(batch_size, num_items, dim)
+        else:
+            # 单物品情况：(batch, dim)
+            combined = torch.cat([current_id_emb, new_features], dim=-1)
+            gate = self.update_gate(combined)  # (batch, dim)
+
+            # 根据漂移分数决定更新强度
+            drift_mask = (drift_score > self.drift_threshold).float().unsqueeze(-1)
+            effective_gate = gate * drift_mask
+
+            # 增量更新
+            updated_id_emb = (1 - effective_gate) * current_id_emb + effective_gate * new_features
+
         return updated_id_emb
 
 
@@ -702,14 +726,13 @@ class PMAT(AbstractTrainableModel):
             semantic_ids_logits = semantic_ids_logits.view(batch_size, num_items, self.config.id_length, -1)
             quantized_emb = quantized_emb.view(batch_size, num_items, -1)
 
-            # ===== 动态ID更新（多物品情况）=====
+            # ===== 动态ID更新（多物品情况，向量化操作）=====
             if self.ablation_mode != 'no_dynamic_update' and short_history is not None and long_history is not None:
                 drift_score = self.dynamic_updater.detect_drift(short_history, long_history)
-                # 对每个物品应用更新
-                for i in range(num_items):
-                    quantized_emb[:, i, :] = self.dynamic_updater.update(
-                        quantized_emb[:, i, :], fused_feat[:, i, :], drift_score
-                    )
+                # 向量化批量更新所有物品（替代for循环，提升效率）
+                quantized_emb = self.dynamic_updater.update(
+                    quantized_emb, fused_feat, drift_score
+                )
 
         return fused_feat, semantic_ids_logits, quantized_emb
 
@@ -941,6 +964,25 @@ class PMAT(AbstractTrainableModel):
         for stage_id, opt_state in state_dict.items():
             if stage_id in self._stage_optimizers:
                 self._stage_optimizers[stage_id].load_state_dict(opt_state)
+
+    def _update_params(self, loss: torch.Tensor, optimizer: torch.optim.Optimizer, scaler=None):
+        """重写参数更新逻辑，添加梯度裁剪
+
+        多任务损失（BPR + 语义ID）叠加可能导致梯度爆炸，需要梯度裁剪
+        """
+        optimizer.zero_grad()
+        if scaler:
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+            optimizer.step()
 
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
         """
