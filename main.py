@@ -612,11 +612,10 @@ if __name__ == "__main__":
     # 设置日志
     os.makedirs(config.log_dir, exist_ok=True)
     logging.basicConfig(
-        encoding="utf-8",
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(config.log_dir, f'experiment_{pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")}.log')),
+            logging.FileHandler(os.path.join(config.log_dir, f'experiment_{pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")}.log'), encoding='utf-8'),
             logging.StreamHandler()
         ]
     )
