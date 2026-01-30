@@ -206,7 +206,12 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         if stage_id not in self._stage_optimizers:
             self._stage_optimizers[stage_id] = self._get_optimizer(stage_id, stage_kwargs)
         optimizer = self._stage_optimizers[stage_id]
-        scaler = torch.cuda.amp.GradScaler() if self.device.type == "cuda" else None
+
+        # 混合精度训练配置
+        # 注意：某些模型架构（如包含自定义层的模型）可能与AMP不兼容
+        # 如果遇到dtype不匹配错误，可以设置use_amp=False
+        use_amp = False  # 禁用混合精度训练以避免dtype不匹配问题
+        scaler = torch.cuda.amp.GradScaler() if use_amp else None
 
         pbar = tqdm(train_dataloader, desc=f"Stage {stage_id} Train Epoch")
         for batch_idx, batch in enumerate(pbar):
@@ -219,8 +224,13 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
             elif isinstance(batch, (list, tuple)):
                 batch = [x.to(self.device) if isinstance(x, torch.Tensor) else x for x in batch]
 
-            # 核心训练逻辑
-            loss, metrics = self._train_one_batch(batch, stage_id, stage_kwargs)
+            # 核心训练逻辑（使用autocast进行混合精度）
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    loss, metrics = self._train_one_batch(batch, stage_id, stage_kwargs)
+            else:
+                loss, metrics = self._train_one_batch(batch, stage_id, stage_kwargs)
+
             # 参数更新
             self._update_params(loss, optimizer, scaler)
 

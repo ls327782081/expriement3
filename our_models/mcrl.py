@@ -500,6 +500,10 @@ class MCRLUserEncoder(nn.Module):
         Returns:
             user_interest: (batch, hidden_dim)
         """
+        # 确保输入特征与模型权重dtype一致（float16 -> float32）
+        history_text_feat = history_text_feat.float()
+        history_vision_feat = history_vision_feat.float()
+
         batch_size, max_seq_len, _ = history_text_feat.shape
         device = history_text_feat.device
 
@@ -584,6 +588,10 @@ class MCRLItemEncoder(nn.Module):
         Returns:
             item_repr: (batch, hidden_dim) 或 (batch, num_items, hidden_dim)
         """
+        # 确保输入特征与模型权重dtype一致（float16 -> float32）
+        text_feat = text_feat.float()
+        vision_feat = vision_feat.float()
+
         text_encoded = self.text_encoder(text_feat)
         visual_encoded = self.visual_encoder(vision_feat)
 

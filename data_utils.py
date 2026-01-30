@@ -1501,6 +1501,7 @@ def get_pmat_dataloader(
     batch_size: int = 32,
     max_history_len: int = 50,
     num_negative_samples: int = 4,
+    eval_num_negative_samples: int = 99,
     shuffle: bool = True,
     num_workers: int = 0,
     quick_mode: bool = False,
@@ -1514,7 +1515,8 @@ def get_pmat_dataloader(
         category: 数据集类别
         batch_size: 批次大小
         max_history_len: 最大历史长度
-        num_negative_samples: 负样本数量
+        num_negative_samples: 训练时负样本数量
+        eval_num_negative_samples: 评估时负样本数量（更多负样本确保指标准确）
         shuffle: 是否打乱
         num_workers: 工作进程数
         quick_mode: 快速模式
@@ -1555,22 +1557,24 @@ def get_pmat_dataloader(
     config.user_vocab_size = data['num_users']
 
     # 创建数据集
+    # 训练集使用较少负样本（加快训练）
     train_dataset = PMATDataset(
         data, "train_sequences",
         max_history_len=max_history_len,
         num_negative_samples=num_negative_samples,
         logger=logger
     )
+    # 验证集和测试集使用更多负样本（确保评估指标准确）
     val_dataset = PMATDataset(
         data, "val_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=num_negative_samples,
+        num_negative_samples=eval_num_negative_samples,
         logger=logger
     )
     test_dataset = PMATDataset(
         data, "test_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=num_negative_samples,
+        num_negative_samples=eval_num_negative_samples,
         logger=logger
     )
 

@@ -52,7 +52,8 @@ class BaseConfig:
     rec_loss_weight: float = 1.0  # 推荐损失（BPR）权重
     semantic_loss_weight: float = 0.1  # 语义ID生成损失权重
     max_history_len: int = 50  # 用户历史序列最大长度
-    num_negative_samples: int = 4  # 每个正样本对应的负样本数量
+    num_negative_samples: int = 4  # 训练时每个正样本对应的负样本数量
+    eval_num_negative_samples: int = 99  # 评估时每个正样本对应的负样本数量（更多负样本确保指标准确）
 
     # MCRL特定配置
     mcrl_alpha: float = 1.0  # 模态内对比权重

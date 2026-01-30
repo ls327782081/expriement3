@@ -1037,9 +1037,8 @@ class PMAT(AbstractTrainableModel):
 
                 # 前向传播
                 outputs = self.forward(batch)
-
-                # 计算损失
                 losses = self.compute_loss(outputs)
+
                 total_loss += losses['total_loss'].item()
                 total_bpr_loss += losses['bpr_loss'].item()
                 total_semantic_loss += losses['semantic_loss'].item()
