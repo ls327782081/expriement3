@@ -37,10 +37,10 @@ class BaseConfig:
     dropout: float = 0.1
 
     # 多模态配置
-    num_modalities: int = 3  # 默认：视觉+文本+音频
+    num_modalities: int = 2  # 视觉+文本（实际使用的模态数量）
     visual_dim: int = 512   # 视觉特征维度 (CLIP ViT-B/32)
     text_dim: int = 768     # 文本特征维度 (BERT-base)
-    audio_dim: int = 128    # 音频特征维度
+    audio_dim: int = 128    # 音频特征维度（预留）
 
     # PMAT特定配置
     drift_threshold: float = 0.3  # 兴趣漂移阈值

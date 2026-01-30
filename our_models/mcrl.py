@@ -299,7 +299,9 @@ class IntraModalContrastive(nn.Module):
         for idx, modality in enumerate(modality_list):
             # 适配模态特征到hidden_dim
             adapter = self.modal_adapters[modality]
-            modal_feat = adapter(modal_features[modality])  # (batch, hidden_dim)
+            # 确保输入特征与模型权重dtype一致（float16 -> float32）
+            modal_input = modal_features[modality].float()
+            modal_feat = adapter(modal_input)  # (batch, hidden_dim)
 
             # 投影
             projector = self.modal_projectors[modality]
@@ -373,7 +375,8 @@ class InterModalContrastive(nn.Module):
         adapted_features = {}
         for modality, feat in modal_features.items():
             adapter = self.modal_adapters[modality]
-            adapted_features[modality] = adapter(feat)
+            # 确保输入特征与模型权重dtype一致（float16 -> float32）
+            adapted_features[modality] = adapter(feat.float())
 
         total_loss = 0.0
         num_pairs = 0
