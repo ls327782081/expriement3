@@ -3,8 +3,17 @@ import torch
 import numpy as np
 
 
-def calculate_metrics(user_ids, predictions, ground_truth, k_list=[5, 10, 20], logger=None):
-    """计算推荐系统指标"""
+def calculate_metrics(user_ids, predictions, ground_truth, k_list=[5, 10, 20], logger=None, scores=None):
+    """计算推荐系统指标
+    
+    Args:
+        user_ids: 用户ID列表
+        predictions: 排序后的物品ID列表，如 [[item1, item2, item3, ...], ...]
+        ground_truth: 真实相关的物品ID列表，如 [[item1, item5], ...]
+        k_list: 要计算的K值列表
+        logger: 日志记录器
+        scores: 可选，预测分数列表，形状与predictions相同，用于计算AUC
+    """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
         
@@ -30,6 +39,11 @@ def calculate_metrics(user_ids, predictions, ground_truth, k_list=[5, 10, 20], l
     coverage = coverage_at_k(predictions, ground_truth, k_list[-1])
     metrics["MAP"] = map_score
     metrics[f"Coverage@{k_list[-1]}"] = coverage
+    
+    # 如果提供了分数，计算AUC
+    if scores is not None:
+        auc = auc_at_k(scores, ground_truth)
+        metrics["AUC"] = auc
 
     return metrics
 
@@ -118,3 +132,61 @@ def coverage_at_k(predictions, ground_truth, k):
         all_items.update(gt)
         recommended_items.update(pred[:k])
     return len(recommended_items) / len(all_items) if all_items else 0
+
+
+def auc_at_k(scores, ground_truth):
+    """计算AUC
+    
+    Args:
+        scores: 预测分数列表，形状与predictions相同
+        ground_truth: 真实相关的物品ID列表
+        
+    Returns:
+        AUC值
+    """
+    if not scores or not ground_truth:
+        return 0.0
+        
+    auc_scores = []
+    for score_list, gt_list in zip(scores, ground_truth):
+        if len(gt_list) == 0:
+            continue
+            
+        # 将分数转换为numpy数组
+        score_array = np.array(score_list)
+        
+        # 创建标签：1表示相关物品，0表示不相关物品
+        labels = np.zeros(len(score_array))
+        for i, item_id in enumerate(range(len(score_array))):
+            if i == 0:  # 假设第一个物品是正样本
+                labels[i] = 1
+                
+        # 计算AUC
+        if len(np.unique(labels)) < 2:  # 如果只有一个类别，跳过
+            continue
+            
+        try:
+            from sklearn.metrics import roc_auc_score
+            auc = roc_auc_score(labels, score_array)
+            auc_scores.append(auc)
+        except:
+            # 如果sklearn不可用，使用简单的AUC计算
+            pos_scores = score_array[labels == 1]
+            neg_scores = score_array[labels == 0]
+            
+            if len(pos_scores) == 0 or len(neg_scores) == 0:
+                continue
+                
+            # 计算正样本分数大于负样本分数的比例
+            auc = 0.0
+            for pos_score in pos_scores:
+                for neg_score in neg_scores:
+                    if pos_score > neg_score:
+                        auc += 1.0
+                    elif pos_score == neg_score:
+                        auc += 0.5
+                        
+            auc = auc / (len(pos_scores) * len(neg_scores))
+            auc_scores.append(auc)
+    
+    return sum(auc_scores) / len(auc_scores) if auc_scores else 0.0

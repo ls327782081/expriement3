@@ -1070,7 +1070,7 @@ class PMAT(AbstractTrainableModel):
         neg_scores: torch.Tensor,
         k_list: List[int] = [5, 10, 20]
     ) -> Dict[str, float]:
-        """计算推荐指标
+        """计算推荐指标，与metrics.py保持一致
 
         Args:
             pos_scores: (num_samples,) 正样本分数
@@ -1092,32 +1092,88 @@ class PMAT(AbstractTrainableModel):
         # 排名 = 比正样本分数高的负样本数量 + 1
         ranks = (neg_scores > pos_scores.unsqueeze(1)).sum(dim=1) + 1  # (num_samples,)
 
-        # Hit Rate / Recall@K
-        for k in k_list:
-            hit_at_k = (ranks <= k).float().mean().item()
-            metrics[f'HR@{k}'] = hit_at_k
-            metrics[f'Recall@{k}'] = hit_at_k  # 在这种设置下，HR和Recall相同
+        # 创建预测排名和真实标签，用于计算指标
+        # 将分数转换为物品ID排名
+        _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)
+        predictions = sorted_indices.tolist()  # 每个样本的物品ID排名列表
+        ground_truth = [[0] for _ in range(num_samples)]  # 假设物品ID 0是正样本
 
-        # NDCG@K
+        # 计算各项指标
         for k in k_list:
-            # DCG = 1 / log2(rank + 1) if rank <= k else 0
-            dcg = torch.where(
-                ranks <= k,
-                1.0 / torch.log2(ranks.float() + 1),
-                torch.zeros_like(ranks.float())
-            )
-            # IDCG = 1 / log2(2) = 1 (因为只有一个正样本，理想排名是1)
-            idcg = 1.0
-            ndcg = (dcg / idcg).mean().item()
-            metrics[f'NDCG@{k}'] = ndcg
+            # Precision@K
+            precision = 0.0
+            # Recall@K (与HR@K相同，因为每个样本只有一个正样本)
+            recall = 0.0
+            # NDCG@K
+            ndcg = 0.0
+            # MRR@K
+            mrr_k = 0.0
+            
+            for i in range(num_samples):
+                pred_k = predictions[i][:k]
+                gt = ground_truth[i]
+                
+                # Precision@K = 命中数 / K
+                hits = len(set(pred_k) & set(gt))
+                precision += hits / k
+                
+                # Recall@K = 命中数 / 正样本数 (这里正样本数为1)
+                recall += hits / len(gt) if len(gt) > 0 else 0
+                
+                # NDCG@K
+                dcg = 0.0
+                for j, item in enumerate(pred_k):
+                    if item in gt:
+                        dcg += 1.0 / np.log2(j + 2)
+                
+                # IDCG: 理想DCG，正样本排在第一位
+                idcg = 1.0 / np.log2(2)  # 1.0
+                ndcg += dcg / idcg if idcg > 0 else 0
+                
+                # MRR@K: 第一个相关物品排名的倒数
+                for j, item in enumerate(pred_k):
+                    if item in gt:
+                        mrr_k += 1.0 / (j + 1)
+                        break
+                else:
+                    mrr_k += 0.0
+            
+            # 计算平均值
+            metrics[f'Precision@{k}'] = precision / num_samples
+            metrics[f'Recall@{k}'] = recall / num_samples  # 与HR@K相同
+            metrics[f'HR@{k}'] = recall / num_samples  # 保持与原代码一致
+            metrics[f'NDCG@{k}'] = ndcg / num_samples
+            metrics[f'MRR@{k}'] = mrr_k / num_samples
 
-        # MRR (Mean Reciprocal Rank)
+        # 计算MRR (不限制K)
         mrr = (1.0 / ranks.float()).mean().item()
         metrics['MRR'] = mrr
 
-        # AUC近似
+        # 计算AUC
         auc = (pos_scores.unsqueeze(1) > neg_scores).float().mean().item()
         metrics['AUC'] = auc
+        
+        # 计算MAP (Mean Average Precision)
+        map_score = 0.0
+        for i in range(num_samples):
+            pred = predictions[i]
+            gt = ground_truth[i]
+            hits = 0
+            precision_sum = 0.0
+            for j, item in enumerate(pred):
+                if item in gt:
+                    hits += 1
+                    precision_sum += hits / (j + 1)
+            map_score += precision_sum / len(gt) if len(gt) > 0 else 0.0
+        metrics['MAP'] = map_score / num_samples
+        
+        # 计算Coverage@K (使用最大的K)
+        max_k = max(k_list)
+        all_items = set(range(num_neg + 1))  # 所有可能的物品ID
+        recommended_items = set()
+        for i in range(num_samples):
+            recommended_items.update(predictions[i][:max_k])
+        metrics[f'Coverage@{max_k}'] = len(recommended_items) / len(all_items) if all_items else 0.0
 
         return metrics
 
@@ -1227,4 +1283,3 @@ def get_pmat_ablation_model(ablation_module: str, config=None):
         config = default_config
 
     return PMAT(config, ablation_mode=ablation_module)
-
