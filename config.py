@@ -13,7 +13,7 @@ class BaseConfig:
 
     # 数据配置
     category: str = "Video_Games"  # 数据集类别
-    max_samples: int = 50000  # 控制样本量
+    max_samples: int = 5000  # 控制样本量
     item_vocab_size: int = None # 物品库规模
     user_vocab_size: int = None   # 用户库规模
 
