@@ -697,9 +697,18 @@ class MCRL(AbstractTrainableModel):
         self.hidden_dim = config.hidden_dim
         self.num_modalities = config.num_modalities
 
-        # 损失权重
+        # 损失权重（初始值，会在两阶段训练中动态调整）
         self.rec_loss_weight = getattr(config, 'rec_loss_weight', 1.0)
         self.contrastive_loss_weight = getattr(config, 'mcrl_loss_weight', 0.5)
+
+        # ==================== 两阶段训练配置 ====================
+        self.two_stage_enabled = getattr(config, 'mcrl_two_stage', True)
+        self.stage1_rec_weight = getattr(config, 'mcrl_stage1_rec_weight', 0.1)
+        self.stage1_cl_weight = getattr(config, 'mcrl_stage1_cl_weight', 1.0)
+        self.stage2_rec_weight = getattr(config, 'mcrl_stage2_rec_weight', 1.0)
+        self.stage2_cl_weight = getattr(config, 'mcrl_stage2_cl_weight', 0.3)
+        self.freeze_matcher_stage1 = getattr(config, 'mcrl_freeze_matcher_stage1', True)
+        self.current_training_stage = 1  # 当前训练阶段（1或2）
 
         # ==================== 新增：推荐模块 ====================
         # 用户兴趣编码器
@@ -739,9 +748,12 @@ class MCRL(AbstractTrainableModel):
             nn.Linear(config.hidden_dim, config.hidden_dim)
         )
 
-        # 可学习的模态权重模块（基于用户和物品表征动态计算模态权重）
+        # 可学习的模态权重模块
+        # 修复：使用原始模态特征计算权重，避免循环依赖
+        # 输入：原始视觉特征 + 原始文本特征
+        modal_input_dim = config.visual_dim + config.text_dim
         self.modal_weight_learner = nn.Sequential(
-            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+            nn.Linear(modal_input_dim, config.hidden_dim),
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(config.hidden_dim, config.num_modalities),
@@ -759,6 +771,78 @@ class MCRL(AbstractTrainableModel):
         for modality, dim in modal_dims.items():
             self.intra_modal_cl.add_modality(modality, dim)
             self.inter_modal_cl.add_modality(modality, dim)
+
+    # ==================== 两阶段训练钩子 ====================
+    def on_stage_start(self, stage_id: int, stage_kwargs: Dict):
+        """阶段开始钩子：设置损失权重和冻结策略
+
+        Stage 1 (表征塑形): 专注对比学习，低推荐权重，冻结matcher
+        Stage 2 (推荐对齐): 专注推荐，低对比权重，解冻所有模块
+        """
+        if not self.two_stage_enabled:
+            return
+
+        self.current_training_stage = stage_id
+
+        if stage_id == 1:
+            # Stage 1: 表征塑形阶段
+            self.rec_loss_weight = self.stage1_rec_weight
+            self.contrastive_loss_weight = self.stage1_cl_weight
+
+            # 冻结matcher（可选）
+            if self.freeze_matcher_stage1:
+                self._freeze_module(self.matcher)
+                print(f"[Stage 1] 冻结matcher，专注对比学习")
+
+            print(f"[Stage 1] 损失权重: rec={self.rec_loss_weight}, cl={self.contrastive_loss_weight}")
+
+        elif stage_id == 2:
+            # Stage 2: 推荐对齐阶段
+            self.rec_loss_weight = self.stage2_rec_weight
+            self.contrastive_loss_weight = self.stage2_cl_weight
+
+            # 解冻matcher
+            self._unfreeze_module(self.matcher)
+
+            # 冻结对比学习的projector（保持表征空间稳定）
+            self._freeze_contrastive_projectors()
+
+            print(f"[Stage 2] 解冻matcher，冻结对比projector")
+            print(f"[Stage 2] 损失权重: rec={self.rec_loss_weight}, cl={self.contrastive_loss_weight}")
+
+    def on_stage_switch(self, from_stage_id: int, to_stage_id: int, to_stage_kwargs: Dict):
+        """阶段切换钩子"""
+        print(f"\n{'='*50}")
+        print(f"MCRL: 从Stage {from_stage_id}切换到Stage {to_stage_id}")
+        print(f"{'='*50}")
+
+    def _freeze_module(self, module: nn.Module):
+        """冻结模块参数"""
+        for param in module.parameters():
+            param.requires_grad = False
+
+    def _unfreeze_module(self, module: nn.Module):
+        """解冻模块参数"""
+        for param in module.parameters():
+            param.requires_grad = True
+
+    def _freeze_contrastive_projectors(self):
+        """冻结对比学习的projector，保持表征空间稳定"""
+        # 冻结模态内对比的projector
+        for name, module in self.intra_modal_cl.modal_projectors.items():
+            self._freeze_module(module)
+        for name, module in self.intra_modal_cl.modal_adapters.items():
+            self._freeze_module(module)
+
+        # 冻结模态间对比的alignment网络
+        for name, module in self.inter_modal_cl.alignment_nets.items():
+            self._freeze_module(module)
+        for name, module in self.inter_modal_cl.modal_adapters.items():
+            self._freeze_module(module)
+
+        # 冻结用户偏好对比的projector
+        self._freeze_module(self.user_preference_cl.id_projector)
+        self._freeze_module(self.user_preference_cl.user_encoder)
 
     def _validate_batch(self, batch: Dict[str, torch.Tensor]) -> None:
         """验证batch数据的完整性
@@ -845,9 +929,14 @@ class MCRL(AbstractTrainableModel):
             'text': batch['target_text_feat']
         }
 
-        # 使用可学习的模态权重（基于用户和物品表征动态计算）
-        weight_input = torch.cat([user_repr, pos_item_repr], dim=-1)  # (batch, hidden_dim * 2)
-        modal_weights = self.modal_weight_learner(weight_input)  # (batch, num_modalities)
+        # 使用原始模态特征计算模态权重（修复循环依赖问题）
+        # 输入：原始视觉特征 + 原始文本特征，不依赖编码后的表征
+        # detach()切断梯度，让modal_weights成为"观测量"而非"优化目标"
+        modal_weight_input = torch.cat([
+            batch['target_vision_feat'].float(),
+            batch['target_text_feat'].float()
+        ], dim=-1)  # (batch, visual_dim + text_dim)
+        modal_weights = self.modal_weight_learner(modal_weight_input).detach()  # (batch, num_modalities)
 
         # 优化物品表征
         optimized_pos_repr = self.id_optimizer(pos_item_repr) + pos_item_repr

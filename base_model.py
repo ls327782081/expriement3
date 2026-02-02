@@ -73,10 +73,22 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         print(
             f"Checkpoint saved to {path} | Stage: {self.current_stage_id} | Epoch in stage: {self.current_stage_epoch}")
 
-    def load_checkpoint(self, path: str) -> Dict:
-        """加载检查点，恢复多阶段训练状态"""
+    def load_checkpoint(self, path: str, strict: bool = False) -> Dict:
+        """加载检查点，恢复多阶段训练状态
+
+        Args:
+            path: 检查点文件路径
+            strict: 是否严格匹配模型参数。默认False，允许加载不完全匹配的checkpoint
+                   （例如动态创建的模块可能有不同的键名）
+        """
         checkpoint = torch.load(path, map_location=self.device)
-        self.load_state_dict(checkpoint["model_state_dict"])
+        # 使用strict=False允许加载不完全匹配的checkpoint
+        # 这对于动态创建模块（如alignment_nets）很重要
+        missing_keys, unexpected_keys = self.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+        if missing_keys:
+            print(f"Warning: Missing keys in checkpoint: {missing_keys}")
+        if unexpected_keys:
+            print(f"Warning: Unexpected keys in checkpoint (ignored): {unexpected_keys}")
         self._load_optimizer_state_dict(checkpoint["optimizer_state_dict"])
         self.current_stage_id = checkpoint["current_stage_id"]
         self.current_stage_epoch = checkpoint["current_stage_epoch"]

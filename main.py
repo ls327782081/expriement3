@@ -19,6 +19,7 @@ from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader
 from baseline_models import PctxAligned, PRISM, DGMRec
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
+from our_models.pmat_sasrec import PMAT_SASRec
 from metrics import calculate_metrics
 from util import item_id_to_semantic_id, save_checkpoint, load_checkpoint, save_results
 from base_model import AbstractTrainableModel, StageConfig
@@ -74,6 +75,91 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
         train_dataloader=train_loader,
         val_dataloader=val_loader,
         stage_configs=[stage_config]
+    )
+
+    return model
+
+
+def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logger=None):
+    """MCRL两阶段训练函数
+
+    Stage 1 (表征塑形): 专注对比学习，低推荐权重，冻结matcher
+    Stage 2 (推荐对齐): 专注推荐，低对比权重，解冻所有模块
+
+    Args:
+        model: MCRL模型实例
+        train_loader: 训练数据加载器
+        val_loader: 验证数据加载器
+        experiment_name: 实验名称
+        logger: 日志记录器
+
+    Returns:
+        训练后的模型
+    """
+    if logger is None:
+        logger = logging.getLogger("PMAT_Experiment")
+
+    # 检查是否启用两阶段训练
+    two_stage_enabled = getattr(config, 'mcrl_two_stage', True)
+
+    if not two_stage_enabled:
+        logger.info("MCRL两阶段训练未启用，使用单阶段训练")
+        return train_model(model, train_loader, val_loader, experiment_name, logger=logger)
+
+    logger.info("="*60)
+    logger.info("MCRL两阶段训练")
+    logger.info("="*60)
+
+    # 计算两阶段的epoch分配
+    total_epochs = config.epochs
+    stage1_ratio = getattr(config, 'mcrl_stage1_epochs_ratio', 0.3)
+    stage1_epochs = max(1, int(total_epochs * stage1_ratio))
+    stage2_epochs = total_epochs - stage1_epochs
+
+    logger.info(f"总Epochs: {total_epochs}")
+    logger.info(f"Stage 1 (表征塑形): {stage1_epochs} epochs")
+    logger.info(f"  - rec_weight: {getattr(config, 'mcrl_stage1_rec_weight', 0.1)}")
+    logger.info(f"  - cl_weight: {getattr(config, 'mcrl_stage1_cl_weight', 1.0)}")
+    logger.info(f"Stage 2 (推荐对齐): {stage2_epochs} epochs")
+    logger.info(f"  - rec_weight: {getattr(config, 'mcrl_stage2_rec_weight', 1.0)}")
+    logger.info(f"  - cl_weight: {getattr(config, 'mcrl_stage2_cl_weight', 0.3)}")
+    logger.info("="*60)
+
+    # 配置两阶段训练
+    stage_configs = [
+        # Stage 1: 表征塑形
+        StageConfig(
+            stage_id=1,
+            epochs=stage1_epochs,
+            start_epoch=0,
+            kwargs={
+                'lr': config.lr,
+                'weight_decay': config.weight_decay,
+                'experiment_name': f"{experiment_name}_stage1",
+                'num_positive_samples': getattr(config, 'num_positive_samples', 5),
+                'num_negative_samples': getattr(config, 'num_negative_samples', 20),
+            }
+        ),
+        # Stage 2: 推荐对齐
+        StageConfig(
+            stage_id=2,
+            epochs=stage2_epochs,
+            start_epoch=0,
+            kwargs={
+                'lr': config.lr * 0.5,  # Stage 2使用较小学习率，避免破坏已学习的表征
+                'weight_decay': config.weight_decay,
+                'experiment_name': f"{experiment_name}_stage2",
+                'num_positive_samples': getattr(config, 'num_positive_samples', 5),
+                'num_negative_samples': getattr(config, 'num_negative_samples', 20),
+            }
+        )
+    ]
+
+    # 调用模型的统一训练方法
+    model.customer_train(
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        stage_configs=stage_configs
     )
 
     return model
@@ -263,32 +349,32 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
         results.append(ablation_metrics)
         logger.info(f"PMAT w/o {ablation_module}: HR@10={ablation_metrics.get('HR@10', 0):.4f}, NDCG@10={ablation_metrics.get('NDCG@10', 0):.4f}")
 
-    # ==================== MCRL消融实验 ====================
+    # ==================== MCRL消融实验（两阶段训练） ====================
     logger.info("\n" + "-" * 50)
-    logger.info("MCRL消融实验")
+    logger.info("MCRL消融实验（两阶段训练）")
     logger.info("-" * 50)
 
-    # 完整MCRL模型
-    logger.info("\n训练完整MCRL模型")
+    # 完整MCRL模型（两阶段训练）
+    logger.info("\n训练完整MCRL模型（两阶段训练）")
     mcrl_full = MCRL(config).to(config.device)
-    mcrl_full = train_model(mcrl_full, train_loader, val_loader, "MCRL_full", logger=logger)
+    mcrl_full = train_mcrl_two_stage(mcrl_full, train_loader, val_loader, "MCRL_full", logger=logger)
     mcrl_full.eval()
-    mcrl_full_metrics = mcrl_full._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
-    mcrl_full_metrics["model"] = "MCRL_full"
+    mcrl_full_metrics = mcrl_full._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
+    mcrl_full_metrics["model"] = "MCRL_full_TwoStage"
     results.append(mcrl_full_metrics)
     logger.info(f"MCRL完整模型: HR@10={mcrl_full_metrics.get('HR@10', 0):.4f}, NDCG@10={mcrl_full_metrics.get('NDCG@10', 0):.4f}")
 
-    # MCRL消融实验
+    # MCRL消融实验（两阶段训练）
     from our_models.mcrl import get_mcrl_ablation_model
     for ablation_module in config.mcrl_ablation_modules:
-        logger.info(f"\n训练MCRL消融模型（移除{ablation_module}）")
+        logger.info(f"\n训练MCRL消融模型（移除{ablation_module}，两阶段训练）")
         ablation_model = get_mcrl_ablation_model(ablation_module, config).to(config.device)
-        ablation_model = train_model(
+        ablation_model = train_mcrl_two_stage(
             ablation_model, train_loader, val_loader, f"MCRL_ablation_{ablation_module}", logger=logger
         )
         ablation_model.eval()
-        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
-        ablation_metrics["model"] = f"MCRL_w/o_{ablation_module}"
+        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
+        ablation_metrics["model"] = f"MCRL_w/o_{ablation_module}_TwoStage"
         results.append(ablation_metrics)
         logger.info(f"MCRL w/o {ablation_module}: HR@10={ablation_metrics.get('HR@10', 0):.4f}, NDCG@10={ablation_metrics.get('NDCG@10', 0):.4f}")
 
@@ -371,9 +457,9 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
     config.lr = original_lr
     config.codebook_size = original_codebook_size
 
-    # ==================== MCRL超参实验 ====================
+    # ==================== MCRL超参实验（两阶段训练） ====================
     logger.info("\n" + "-" * 50)
-    logger.info("MCRL超参实验")
+    logger.info("MCRL超参实验（两阶段训练）")
     logger.info("-" * 50)
 
     # 保存原始配置
@@ -384,20 +470,20 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
     for alpha in config.hyper_param_search["mcrl_alpha"]:
         for beta in config.hyper_param_search["mcrl_beta"]:
             for lr in config.hyper_param_search["lr"]:
-                logger.info(f"\nMCRL超参组合：alpha={alpha}, beta={beta}, lr={lr}")
+                logger.info(f"\nMCRL超参组合：alpha={alpha}, beta={beta}, lr={lr}（两阶段训练）")
                 # 更新配置
                 config.mcrl_alpha = alpha
                 config.mcrl_beta = beta
                 config.lr = lr
 
-                # 训练模型
+                # 训练模型（两阶段训练）
                 model = MCRL(config).to(config.device)
-                exp_name = f"MCRL_hyper_a{alpha}_b{beta}_lr{lr}"
-                model = train_model(model, train_loader, val_loader, exp_name, logger=logger)
+                exp_name = f"MCRL_hyper_a{alpha}_b{beta}_lr{lr}_TwoStage"
+                model = train_mcrl_two_stage(model, train_loader, val_loader, exp_name, logger=logger)
 
                 # 评估
                 model.eval()
-                metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+                metrics = model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
                 metrics["model"] = exp_name
                 metrics["mcrl_alpha"] = alpha
                 metrics["mcrl_beta"] = beta
@@ -423,10 +509,11 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
 # ==================== 新增：PMAT/MCRL 推荐模型实验 ====================
 
 def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
-    """运行PMAT推荐模型实验（使用真实用户历史）
+    """运行PMAT-SASRec推荐模型实验（使用真实用户历史）
 
-    这是改造后的PMAT模型，使用：
-    - 真实用户历史序列（替代随机占位符）
+    这是PMAT-SASRec混合模型，使用：
+    - PMAT语义增强嵌入 + SASRec序列建模
+    - 真实用户历史序列
     - BPR推荐损失（主任务）+ 语义ID损失（辅助任务）
     - 推荐指标：HR@K, NDCG@K, MRR, AUC
     """
@@ -434,15 +521,22 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
         logger = logging.getLogger("PMAT_Experiment")
 
     logger.info("\n" + "="*70)
-    logger.info("===== PMAT推荐模型实验（真实用户历史） =====")
+    logger.info("===== PMAT-SASRec推荐模型实验（真实用户历史） =====")
     logger.info("="*70 + "\n")
+
+    # 在 CPU 模式下使用较小的 batch_size 以避免内存问题
+    # SemanticIDQuantizer 中的 torch.cdist 在大 batch 时会消耗大量内存
+    effective_batch_size = config.batch_size
+    if config.device == torch.device('cpu') or str(config.device) == 'cpu':
+        effective_batch_size = min(config.batch_size, 16)
+        logger.info(f"CPU模式：将batch_size从{config.batch_size}调整为{effective_batch_size}以节省内存")
 
     # 使用PMAT专用数据加载器
     logger.info("加载数据（使用get_pmat_dataloader）...")
     train_loader, val_loader, test_loader = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
-        batch_size=config.batch_size,
+        batch_size=effective_batch_size,
         max_history_len=config.max_history_len,
         num_negative_samples=config.num_negative_samples,
         eval_num_negative_samples=config.eval_num_negative_samples,
@@ -453,38 +547,39 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
     )
 
     # 创建模型
-    logger.info("创建PMAT推荐模型...")
-    model = PMAT(config).to(config.device)
+    logger.info("创建PMAT-SASRec推荐模型...")
+    model = PMAT_SASRec(config, device=config.device).to(config.device)
 
     # 训练
     logger.info("开始训练...")
-    model = train_model(model, train_loader, val_loader, "PMAT_Rec", logger=logger)
+    model = train_model(model, train_loader, val_loader, "PMAT_SASRec", logger=logger)
 
     # 评估
     logger.info("评估模型...")
     model.eval()
     metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
 
-    logger.info("\nPMAT推荐模型评估结果:")
+    logger.info("\nPMAT-SASRec推荐模型评估结果:")
     for k, v in metrics.items():
         logger.info(f"  {k}: {v:.4f}")
 
     # 保存结果
-    results = [{"model": "PMAT_Rec", **metrics}]
-    save_results(results, "pmat_rec_experiment", logger=logger)
+    results = [{"model": "PMAT_SASRec", **metrics}]
+    save_results(results, "pmat_sasrec_experiment", logger=logger)
 
     logger.info("\n" + "="*70)
-    logger.info("PMAT推荐模型实验完成")
+    logger.info("PMAT-SASRec推荐模型实验完成")
     logger.info("="*70 + "\n")
 
     return metrics
 
 
 def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
-    """运行MCRL推荐模型实验（使用真实用户历史）
+    """运行MCRL推荐模型实验（使用真实用户历史 + 两阶段训练）
 
     这是改造后的MCRL模型，使用：
     - 真实用户历史序列（替代随机占位符）
+    - 两阶段训练：Stage1(表征塑形) + Stage2(推荐对齐)
     - BPR推荐损失（主任务）+ 对比学习损失（辅助任务）
     - 推荐指标：HR@K, NDCG@K, MRR, AUC
     """
@@ -492,7 +587,7 @@ def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
         logger = logging.getLogger("PMAT_Experiment")
 
     logger.info("\n" + "="*70)
-    logger.info("===== MCRL推荐模型实验（真实用户历史） =====")
+    logger.info("===== MCRL推荐模型实验（两阶段训练） =====")
     logger.info("="*70 + "\n")
 
     # 使用PMAT专用数据加载器（MCRL复用相同格式）
@@ -514,25 +609,25 @@ def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
     logger.info("创建MCRL推荐模型...")
     model = MCRL(config).to(config.device)
 
-    # 训练
-    logger.info("开始训练...")
-    model = train_model(model, train_loader, val_loader, "MCRL_Rec", logger=logger)
+    # 使用两阶段训练
+    logger.info("开始两阶段训练...")
+    model = train_mcrl_two_stage(model, train_loader, val_loader, "MCRL_Rec", logger=logger)
 
     # 评估
     logger.info("评估模型...")
     model.eval()
-    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+    metrics = model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
 
     logger.info("\nMCRL推荐模型评估结果:")
     for k, v in metrics.items():
         logger.info(f"  {k}: {v:.4f}")
 
     # 保存结果
-    results = [{"model": "MCRL_Rec", **metrics}]
+    results = [{"model": "MCRL_Rec_TwoStage", **metrics}]
     save_results(results, "mcrl_rec_experiment", logger=logger)
 
     logger.info("\n" + "="*70)
-    logger.info("MCRL推荐模型实验完成")
+    logger.info("MCRL推荐模型实验完成（两阶段训练）")
     logger.info("="*70 + "\n")
 
     return metrics

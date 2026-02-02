@@ -61,6 +61,15 @@ class BaseConfig:
     mcrl_temperature: float = 0.07  # 对比学习温度
     num_positive_samples: int = 5   # 正样本数量
 
+    # MCRL两阶段训练配置
+    mcrl_two_stage: bool = True  # 是否启用两阶段训练
+    mcrl_stage1_epochs_ratio: float = 0.2  # Stage1占总epoch的比例（缩短，让matcher有更多训练时间）
+    mcrl_stage1_rec_weight: float = 0.3    # Stage1的推荐损失权重（提高，保持matcher的学习信号）
+    mcrl_stage1_cl_weight: float = 0.5     # Stage1的对比损失权重（降低，避免主导优化）
+    mcrl_stage2_rec_weight: float = 1.0    # Stage2的推荐损失权重（正常权重）
+    mcrl_stage2_cl_weight: float = 0.1     # Stage2的对比损失权重（进一步降低）
+    mcrl_freeze_matcher_stage1: bool = False  # Stage1不冻结matcher（让matcher从一开始就学习）
+
     # 联合训练配置
     pmat_loss_weight: float = 1.0  # PMAT损失权重
     mcrl_loss_weight: float = 0.5  # MCRL损失权重
