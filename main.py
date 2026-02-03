@@ -20,6 +20,7 @@ from baseline_models import PctxAligned, PRISM, DGMRec
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
 from our_models.pmat_sasrec import PMAT_SASRec
+from our_models.mcrl_sasrec import MCRL_SASRec
 from metrics import calculate_metrics
 from util import item_id_to_semantic_id, save_checkpoint, load_checkpoint, save_results
 from base_model import AbstractTrainableModel, StageConfig
@@ -602,12 +603,12 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
     return metrics
 
 
-def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
-    """运行MCRL推荐模型实验（使用真实用户历史 + 两阶段训练）
+def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
+    """运行MCRL-SASRec推荐模型实验
 
-    这是改造后的MCRL模型，使用：
-    - 真实用户历史序列（替代随机占位符）
-    - 两阶段训练：Stage1(表征塑形) + Stage2(推荐对齐)
+    这是MCRL-SASRec混合模型，使用：
+    - SASRec自回归序列建模（causal mask）
+    - MCRL三层对比学习作为辅助任务
     - BPR推荐损失（主任务）+ 对比学习损失（辅助任务）
     - 推荐指标：HR@K, NDCG@K, MRR, AUC
     """
@@ -615,10 +616,10 @@ def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
         logger = logging.getLogger("PMAT_Experiment")
 
     logger.info("\n" + "="*70)
-    logger.info("===== MCRL推荐模型实验（两阶段训练） =====")
+    logger.info("===== MCRL-SASRec推荐模型实验 =====")
     logger.info("="*70 + "\n")
 
-    # 使用PMAT专用数据加载器（MCRL复用相同格式）
+    # 使用PMAT专用数据加载器（MCRL-SASRec复用相同格式）
     logger.info("加载数据（使用get_pmat_dataloader）...")
     train_loader, val_loader, test_loader = get_pmat_dataloader(
         cache_dir="./data",
@@ -630,32 +631,51 @@ def run_mcrl_recommendation_experiment(logger=None, quick_mode=False):
         shuffle=True,
         quick_mode=quick_mode,
         num_workers=NUM_WORKS,
-        logger=logger
     )
 
     # 创建模型
-    logger.info("创建MCRL推荐模型...")
-    model = MCRL(config).to(config.device)
+    logger.info("创建MCRL-SASRec推荐模型...")
+    model = MCRL_SASRec(config).to(config.device)
 
-    # 使用两阶段训练
-    logger.info("开始两阶段训练...")
-    model = train_mcrl_two_stage(model, train_loader, val_loader, "MCRL_Rec", logger=logger)
+    # 打印模型信息
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"模型参数: 总计={total_params:,}, 可训练={trainable_params:,}")
+
+    # 配置单阶段训练（MCRL-SASRec使用单阶段训练，对比学习权重已降低）
+    stage_config = StageConfig(
+        stage_id=1,
+        epochs=config.epochs,
+        start_epoch=0,
+        kwargs={
+            'lr': config.lr,
+            'weight_decay': config.weight_decay,
+        }
+    )
+
+    # 训练模型
+    logger.info("开始训练...")
+    model.customer_train(
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        stage_configs=[stage_config]
+    )
 
     # 评估
     logger.info("评估模型...")
     model.eval()
-    metrics = model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
+    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
 
-    logger.info("\nMCRL推荐模型评估结果:")
+    logger.info("\nMCRL-SASRec推荐模型评估结果:")
     for k, v in metrics.items():
         logger.info(f"  {k}: {v:.4f}")
 
     # 保存结果
-    results = [{"model": "MCRL_Rec_TwoStage", **metrics}]
-    save_results(results, "mcrl_rec_experiment", logger=logger)
+    results = [{"model": "MCRL_SASRec", **metrics}]
+    save_results(results, "mcrl_sasrec_experiment", logger=logger)
 
     logger.info("\n" + "="*70)
-    logger.info("MCRL推荐模型实验完成（两阶段训练）")
+    logger.info("MCRL-SASRec推荐模型实验完成")
     logger.info("="*70 + "\n")
 
     return metrics
@@ -668,12 +688,12 @@ def parse_args():
     # 模式选择
     parser.add_argument('--mode', type=str, default='quick',
                         choices=['quick', 'full', 'baseline', 'ablation', 'hyper',
-                                'pmat_rec', 'mcrl_rec'],
-                        help='实验模式: quick(快速测试)/full(完整实验)/baseline(基线对比)/ablation(消融实验)/hyper(超参实验)/pmat_rec(PMAT推荐)/mcrl_rec(MCRL推荐)')
+                                'pmat_rec', 'mcrl_sasrec'],
+                        help='实验模式: quick(快速测试)/full(完整实验)/baseline(基线对比)/ablation(消融实验)/hyper(超参实验)/pmat_rec(PMAT推荐)/mcrl_sasrec(MCRL-SASRec推荐)')
 
     # 数据集
-    parser.add_argument('--dataset', type=str, default='mock',
-                        choices=['mock', 'amazon', 'movielens'],
+    parser.add_argument('--dataset', type=str, default='amazon',
+                        choices=['amazon', 'movielens'],
                         help='数据集类型')
 
     # 模型选择
@@ -762,16 +782,16 @@ if __name__ == "__main__":
 
     # 根据模式运行实验
     if args.mode == 'quick':
-        logger.info("快速测试模式 - 运行PMAT和MCRL推荐实验（抽样数据）")
+        logger.info("快速测试模式 - 运行PMAT-SASRec和MCRL-SASRec推荐实验（抽样数据）")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=True)
-        run_mcrl_recommendation_experiment(logger=logger, quick_mode=True)
+        run_mcrl_sasrec_experiment(logger=logger, quick_mode=True)
     elif args.mode == 'full':
-        logger.info("完整实验模式 - 运行PMAT和MCRL推荐实验")
+        logger.info("完整实验模式 - 运行PMAT-SASRec和MCRL-SASRec推荐实验")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=False)
-        run_mcrl_recommendation_experiment(logger=logger, quick_mode=False)
+        run_mcrl_sasrec_experiment(logger=logger, quick_mode=False)
     elif args.mode == 'baseline':
         logger.info("基线实验模式")
-        run_baseline_experiment(logger=logger, quick_mode=True)
+        run_baseline_experiment(logger=logger, quick_mode=False)
     elif args.mode == 'ablation':
         logger.info("消融实验模式 - PMAT和MCRL消融实验")
         run_ablation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
@@ -779,10 +799,10 @@ if __name__ == "__main__":
         logger.info("超参实验模式 - PMAT和MCRL超参实验")
         run_hyper_param_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
     elif args.mode == 'pmat_rec':
-        logger.info("PMAT推荐模型实验模式")
+        logger.info("PMAT-SASRec推荐模型实验模式")
         run_pmat_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
-    elif args.mode == 'mcrl_rec':
-        logger.info("MCRL推荐模型实验模式")
-        run_mcrl_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
+    elif args.mode == 'mcrl_sasrec':
+        logger.info("MCRL-SASRec推荐模型实验模式")
+        run_mcrl_sasrec_experiment(logger=logger, quick_mode=True)
 
     logger.info("所有实验完成！")
