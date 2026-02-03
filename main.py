@@ -686,10 +686,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description='PMAT & MCRL 实验')
 
     # 模式选择
-    parser.add_argument('--mode', type=str, default='quick',
-                        choices=['quick', 'full', 'baseline', 'ablation', 'hyper',
+    parser.add_argument('--mode', type=str, default='all',
+                        choices=['all', 'baseline', 'ablation', 'hyper',
                                 'pmat_rec', 'mcrl_sasrec'],
-                        help='实验模式: quick(快速测试)/full(完整实验)/baseline(基线对比)/ablation(消融实验)/hyper(超参实验)/pmat_rec(PMAT推荐)/mcrl_sasrec(MCRL-SASRec推荐)')
+                        help='实验模式: all(运行PMAT和MCRL)/baseline(基线对比)/ablation(消融实验)/hyper(超参实验)/pmat_rec(PMAT推荐)/mcrl_sasrec(MCRL-SASRec推荐)')
+
+    # 快速模式（独立参数）
+    parser.add_argument('--quick', action='store_true', default=False,
+                        help='快速模式：使用抽样数据进行快速验证')
 
     # 数据集
     parser.add_argument('--dataset', type=str, default='amazon',
@@ -725,20 +729,14 @@ def parse_args():
 
 def apply_args_to_config(args):
     """将命令行参数应用到config"""
-    # 根据模式设置默认参数
-    if args.mode == 'quick':
+    # 根据quick模式设置默认参数
+    if args.quick:
         config.epochs = args.epochs if args.epochs is not None else 25
         config.batch_size = args.batch_size if args.batch_size is not None else 32
-        # quick模式使用真实数据集，但会抽样
         config.category = "Video_Games"
-    elif args.mode == 'full':
+    else:
         config.epochs = args.epochs if args.epochs is not None else 50
         config.batch_size = args.batch_size if args.batch_size is not None else 512
-    else:
-        if args.epochs is not None:
-            config.epochs = args.epochs
-        if args.batch_size is not None:
-            config.batch_size = args.batch_size
 
     # 学习率
     if args.lr is not None:
@@ -752,7 +750,7 @@ def apply_args_to_config(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    logger.info(f"配置已更新: epochs={config.epochs}, batch_size={config.batch_size}, lr={config.lr}, device={config.device}")
+    logger.info(f"配置已更新: epochs={config.epochs}, batch_size={config.batch_size}, lr={config.lr}, device={config.device}, quick_mode={args.quick}")
 
 
 if __name__ == "__main__":
@@ -776,33 +774,33 @@ if __name__ == "__main__":
 
     logger.info("="*70)
     logger.info(f"实验模式: {args.mode}")
+    logger.info(f"快速模式: {args.quick}")
     logger.info(f"数据集: {args.dataset}")
     logger.info(f"模型: {args.model}")
     logger.info("="*70)
 
+    # quick_mode 由 --quick 参数控制
+    quick_mode = args.quick
+
     # 根据模式运行实验
-    if args.mode == 'quick':
-        logger.info("快速测试模式 - 运行PMAT-SASRec和MCRL-SASRec推荐实验（抽样数据）")
-        run_pmat_recommendation_experiment(logger=logger, quick_mode=True)
-        run_mcrl_sasrec_experiment(logger=logger, quick_mode=True)
-    elif args.mode == 'full':
-        logger.info("完整实验模式 - 运行PMAT-SASRec和MCRL-SASRec推荐实验")
-        run_pmat_recommendation_experiment(logger=logger, quick_mode=False)
-        run_mcrl_sasrec_experiment(logger=logger, quick_mode=False)
+    if args.mode == 'all':
+        logger.info(f"运行PMAT-SASRec和MCRL-SASRec推荐实验 (quick_mode={quick_mode})")
+        run_pmat_recommendation_experiment(logger=logger, quick_mode=quick_mode)
+        run_mcrl_sasrec_experiment(logger=logger, quick_mode=quick_mode)
     elif args.mode == 'baseline':
-        logger.info("基线实验模式")
-        run_baseline_experiment(logger=logger, quick_mode=False)
+        logger.info(f"基线实验模式 (quick_mode={quick_mode})")
+        run_baseline_experiment(logger=logger, quick_mode=quick_mode)
     elif args.mode == 'ablation':
-        logger.info("消融实验模式 - PMAT和MCRL消融实验")
-        run_ablation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
+        logger.info(f"消融实验模式 (quick_mode={quick_mode})")
+        run_ablation_experiment(logger=logger, quick_mode=quick_mode)
     elif args.mode == 'hyper':
-        logger.info("超参实验模式 - PMAT和MCRL超参实验")
-        run_hyper_param_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
+        logger.info(f"超参实验模式 (quick_mode={quick_mode})")
+        run_hyper_param_experiment(logger=logger, quick_mode=quick_mode)
     elif args.mode == 'pmat_rec':
-        logger.info("PMAT-SASRec推荐模型实验模式")
-        run_pmat_recommendation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
+        logger.info(f"PMAT-SASRec推荐模型实验模式 (quick_mode={quick_mode})")
+        run_pmat_recommendation_experiment(logger=logger, quick_mode=quick_mode)
     elif args.mode == 'mcrl_sasrec':
-        logger.info("MCRL-SASRec推荐模型实验模式")
-        run_mcrl_sasrec_experiment(logger=logger, quick_mode=True)
+        logger.info(f"MCRL-SASRec推荐模型实验模式 (quick_mode={quick_mode})")
+        run_mcrl_sasrec_experiment(logger=logger, quick_mode=quick_mode)
 
     logger.info("所有实验完成！")
