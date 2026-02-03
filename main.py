@@ -15,7 +15,7 @@ from collections import defaultdict
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
-from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader
+from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader, get_dgmrec_dataloader
 from baseline_models import PctxAligned, PRISM, DGMRec
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
@@ -179,28 +179,53 @@ def evaluate_model(model, test_loader, model_name, logger=None):
     all_user_ids = []
 
     # 检查模型是否继承自BaseModel
-    from base_model import BaseModel
+    from base_model import BaseModel, AbstractTrainableModel
     is_basemodel = isinstance(model, BaseModel)
-    
+    is_trainable_model = isinstance(model, AbstractTrainableModel)
+
     with torch.no_grad():
         for batch in test_loader:
-            # 移动数据到设备
-            batch = {k: v.to(config.device) for k, v in batch.items()}
+            # 处理不同的数据格式
+            if isinstance(batch, tuple):
+                # DGMRec 格式: (users, pos_items, neg_items)
+                users, pos_items, neg_items = batch
+                users = users.to(config.device)
+                pos_items = pos_items.to(config.device)
+                neg_items = neg_items.to(config.device)
+                batch_tuple = (users, pos_items, neg_items)
 
-            # 检查模型是否继承自BaseModel
-            if is_basemodel:
-                # 使用模型的预测方法
-                predictions = model.predict(batch, top_k=config.eval_top_k)
+                # 使用模型的 predict 方法
+                if hasattr(model, 'predict'):
+                    predictions = model.predict(batch_tuple, top_k=config.eval_top_k)
+                else:
+                    # 使用 full_sort_predict
+                    scores = model.full_sort_predict((users, pos_items))
+                    _, predictions = torch.topk(scores, k=config.eval_top_k, dim=-1)
+
+                # 收集结果
+                all_predictions.extend(predictions.cpu().numpy())
+                all_ground_truth.extend(pos_items.cpu().numpy())
+                all_user_ids.extend(users.cpu().numpy())
             else:
-                # 使用传统的前向传播
-                logits = model(batch)
-                # 获取top-k预测
-                _, predictions = torch.topk(logits, k=config.eval_top_k, dim=-1)
+                # 字典格式
+                batch = {k: v.to(config.device) for k, v in batch.items()}
 
-            # 收集预测结果
-            all_predictions.extend(predictions.cpu().numpy())
-            all_ground_truth.extend(batch["item_id"].cpu().numpy())
-            all_user_ids.extend(batch["user_id"].cpu().numpy())
+                # 检查模型是否继承自BaseModel或AbstractTrainableModel
+                if is_basemodel or (is_trainable_model and hasattr(model, 'predict')):
+                    # 使用模型的预测方法
+                    predictions = model.predict(batch, top_k=config.eval_top_k)
+                else:
+                    # 使用传统的前向传播
+                    logits = model(batch)
+                    # 获取top-k预测
+                    _, predictions = torch.topk(logits, k=config.eval_top_k, dim=-1)
+
+                # 收集预测结果
+                all_predictions.extend(predictions.cpu().numpy())
+                # 支持不同的键名
+                item_key = "item_id" if "item_id" in batch else "pos_item"
+                all_ground_truth.extend(batch[item_key].cpu().numpy())
+                all_user_ids.extend(batch["user_id"].cpu().numpy())
 
     # 计算指标
     metrics = calculate_metrics(all_user_ids, all_predictions, all_ground_truth, logger=logger)
@@ -251,18 +276,21 @@ def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
             if baseline_name == "PRISM":
                 model = PRISM(config).to(config.device)
             elif baseline_name == "DGMRec":
-                base_model = DGMRec(config).to(config.device)
-                # Wrapper for DGMRec to accept batch dict
-                class DGMRecWrapper(torch.nn.Module):
-                    def __init__(self, model):
-                        super().__init__()
-                        self.model = model
-                        self.fc = torch.nn.Linear(config.hidden_dim, config.codebook_size * config.id_length)
-                    def forward(self, batch):
-                        result = self.model(batch["user_id"], batch["item_id"], batch["vision_feat"].float(), batch["text_feat"].float())
-                        logits = self.fc(result['user_embeddings'])
-                        return logits.reshape(-1, config.id_length, config.codebook_size)
-                model = DGMRecWrapper(base_model).to(config.device)
+                # DGMRec 需要专用的数据加载器和数据适配器
+                logger.info("为 DGMRec 加载专用数据...")
+                dgmrec_train_loader, dgmrec_val_loader, dgmrec_test_loader, dataset_adapter = get_dgmrec_dataloader(
+                    "./data",
+                    category=config.category,
+                    batch_size=config.batch_size,
+                    shuffle=True,
+                    quick_mode=quick_mode,
+                    logger=logger,
+                    num_workers=0
+                )
+                # 使用数据适配器初始化 DGMRec（已继承 AbstractTrainableModel）
+                model = DGMRec(config, dataset=dataset_adapter).to(config.device)
+                # 使用 DGMRec 专用的数据加载器
+                train_loader, val_loader, test_loader = dgmrec_train_loader, dgmrec_val_loader, dgmrec_test_loader
             else:
                 logger.warning(f"未知基线模型: {baseline_name}，跳过")
                 continue
@@ -743,7 +771,7 @@ if __name__ == "__main__":
         run_mcrl_recommendation_experiment(logger=logger, quick_mode=False)
     elif args.mode == 'baseline':
         logger.info("基线实验模式")
-        run_baseline_experiment(logger=logger, quick_mode=(args.dataset=='mock'))
+        run_baseline_experiment(logger=logger, quick_mode=True)
     elif args.mode == 'ablation':
         logger.info("消融实验模式 - PMAT和MCRL消融实验")
         run_ablation_experiment(logger=logger, quick_mode=(args.dataset=='mock'))

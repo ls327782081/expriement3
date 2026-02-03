@@ -1092,6 +1092,10 @@ class PctxDataset(Dataset):
             target_item=sample['target']
         )
 
+        # 添加 user_id 和 item_id 用于评估
+        tokenized['user_id'] = torch.tensor(sample['user_id'], dtype=torch.long)
+        tokenized['item_id'] = torch.tensor(sample['target'], dtype=torch.long)
+
         return tokenized
 
 
@@ -1268,11 +1272,18 @@ def pctx_collate_fn(batch):
     input_ids_list = []
     attention_mask_list = []
     labels_list = []
+    user_ids_list = []
+    item_ids_list = []
 
     for item in batch:
         input_ids_list.append(item['input_ids'].squeeze(0))
         attention_mask_list.append(item['attention_mask'].squeeze(0))
         labels_list.append(item['labels'].squeeze(0))
+        # 收集 user_id 和 item_id 用于评估
+        if 'user_id' in item:
+            user_ids_list.append(item['user_id'])
+        if 'item_id' in item:
+            item_ids_list.append(item['item_id'])
 
     # 找到最大长度
     max_input_len = max(x.size(0) for x in input_ids_list)
@@ -1299,11 +1310,19 @@ def pctx_collate_fn(batch):
         padded_attention_mask.append(attention_mask)
         padded_labels.append(labels)
 
-    return {
+    result = {
         'input_ids': torch.stack(padded_input_ids),
         'attention_mask': torch.stack(padded_attention_mask),
         'labels': torch.stack(padded_labels)
     }
+
+    # 添加 user_id 和 item_id（如果存在）
+    if user_ids_list:
+        result['user_id'] = torch.stack(user_ids_list)
+    if item_ids_list:
+        result['item_id'] = torch.stack(item_ids_list)
+
+    return result
 
 
 # ==================== PMAT 专用数据集和 collate 函数 ====================
@@ -1611,3 +1630,311 @@ def get_pmat_dataloader(
     logger.info("=" * 60)
 
     return train_loader, val_loader, test_loader
+
+
+# ==================== DGMRec 数据适配器 ====================
+
+class DGMRecDatasetAdapter:
+    """
+    DGMRec 数据适配器
+
+    将现有数据格式转换为 DGMRec 需要的格式：
+    - inter_matrix(): 返回用户-物品交互的稀疏矩阵
+    - visual_feat: 视觉特征张量 (n_items, visual_dim)
+    - text_feat: 文本特征张量 (n_items, text_dim)
+    """
+
+    def __init__(self, data: Dict, logger: logging.Logger = None):
+        """
+        Args:
+            data: 从 get_dataloader 加载的数据字典，包含:
+                - num_users: 用户数量
+                - num_items: 物品数量
+                - text_features: 文本特征张量
+                - image_features: 图像特征张量
+                - train_sequences / val_sequences / test_sequences: 用户序列
+            logger: 日志记录器
+        """
+        self.logger = logger or logging.getLogger("DGMRecAdapter")
+
+        self.n_users = data['num_users']
+        # 注意：num_items 可能不包含 padding item，但特征张量包含
+        # 我们使用特征张量的大小作为 n_items
+        self.visual_feat = data.get('image_features')
+        self.text_feat = data.get('text_features')
+
+        # 确保特征是张量格式
+        if self.visual_feat is not None and not isinstance(self.visual_feat, torch.Tensor):
+            self.visual_feat = torch.tensor(self.visual_feat, dtype=torch.float32)
+        if self.text_feat is not None and not isinstance(self.text_feat, torch.Tensor):
+            self.text_feat = torch.tensor(self.text_feat, dtype=torch.float32)
+
+        # 使用特征张量的大小作为 n_items（包含 padding item）
+        if self.visual_feat is not None:
+            self.n_items = self.visual_feat.shape[0]
+        elif self.text_feat is not None:
+            self.n_items = self.text_feat.shape[0]
+        else:
+            self.n_items = data['num_items']
+
+        # 构建交互矩阵
+        self._interaction_matrix = self._build_interaction_matrix(data)
+
+        self.logger.info(f"DGMRecDatasetAdapter initialized:")
+        self.logger.info(f"  - n_users: {self.n_users}, n_items: {self.n_items}")
+        self.logger.info(f"  - visual_feat shape: {self.visual_feat.shape if self.visual_feat is not None else None}")
+        self.logger.info(f"  - text_feat shape: {self.text_feat.shape if self.text_feat is not None else None}")
+        self.logger.info(f"  - interaction_matrix: {self._interaction_matrix.shape}, nnz={self._interaction_matrix.nnz}")
+
+    def _build_interaction_matrix(self, data: Dict):
+        """
+        从用户序列构建用户-物品交互矩阵
+
+        Returns:
+            scipy.sparse.coo_matrix: 交互矩阵 (n_users, n_items)
+        """
+        import scipy.sparse as sp
+
+        rows = []
+        cols = []
+        values = []
+
+        # 合并所有序列数据
+        all_sequences = {}
+        for key in ['train_sequences', 'val_sequences', 'test_sequences', 'user_sequences']:
+            if key in data and data[key]:
+                for user_id, seq_data in data[key].items():
+                    if user_id not in all_sequences:
+                        all_sequences[user_id] = set()
+
+                    # 处理不同格式的序列数据
+                    if isinstance(seq_data, dict):
+                        items = seq_data.get('item_indices', [])
+                    elif isinstance(seq_data, (list, tuple)):
+                        items = seq_data
+                    else:
+                        continue
+
+                    all_sequences[user_id].update(items)
+
+        # 构建稀疏矩阵的数据
+        for user_id, items in all_sequences.items():
+            for item_id in items:
+                if 0 <= user_id < self.n_users and 0 <= item_id < self.n_items:
+                    rows.append(user_id)
+                    cols.append(item_id)
+                    values.append(1.0)
+
+        # 创建稀疏矩阵
+        interaction_matrix = sp.coo_matrix(
+            (values, (rows, cols)),
+            shape=(self.n_users, self.n_items),
+            dtype=np.float32
+        )
+
+        self.logger.info(f"Built interaction matrix: {interaction_matrix.shape}, nnz={interaction_matrix.nnz}")
+
+        return interaction_matrix
+
+    def inter_matrix(self, form='coo'):
+        """
+        返回交互矩阵（兼容 RecBole 接口）
+
+        Args:
+            form: 矩阵格式，'coo' 或 'csr'
+
+        Returns:
+            scipy.sparse matrix
+        """
+        if form == 'coo':
+            return self._interaction_matrix.tocoo()
+        elif form == 'csr':
+            return self._interaction_matrix.tocsr()
+        else:
+            return self._interaction_matrix
+
+
+class DGMRecBatchDataset(Dataset):
+    """
+    DGMRec 批次数据集
+
+    为 DGMRec 提供 (user, pos_item, neg_item) 三元组
+    """
+
+    def __init__(self, data: Dict, split: str = 'train',
+                 num_negatives: int = 1, logger: logging.Logger = None):
+        """
+        Args:
+            data: 数据字典
+            split: 'train', 'val', 或 'test'
+            num_negatives: 每个正样本的负样本数量
+            logger: 日志记录器
+        """
+        self.logger = logger or logging.getLogger("DGMRecBatchDataset")
+        self.num_negatives = num_negatives
+        self.n_users = data['num_users']
+        self.n_items = data['num_items']
+
+        # 获取对应split的序列
+        sequence_key = f'{split}_sequences'
+        self.sequences = data.get(sequence_key, {})
+
+        # 构建用户已交互物品集合（用于负采样）
+        self.user_interacted = {}
+        for key in ['train_sequences', 'val_sequences', 'test_sequences']:
+            if key in data and data[key]:
+                for user_id, seq_data in data[key].items():
+                    if user_id not in self.user_interacted:
+                        self.user_interacted[user_id] = set()
+
+                    if isinstance(seq_data, dict):
+                        items = seq_data.get('item_indices', [])
+                    elif isinstance(seq_data, (list, tuple)):
+                        items = seq_data
+                    else:
+                        continue
+
+                    self.user_interacted[user_id].update(items)
+
+        # 构建样本列表: (user_id, pos_item_id)
+        self.samples = []
+        for user_id, seq_data in self.sequences.items():
+            if isinstance(seq_data, dict):
+                items = seq_data.get('item_indices', [])
+            elif isinstance(seq_data, (list, tuple)):
+                items = seq_data
+            else:
+                continue
+
+            for item_id in items:
+                if 0 < item_id < self.n_items:  # 排除 padding item 0
+                    self.samples.append((user_id, item_id))
+
+        self.logger.info(f"DGMRecBatchDataset ({split}): {len(self.samples)} samples")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def _sample_negative(self, user_id: int) -> int:
+        """采样一个负样本"""
+        interacted = self.user_interacted.get(user_id, set())
+        while True:
+            neg_item = np.random.randint(1, self.n_items)  # 排除 padding item 0
+            if neg_item not in interacted:
+                return neg_item
+
+    def __getitem__(self, idx):
+        user_id, pos_item = self.samples[idx]
+        neg_item = self._sample_negative(user_id)
+
+        return {
+            'user_id': torch.tensor(user_id, dtype=torch.long),
+            'pos_item': torch.tensor(pos_item, dtype=torch.long),
+            'neg_item': torch.tensor(neg_item, dtype=torch.long),
+        }
+
+
+def dgmrec_collate_fn(batch):
+    """DGMRec 的 collate 函数"""
+    users = torch.stack([item['user_id'] for item in batch])
+    pos_items = torch.stack([item['pos_item'] for item in batch])
+    neg_items = torch.stack([item['neg_item'] for item in batch])
+
+    return users, pos_items, neg_items
+
+
+def get_dgmrec_dataloader(cache_dir: str,
+                          category: str = "Video_Games",
+                          batch_size: int = 32,
+                          shuffle: bool = True,
+                          num_workers: int = 0,
+                          quick_mode: bool = False,
+                          num_negatives: int = 1,
+                          logger: logging.Logger = None):
+    """
+    创建 DGMRec 专用的数据加载器
+
+    Args:
+        cache_dir: 缓存目录
+        category: 数据集类别
+        batch_size: 批次大小
+        shuffle: 是否打乱
+        num_workers: 工作进程数
+        quick_mode: 快速模式
+        num_negatives: 负样本数量
+        logger: 日志记录器
+
+    Returns:
+        tuple: (train_loader, val_loader, test_loader, dataset_adapter)
+            - dataset_adapter 包含 DGMRec 需要的交互矩阵和多模态特征
+    """
+    if logger is None:
+        logger = logging.getLogger("DGMRec_DataLoader")
+
+    logger.info("=" * 60)
+    logger.info("Creating DGMRec DataLoaders")
+    logger.info("=" * 60)
+
+    # 加载数据
+    cache_suffix = "_quick" if quick_mode else ""
+    cache_file_name = f"{cache_dir}/{category}{cache_suffix}.pkl"
+
+    if os.path.exists(cache_file_name):
+        logger.info(f"Loading cached data from {cache_file_name}")
+        with open(cache_file_name, "rb") as f:
+            data = pickle.load(f)
+    else:
+        processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)
+        data = processor.load_dataset_for_experiment(
+            test_ratio=0.2,
+            val_ratio=0.1,
+            add_padding_item=True
+        )
+        with open(cache_file_name, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # 更新 config
+    config.item_vocab_size = data['num_items']
+    config.user_vocab_size = data['num_users']
+
+    # 创建数据适配器（包含交互矩阵和多模态特征）
+    dataset_adapter = DGMRecDatasetAdapter(data, logger)
+
+    # 创建批次数据集
+    train_dataset = DGMRecBatchDataset(data, 'train', num_negatives, logger)
+    val_dataset = DGMRecBatchDataset(data, 'val', num_negatives, logger)
+    test_dataset = DGMRecBatchDataset(data, 'test', num_negatives, logger)
+
+    # 创建数据加载器
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=dgmrec_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=dgmrec_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=dgmrec_collate_fn,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}, Test samples: {len(test_dataset)}")
+    logger.info("DGMRec dataloaders created successfully!")
+    logger.info("=" * 60)
+
+    return train_loader, val_loader, test_loader, dataset_adapter

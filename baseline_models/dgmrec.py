@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+
 from base_model import AbstractTrainableModel  # 导入抽象基类
 from config import config
 import scipy.sparse as sp
@@ -9,18 +10,34 @@ import scipy.sparse as sp
 # 简化的工具函数（替代 utils.utils）
 def build_sim(context):
     """构建相似度矩阵"""
-    context_norm = context.div(torch.norm(context, p=2, dim=-1, keepdim=True))
+    # 计算 L2 范数，添加 epsilon 避免除零
+    norms = torch.norm(context, p=2, dim=-1, keepdim=True)
+    norms = torch.clamp(norms, min=1e-8)  # 避免除零
+    context_norm = context / norms
     sim = torch.mm(context_norm, context_norm.transpose(1, 0))
     return sim
 
 def compute_normalized_laplacian(adj):
-    """计算归一化拉普拉斯矩阵"""
-    adj = sp.coo_matrix(adj)
-    rowsum = np.array(adj.sum(1))
-    d_inv_sqrt = np.power(rowsum, -0.5).flatten()
+    """计算归一化拉普拉斯矩阵，返回 PyTorch 稀疏张量"""
+    # 如果输入是 PyTorch 张量，先转换为 numpy
+    if isinstance(adj, torch.Tensor):
+        adj_np = adj.detach().cpu().numpy()
+    else:
+        adj_np = adj
+
+    adj_sp = sp.coo_matrix(adj_np)
+    rowsum = np.array(adj_sp.sum(1))
+    d_inv_sqrt = np.power(rowsum + 1e-7, -0.5).flatten()  # 添加 epsilon 避免除零
     d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.
     d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
-    return d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt).tocoo()
+    normalized = d_mat_inv_sqrt.dot(adj_sp).dot(d_mat_inv_sqrt).tocoo()
+
+    # 转换为 PyTorch 稀疏张量
+    indices = torch.LongTensor(np.vstack([normalized.row, normalized.col]))
+    values = torch.FloatTensor(normalized.data)
+    shape = torch.Size(normalized.shape)
+
+    return torch.sparse_coo_tensor(indices, values, shape)
 
 def build_knn_neighbourhood(adj, topk):
     """构建 KNN 邻域"""
@@ -40,11 +57,30 @@ class DGMRec(AbstractTrainableModel):
     4. 互信息最小化 (MI Minimization) - 确保特征独立性
     """
 
-    def __init__(self, config, device="cuda" if torch.cuda.is_available() else "cpu"):
+    def __init__(self, config, dataset=None, device="cuda" if torch.cuda.is_available() else "cpu"):
+        """
+        初始化DGMRec模型
+
+        Args:
+            config: 配置对象
+            dataset: 数据集对象，需要提供以下属性/方法:
+                - inter_matrix(form='coo'): 返回用户-物品交互矩阵
+                - visual_feat: 视觉特征张量 (n_items, visual_dim)
+                - text_feat: 文本特征张量 (n_items, text_dim)
+                如果为None，将使用随机初始化的特征（仅用于测试）
+            device: 计算设备
+        """
         super(DGMRec, self).__init__(device)
         self.config = config
-        self.n_users = config.user_vocab_size  # 从数据集中加载到config中获取用户数
-        self.n_items = config.item_vocab_size  # 从数据集中加载到config中获取物品数
+
+        # 从 dataset 获取用户和物品数量（如果提供）
+        if dataset is not None:
+            self.n_users = dataset.n_users
+            self.n_items = dataset.n_items
+        else:
+            self.n_users = config.user_vocab_size
+            self.n_items = config.item_vocab_size
+
         self.latent_dim = config.hidden_dim
         self.n_ui_layers = getattr(config, 'n_ui_layers', 2)
         self.n_mm_layers = getattr(config, 'n_mm_layers', 2)
@@ -63,33 +99,58 @@ class DGMRec(AbstractTrainableModel):
         nn.init.xavier_uniform_(self.item_id_embedding.weight)
 
         # 从数据集获取交互矩阵
-        self.interaction_matrix = dataset.inter_matrix(form='coo').astype(np.float32)
+        if dataset is not None and hasattr(dataset, 'inter_matrix'):
+            self.interaction_matrix = dataset.inter_matrix(form='coo').astype(np.float32)
+        else:
+            # 如果没有提供dataset，创建一个空的交互矩阵（仅用于测试）
+            self.interaction_matrix = sp.coo_matrix((self.n_users, self.n_items), dtype=np.float32)
+
         self.n_nodes = self.n_users + self.n_items
         self.adj = self.scipy_matrix_to_sparse_tensor(self.interaction_matrix, torch.Size((self.n_users, self.n_items)))
-        self.num_inters, self.norm_adj = self.get_norm_adj_mat()
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        sumArr, self.norm_adj = self.get_norm_adj_mat()
+        # 注意：self.device 已在基类 AbstractTrainableModel.__init__ 中设置
         self.norm_adj = self.norm_adj.to(self.device)
-        self.num_inters = torch.FloatTensor(1.0 / (self.num_inters + 1e-7)).to(self.device)
+        # 计算交互数的倒数，使用 clamp 避免极端值
+        # sumArr 是 (n_nodes, 1) 的矩阵，需要转换为 (n_nodes,) 的向量
+        num_inters_array = np.array(sumArr).flatten()
+        num_inters_inv = 1.0 / np.maximum(num_inters_array, 1.0)  # 至少为1，避免除零
+        # 转换为 (n_nodes, 1) 形状以便广播
+        self.num_inters = torch.FloatTensor(num_inters_inv).unsqueeze(1).to(self.device)
 
         # 获取视觉和文本特征
-        self.v_feat = dataset.visual_feat  # 假设数据集有这个属性
-        self.t_feat = dataset.text_feat    # 假设数据集有这个属性
+        if dataset is not None and hasattr(dataset, 'visual_feat'):
+            self.v_feat = dataset.visual_feat
+        else:
+            # 如果没有提供，使用随机初始化的特征
+            self.v_feat = torch.randn(self.n_items, getattr(config, 'visual_dim', 512))
+
+        if dataset is not None and hasattr(dataset, 'text_feat'):
+            self.t_feat = dataset.text_feat
+        else:
+            # 如果没有提供，使用随机初始化的特征
+            self.t_feat = torch.randn(self.n_items, getattr(config, 'text_dim', 768))
         
         if self.v_feat is not None:
+            # 确保特征是 float32 类型
+            if self.v_feat.dtype == torch.float16:
+                self.v_feat = self.v_feat.float()
             self.image_embedding = nn.Embedding.from_pretrained(self.v_feat, freeze=False).to(self.device)
-            
+
             # 构建图像邻接矩阵
             image_adj = build_sim(self.image_embedding.weight.detach().cpu())
             image_adj = build_knn_neighbourhood(image_adj, topk=self.knn_k)
-            self.image_adj = compute_normalized_laplacian(image_adj).to_sparse_coo().to(self.device)
-            
+            self.image_adj = compute_normalized_laplacian(image_adj).to(self.device)
+
         if self.t_feat is not None:
+            # 确保特征是 float32 类型
+            if self.t_feat.dtype == torch.float16:
+                self.t_feat = self.t_feat.float()
             self.text_embedding = nn.Embedding.from_pretrained(self.t_feat, freeze=False).to(self.device)
 
             # 构建文本邻接矩阵
             text_adj = build_sim(self.text_embedding.weight.detach().cpu())
             text_adj = build_knn_neighbourhood(text_adj, topk=self.knn_k)
-            self.text_adj = compute_normalized_laplacian(text_adj).to_sparse_coo().to(self.device)
+            self.text_adj = compute_normalized_laplacian(text_adj).to(self.device)
 
         # 多模态编码器（对齐官方代码）
         image_input_dim = self.v_feat.shape[1] if self.v_feat is not None else config.visual_dim
@@ -255,8 +316,8 @@ class DGMRec(AbstractTrainableModel):
         loss_InfoNCE = self.InfoNCE(item_image_g, item_text_g, temperature=self.infoNCETemp)
 
         # 计算用户过滤特征
-        item_image_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.image_preference(self.user_embedding.weight))) * self.num_inters[self.n_users:]
-        item_text_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.text_preference(self.user_embedding.weight))) * self.num_inters[self.n_users:]
+        item_image_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.image_preference_(self.user_embedding.weight))) * self.num_inters[self.n_users:]
+        item_text_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.text_preference_(self.user_embedding.weight))) * self.num_inters[self.n_users:]
 
         # 通用特征过滤
         item_image_g_filtered = torch.einsum("ij, ij -> ij", item_image_filter, item_image_g)
@@ -338,8 +399,8 @@ class DGMRec(AbstractTrainableModel):
         item_image_g, item_text_g, item_image_s, item_text_s = self.mge()
 
         # 特征过滤
-        item_image_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.image_preference(self.user_embedding.weight))) * self.num_inters[self.n_users:]
-        item_text_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.text_preference(self.user_embedding.weight))) * self.num_inters[self.n_users:]
+        item_image_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.image_preference_(self.user_embedding.weight))) * self.num_inters[self.n_users:]
+        item_text_filter = torch.sparse.mm(self.adj.t(), F.tanh(self.text_preference_(self.user_embedding.weight))) * self.num_inters[self.n_users:]
 
         # 通用特征传播
         item_image_g_filtered = torch.einsum("ij, ij -> ij", item_image_filter, item_image_g)
@@ -369,6 +430,33 @@ class DGMRec(AbstractTrainableModel):
 
         score = torch.matmul(user_emb, item_emb.transpose(0, 1))
         return score
+
+    def predict(self, batch, top_k=20):
+        """
+        预测方法，返回 top-k 物品索引
+
+        Args:
+            batch: 可以是元组 (users, pos_items, neg_items) 或字典 {'user_id': ..., 'pos_item': ..., 'neg_item': ...}
+            top_k: 返回的 top-k 物品数量
+
+        Returns:
+            torch.Tensor: (batch_size, top_k) 的预测物品索引
+        """
+        # 处理不同的输入格式
+        if isinstance(batch, tuple):
+            users = batch[0]
+        elif isinstance(batch, dict):
+            users = batch.get('user_id', batch.get('users'))
+        else:
+            raise ValueError(f"Unsupported batch type: {type(batch)}")
+
+        # 使用 full_sort_predict 获取所有物品的分数
+        scores = self.full_sort_predict((users, None))
+
+        # 获取 top-k 预测
+        _, top_k_indices = torch.topk(scores, k=top_k, dim=-1)
+
+        return top_k_indices
 
     def scipy_matrix_to_sparse_tensor(self, matrix, shape):
         """将scipy稀疏矩阵转换为PyTorch稀疏张量"""
