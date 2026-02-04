@@ -264,12 +264,14 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
     def customer_train(self,
               train_dataloader: torch.utils.data.DataLoader,
               val_dataloader: torch.utils.data.DataLoader,
-              stage_configs: List[StageConfig]):
+              stage_configs: List[StageConfig],
+              skip_validation: bool = False):
         """
         统一训练入口：支持任意多阶段训练
         :param train_dataloader: 训练数据加载器
         :param val_dataloader: 验证数据加载器
         :param stage_configs: 阶段配置列表（1个元素=一阶段，N个元素=N阶段）
+        :param skip_validation: 是否跳过训练过程中的验证（用于加速训练）
         """
         # 排序阶段配置（确保按stage_id升序执行）
         stage_configs = sorted(stage_configs, key=lambda x: x.stage_id)
@@ -312,8 +314,11 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
 
                 # 训练一轮
                 train_metrics = self._train_one_epoch(train_dataloader, stage_id, stage_kwargs)
-                # 验证一轮
-                val_metrics = self._validate_one_epoch(val_dataloader, stage_id, stage_kwargs)
+                # 验证一轮（可选跳过以加速训练）
+                if skip_validation:
+                    val_metrics = {}  # 跳过验证时返回空指标
+                else:
+                    val_metrics = self._validate_one_epoch(val_dataloader, stage_id, stage_kwargs)
 
                 # Epoch结束钩子
                 self.on_epoch_end(epoch, stage_id, stage_kwargs, train_metrics, val_metrics)

@@ -36,7 +36,7 @@ scaler = GradScaler()
 NUM_WORKS = 0 if os.name == 'nt' else 4
 
 
-def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None, eval_kwargs=None):
+def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None, eval_kwargs=None, skip_validation=True):
     """通用训练函数（使用 AbstractTrainableModel 统一训练框架）
 
     Args:
@@ -47,6 +47,7 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
         ablation_module: 消融模块名称（可选）
         logger: 日志记录器
         eval_kwargs: 评估时需要的额外参数（如 all_item_features）
+        skip_validation: 是否跳过训练过程中的验证（默认True，加速训练）
 
     Returns:
         训练后的模型
@@ -60,6 +61,8 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
 
     # ✅ 使用 AbstractTrainableModel 的统一训练框架
     logger.info(f"✅ 使用 AbstractTrainableModel 统一训练框架训练 {model.__class__.__name__}")
+    if skip_validation:
+        logger.info("⏭️ 训练过程中跳过验证（仅在最后进行测试评估）")
 
     # 构建 stage_kwargs
     stage_kwargs = {
@@ -86,13 +89,14 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
     model.customer_train(
         train_dataloader=train_loader,
         val_dataloader=val_loader,
-        stage_configs=[stage_config]
+        stage_configs=[stage_config],
+        skip_validation=skip_validation
     )
 
     return model
 
 
-def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logger=None, eval_kwargs=None):
+def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logger=None, eval_kwargs=None, skip_validation=True):
     """MCRL两阶段训练函数
 
     Stage 1 (表征塑形): 专注对比学习，低推荐权重，冻结matcher
@@ -105,6 +109,7 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
         experiment_name: 实验名称
         logger: 日志记录器
         eval_kwargs: 评估时需要的额外参数（如 all_item_features）
+        skip_validation: 是否跳过训练过程中的验证（默认True，加速训练）
 
     Returns:
         训练后的模型
@@ -117,10 +122,12 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
 
     if not two_stage_enabled:
         logger.info("MCRL两阶段训练未启用，使用单阶段训练")
-        return train_model(model, train_loader, val_loader, experiment_name, logger=logger, eval_kwargs=eval_kwargs)
+        return train_model(model, train_loader, val_loader, experiment_name, logger=logger, eval_kwargs=eval_kwargs, skip_validation=skip_validation)
 
     logger.info("="*60)
     logger.info("MCRL两阶段训练")
+    if skip_validation:
+        logger.info("⏭️ 训练过程中跳过验证（仅在最后进行测试评估）")
     logger.info("="*60)
 
     # 计算两阶段的epoch分配
@@ -179,7 +186,8 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
     model.customer_train(
         train_dataloader=train_loader,
         val_dataloader=val_loader,
-        stage_configs=stage_configs
+        stage_configs=stage_configs,
+        skip_validation=skip_validation
     )
 
     return model
@@ -692,12 +700,14 @@ def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
         kwargs=stage_kwargs
     )
 
-    # 训练模型
+    # 训练模型（跳过训练过程中的验证以加速）
     logger.info("开始训练...")
+    logger.info("⏭️ 训练过程中跳过验证（仅在最后进行测试评估）")
     model.customer_train(
         train_dataloader=train_loader,
         val_dataloader=val_loader,
-        stage_configs=[stage_config]
+        stage_configs=[stage_config],
+        skip_validation=True
     )
 
     # 评估
