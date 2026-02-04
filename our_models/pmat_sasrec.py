@@ -602,8 +602,12 @@ class PMAT_SASRec(AbstractTrainableModel):
         all_target_items = []
         all_ranks = []
 
+        # 添加进度条
+        from tqdm import tqdm
+        val_pbar = tqdm(val_dataloader, desc=f"Stage {stage_id} Validate", leave=False)
+
         with torch.no_grad():
-            for batch in val_dataloader:
+            for batch in val_pbar:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                         for k, v in batch.items()}
 
