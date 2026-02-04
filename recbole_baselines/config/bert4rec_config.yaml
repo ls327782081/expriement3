@@ -1,0 +1,20 @@
+# BERT4Rec 模型配置
+# BERT4Rec: Sequential Recommendation with Bidirectional Encoder Representations from Transformer (CIKM 2019)
+
+# 模型参数
+hidden_size: 64
+inner_size: 256  # FFN 内部维度
+n_layers: 2
+n_heads: 2
+hidden_dropout_prob: 0.5
+attn_dropout_prob: 0.5
+hidden_act: 'gelu'
+layer_norm_eps: 1e-12
+initializer_range: 0.02
+
+# BERT特有参数
+mask_ratio: 0.2  # 掩码比例
+
+# 损失函数
+loss_type: 'CE'  # Cross Entropy
+

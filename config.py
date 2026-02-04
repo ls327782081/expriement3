@@ -81,12 +81,18 @@ class BaseConfig:
     log_dir: str = "./logs"
     save_interval: int = 1  # 每N个epoch保存一次
 
-    # 基线模型（已实现的模型）
+    # 基线模型配置
+    # 当前框架基线（多模态推荐）
     baseline_models: List[str] = field(default_factory=lambda: [
-        "PctxAligned",      # 上下文感知 - 需要特殊tokenizer
-        "PRISM",     # 2025: 个性化多模态融合 (WWW 2026) - 没有predict方法
-        "DGMRec",    # 2025: 解耦和生成模态 (SIGIR 2025) - 已适配
-        # 待实现: AMMRM, CoFiRec, LETTER, SASRec
+        "DGMRec",    # SIGIR 2025: 模态解耦和生成 - 已验证正确
+    ])
+
+    # RecBole基线（序列推荐，需要单独运行）
+    # 使用 recbole_baselines/ 目录下的脚本运行
+    recbole_baselines: List[str] = field(default_factory=lambda: [
+        "SASRec",    # 序列推荐经典 (Transformer)
+        "BERT4Rec",  # 双向序列推荐 (Bidirectional Transformer)
+        "GRU4Rec",   # RNN序列推荐基线
     ])
 
     # PMAT消融实验模块

@@ -1,0 +1,56 @@
+# RecBole 序列推荐配置文件
+# 用于 SASRec, BERT4Rec, GRU4Rec 基线实验
+
+# ==================== 数据集配置 ====================
+# 字段定义
+USER_ID_FIELD: user_id
+ITEM_ID_FIELD: item_id
+TIME_FIELD: timestamp
+
+# 加载的列
+load_col:
+    inter: [user_id, item_id, timestamp]
+
+# 序列推荐设置
+ITEM_LIST_LENGTH_FIELD: item_length
+LIST_SUFFIX: _list
+MAX_ITEM_LIST_LENGTH: 50  # 与当前框架保持一致
+
+# ==================== 数据划分配置 ====================
+# 使用 leave-one-out 评估协议（与当前框架一致）
+eval_args:
+    group_by: user
+    order: TO  # 按时间排序
+    split: {'LS': 'valid_and_test'}  # Leave-one-out for valid and test
+    mode: full  # 全排序评估
+
+# ==================== 训练配置 ====================
+epochs: 100
+train_batch_size: 256
+eval_batch_size: 256
+
+# 不使用负采样（序列推荐使用交叉熵损失）
+train_neg_sample_args: ~
+
+# 学习率
+learning_rate: 0.001
+
+# ==================== 评估配置 ====================
+# 评估指标（与当前框架一致）
+metrics: ['Recall', 'MRR', 'NDCG', 'Hit', 'Precision']
+topk: [5, 10, 20]
+valid_metric: NDCG@10
+metric_decimal_place: 4
+
+# ==================== 其他配置 ====================
+# 设备
+device: cuda
+use_gpu: True
+
+# 随机种子
+seed: 42
+reproducibility: True
+
+# 日志
+show_progress: True
+

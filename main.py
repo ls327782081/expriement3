@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -16,7 +17,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
 from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader, get_dgmrec_dataloader
-from baseline_models import PctxAligned, PRISM, DGMRec
+from baseline_models import DGMRec
+# 注意：PRISM 和 PctxAligned 已从基线中移除
+# PRISM: 实现存在错误（使用随机目标训练）
+# PctxAligned: 需要特殊tokenizer，与实验设置不兼容
 from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
 from our_models.pmat_sasrec import PMAT_SASRec
@@ -236,65 +240,47 @@ def evaluate_model(model, test_loader, model_name, logger=None):
 
 # 1. 基线实验
 def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
-    """运行基线模型实验"""
+    """
+    运行基线模型实验
+
+    当前框架基线：
+    - DGMRec: 多模态解耦和生成 (SIGIR 2025)
+
+    RecBole基线（需要单独运行）：
+    - SASRec, BERT4Rec, GRU4Rec
+    - 使用 recbole_baselines/run_baselines.py 运行
+    """
 
     logger.info("===== 开始基线实验 =====")
+    logger.info("当前框架基线: " + ", ".join(config.baseline_models))
+    logger.info("RecBole基线 (需单独运行): " + ", ".join(config.recbole_baselines))
 
     results = []
+    train_loader, val_loader, test_loader = None, None, None
+
     # 训练并评估基线模型
     for baseline_name in config.baseline_models:
         logger.info(f"\n训练基线模型：{baseline_name}")
 
-        # PctxAligned 需要特殊的数据加载流程
-        if baseline_name == "PctxAligned":
-            logger.info("Using specialized dataloader for PctxAligned...")
-            tokenizer_path = f"checkpoints/pctx_tokenizer_{config.category}.pkl"
-            train_loader, val_loader, test_loader, tokenizer = get_pctx_dataloader(
-                cache_dir="./data",
+        if baseline_name == "DGMRec":
+            # DGMRec 需要专用的数据加载器和数据适配器
+            logger.info("为 DGMRec 加载专用数据...")
+            dgmrec_train_loader, dgmrec_val_loader, dgmrec_test_loader, dataset_adapter = get_dgmrec_dataloader(
+                "./data",
                 category=config.category,
                 batch_size=config.batch_size,
                 shuffle=True,
                 quick_mode=quick_mode,
                 logger=logger,
-                num_workers=0,
-                tokenizer_path=tokenizer_path,
-                device=config.device
+                num_workers=0
             )
-            model = PctxAligned(vocab_size=tokenizer.vocab_size, device=config.device).to(config.device)
+            # 使用数据适配器初始化 DGMRec（已继承 AbstractTrainableModel）
+            model = DGMRec(config, dataset=dataset_adapter).to(config.device)
+            # 使用 DGMRec 专用的数据加载器
+            train_loader, val_loader, test_loader = dgmrec_train_loader, dgmrec_val_loader, dgmrec_test_loader
         else:
-            # 其他模型使用标准数据加载器
-            if baseline_name == config.baseline_models[0] and baseline_name != "PctxAligned":
-                # 只在第一个非PctxAligned模型时加载数据
-                train_loader, val_loader, test_loader = get_dataloader(
-                    "./data",
-                    category=config.category,
-                    shuffle=True,
-                    quick_mode=quick_mode,
-                    logger=logger,
-                    num_workers=0
-                )
-
-            if baseline_name == "PRISM":
-                model = PRISM(config).to(config.device)
-            elif baseline_name == "DGMRec":
-                # DGMRec 需要专用的数据加载器和数据适配器
-                logger.info("为 DGMRec 加载专用数据...")
-                dgmrec_train_loader, dgmrec_val_loader, dgmrec_test_loader, dataset_adapter = get_dgmrec_dataloader(
-                    "./data",
-                    category=config.category,
-                    batch_size=config.batch_size,
-                    shuffle=True,
-                    quick_mode=quick_mode,
-                    logger=logger,
-                    num_workers=0
-                )
-                # 使用数据适配器初始化 DGMRec（已继承 AbstractTrainableModel）
-                model = DGMRec(config, dataset=dataset_adapter).to(config.device)
-                # 使用 DGMRec 专用的数据加载器
-                train_loader, val_loader, test_loader = dgmrec_train_loader, dgmrec_val_loader, dgmrec_test_loader
-            else:
-                logger.warning(f"未知基线模型: {baseline_name}，跳过")
-                continue
+            logger.warning(f"未知基线模型: {baseline_name}，跳过")
+            continue
 
         # 训练
         model = train_model(model, train_loader, val_loader, f"baseline_{baseline_name}", logger=logger)
@@ -302,15 +288,29 @@ def run_baseline_experiment(logger:logging.Logger, quick_mode:bool=False):
         metrics = evaluate_model(model, test_loader, baseline_name, logger=logger)
         results.append(metrics)
 
-    # 训练并评估原创模型PMAT
-    logger.info("\n训练原创模型：PMAT")
-    pmat_model = PMAT(config).to(config.device)
-    pmat_model = train_model(pmat_model, train_loader, val_loader, "PMAT", logger=logger)
-    pmat_metrics = evaluate_model(pmat_model, test_loader, "PMAT", logger=logger)
-    results.append(pmat_metrics)
+        # 清理内存
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+    # 训练并评估原创模型PMAT（如果有数据加载器）
+    if train_loader is not None:
+        logger.info("\n训练原创模型：PMAT")
+        pmat_model = PMAT(config).to(config.device)
+        pmat_model = train_model(pmat_model, train_loader, val_loader, "PMAT", logger=logger)
+        pmat_metrics = evaluate_model(pmat_model, test_loader, "PMAT", logger=logger)
+        results.append(pmat_metrics)
 
     # 保存结果
     save_results(results, "baseline", logger=logger)
+
+    logger.info("\n" + "=" * 60)
+    logger.info("提示：RecBole基线需要单独运行：")
+    logger.info("  1. python recbole_baselines/convert_to_recbole.py --category Video_Games")
+    logger.info("  2. pip install recbole")
+    logger.info("  3. python recbole_baselines/run_baselines.py --dataset Video_Games")
+    logger.info("=" * 60)
 
 
 # 2. 消融实验
@@ -481,6 +481,12 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
                 results.append(metrics)
                 logger.info(f"  HR@10={metrics.get('HR@10', 0):.4f}, NDCG@10={metrics.get('NDCG@10', 0):.4f}")
 
+                # 清理内存，防止内存溢出
+                del model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+
     # 恢复原始配置
     config.id_length = original_id_length
     config.lr = original_lr
@@ -519,6 +525,12 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
                 metrics["lr"] = lr
                 results.append(metrics)
                 logger.info(f"  HR@10={metrics.get('HR@10', 0):.4f}, NDCG@10={metrics.get('NDCG@10', 0):.4f}")
+
+                # 清理内存，防止内存溢出
+                del model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
 
     # 恢复原始配置
     config.mcrl_alpha = original_alpha

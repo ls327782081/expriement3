@@ -154,7 +154,8 @@ class AmazonBooksProcessor:
             raise FileNotFoundError(f"Review data file not found: {jsonl_path}")
 
         # Quick模式下只加载前N条数据
-        max_lines = 10000 if self.quick_mode else None
+        # 增加到50000条以确保过滤后有足够的数据用于序列推荐
+        max_lines = 50000 if self.quick_mode else None
         line_count = 0
 
         with open(jsonl_path, 'r', encoding='utf-8') as f:
