@@ -530,42 +530,117 @@ class MCRL_SASRec(AbstractTrainableModel):
         stage_id: int,
         stage_kwargs: Dict
     ) -> Dict:
-        """单轮验证"""
+        """单轮验证 - Full Ranking评估
+
+        使用Full Ranking评估协议：对所有物品计算分数，然后排序
+        """
         self.eval()
 
-        total_loss = 0.0
-        total_bpr_loss = 0.0
-        total_cl_loss = 0.0
-        all_pos_scores = []
-        all_neg_scores = []
+        # 获取所有物品特征（从stage_kwargs中获取）
+        all_item_features = stage_kwargs.get('all_item_features', None)
+        if all_item_features is None:
+            raise ValueError("Full Ranking评估需要提供all_item_features")
+
+        all_text_feat = all_item_features['text'].to(self.device)
+        all_visual_feat = all_item_features['visual'].to(self.device)
+        num_items = all_text_feat.shape[0]
+
+        all_target_items = []
+        all_ranks = []
 
         with torch.no_grad():
             for batch in val_dataloader:
                 batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                         for k, v in batch.items()}
 
-                outputs = self.forward(batch)
-                losses = self.compute_loss(outputs)
+                batch_size = batch['history_text_feat'].shape[0]
+                target_items = batch['target_item']  # (batch,)
+                all_target_items.append(target_items.cpu())
 
-                total_loss += losses['total_loss'].item()
-                total_bpr_loss += losses['bpr_loss'].item()
-                total_cl_loss += losses['contrastive_loss'].item()
+                # 1. 编码用户序列
+                user_repr, _ = self.encode_sequence(
+                    batch['history_text_feat'],
+                    batch['history_vision_feat'],
+                    batch['history_len']
+                )
 
-                all_pos_scores.append(outputs['pos_scores'].cpu())
-                all_neg_scores.append(outputs['neg_scores'].cpu())
+                # 2. 对所有物品计算分数（分批处理以节省内存）
+                item_batch_size = 512  # 每次处理的物品数量
+                all_scores = []
 
-        num_batches = len(val_dataloader)
-        avg_loss = total_loss / num_batches
-        avg_bpr_loss = total_bpr_loss / num_batches
-        avg_cl_loss = total_cl_loss / num_batches
+                for start_idx in range(0, num_items, item_batch_size):
+                    end_idx = min(start_idx + item_batch_size, num_items)
+                    item_text = all_text_feat[start_idx:end_idx]  # (item_batch, text_dim)
+                    item_visual = all_visual_feat[start_idx:end_idx]  # (item_batch, visual_dim)
 
-        all_pos_scores = torch.cat(all_pos_scores, dim=0)
-        all_neg_scores = torch.cat(all_neg_scores, dim=0)
+                    # 扩展为 (batch, item_batch, dim)
+                    item_text_expanded = item_text.unsqueeze(0).expand(batch_size, -1, -1)
+                    item_visual_expanded = item_visual.unsqueeze(0).expand(batch_size, -1, -1)
 
-        metrics = self._compute_recommendation_metrics(all_pos_scores, all_neg_scores)
-        metrics['loss'] = avg_loss
-        metrics['bpr_loss'] = avg_bpr_loss
-        metrics['contrastive_loss'] = avg_cl_loss
+                    # 编码物品
+                    item_repr = self.encode_items(item_text_expanded, item_visual_expanded)
+
+                    # 计算分数
+                    scores = self.compute_match_score(user_repr, item_repr)
+                    all_scores.append(scores)
+
+                # 合并所有物品的分数
+                all_scores = torch.cat(all_scores, dim=1)  # (batch, num_items)
+
+                # 3. 计算目标物品的排名
+                # 获取目标物品的分数
+                target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
+
+                # 计算排名：有多少物品的分数 >= 目标物品的分数
+                ranks = (all_scores >= target_scores.unsqueeze(1)).sum(dim=1)  # (batch,)
+                all_ranks.append(ranks.cpu())
+
+        # 合并所有batch的结果
+        all_target_items = torch.cat(all_target_items, dim=0)
+        all_ranks = torch.cat(all_ranks, dim=0).float()
+
+        # 计算指标
+        metrics = self._compute_full_ranking_metrics(all_ranks, num_items)
+
+        return metrics
+
+    def _compute_full_ranking_metrics(
+        self,
+        ranks: torch.Tensor,
+        num_items: int,
+        k_list: List[int] = [1, 5, 10, 20]
+    ) -> Dict[str, float]:
+        """计算Full Ranking评估指标
+
+        Args:
+            ranks: (num_samples,) 每个样本的目标物品排名（1-based）
+            num_items: 总物品数量
+            k_list: 计算指标的K值列表
+
+        Returns:
+            metrics: 各项推荐指标
+        """
+        metrics = {}
+        num_samples = ranks.size(0)
+
+        for k in k_list:
+            # HR@K: 目标物品排名在前K的比例
+            hits = (ranks <= k).float()
+            metrics[f'HR@{k}'] = hits.mean().item()
+
+            # NDCG@K: 只有排名在前K的才有贡献
+            dcg = (ranks <= k).float() / torch.log2(ranks.float() + 1)
+            metrics[f'NDCG@{k}'] = dcg.mean().item()
+
+            # MRR@K: 只考虑排名在前K的
+            mrr = (ranks <= k).float() / ranks.float()
+            metrics[f'MRR@{k}'] = mrr.mean().item()
+
+        # 全局MRR
+        metrics['MRR'] = (1.0 / ranks.float()).mean().item()
+
+        # 平均排名
+        metrics['Mean_Rank'] = ranks.mean().item()
 
         return metrics
 
@@ -575,44 +650,29 @@ class MCRL_SASRec(AbstractTrainableModel):
         neg_scores: torch.Tensor,
         k_list: List[int] = [1, 5, 10, 20]
     ) -> Dict[str, float]:
-        """计算推荐指标
+        """计算推荐指标（已废弃，保留用于兼容性）
 
-        Args:
-            pos_scores: (num_samples,) 正样本分数
-            neg_scores: (num_samples, num_neg) 负样本分数
-            k_list: 计算指标的K值列表
-
-        Returns:
-            metrics: 各项推荐指标
+        注意：此方法使用Sampled Evaluation，已被Full Ranking替代
         """
         metrics = {}
         num_samples = pos_scores.size(0)
         num_neg = neg_scores.size(1)
 
-        # 将正样本分数与负样本分数拼接
         all_scores = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
-
-        # 获取排名
         _, indices = torch.sort(all_scores, dim=1, descending=True)
-        ranks = (indices == 0).nonzero(as_tuple=True)[1] + 1  # 正样本排名
+        ranks = (indices == 0).nonzero(as_tuple=True)[1] + 1
 
         for k in k_list:
-            # HR@K
             hits = (ranks <= k).float()
             metrics[f'HR@{k}'] = hits.mean().item()
 
-            # NDCG@K
             dcg = (ranks <= k).float() / torch.log2(ranks.float() + 1)
             metrics[f'NDCG@{k}'] = dcg.mean().item()
 
-            # MRR@K
             mrr = (ranks <= k).float() / ranks.float()
             metrics[f'MRR@{k}'] = mrr.mean().item()
 
-        # 全局MRR
         metrics['MRR'] = (1.0 / ranks.float()).mean().item()
-
-        # AUC
         auc = (pos_scores.unsqueeze(1) > neg_scores).float().mean().item()
         metrics['AUC'] = auc
 

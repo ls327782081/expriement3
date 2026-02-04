@@ -334,18 +334,20 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
     logger.info("=" * 70 + "\n")
 
     # 使用PMAT专用数据加载器（MCRL复用相同格式）
-    train_loader, val_loader, test_loader = get_pmat_dataloader(
+    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
         batch_size=config.batch_size,
         max_history_len=config.max_history_len,
         num_negative_samples=config.num_negative_samples,
-        eval_num_negative_samples=config.eval_num_negative_samples,
         shuffle=True,
         quick_mode=quick_mode,
         num_workers=NUM_WORKS,
         logger=logger
     )
+
+    # Full Ranking评估需要的stage_kwargs
+    eval_kwargs = {'all_item_features': all_item_features}
 
     results = []
 
@@ -359,7 +361,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
     pmat_full = PMAT(config).to(config.device)
     pmat_full = train_model(pmat_full, train_loader, val_loader, "PMAT_full", logger=logger)
     pmat_full.eval()
-    pmat_full_metrics = pmat_full._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+    pmat_full_metrics = pmat_full._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
     pmat_full_metrics["model"] = "PMAT_full"
     results.append(pmat_full_metrics)
     logger.info(f"PMAT完整模型: HR@10={pmat_full_metrics.get('HR@10', 0):.4f}, NDCG@10={pmat_full_metrics.get('NDCG@10', 0):.4f}")
@@ -373,7 +375,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
             ablation_model, train_loader, val_loader, f"PMAT_ablation_{ablation_module}", logger=logger
         )
         ablation_model.eval()
-        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
         ablation_metrics["model"] = f"PMAT_w/o_{ablation_module}"
         results.append(ablation_metrics)
         logger.info(f"PMAT w/o {ablation_module}: HR@10={ablation_metrics.get('HR@10', 0):.4f}, NDCG@10={ablation_metrics.get('NDCG@10', 0):.4f}")
@@ -388,7 +390,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
     mcrl_full = MCRL(config).to(config.device)
     mcrl_full = train_mcrl_two_stage(mcrl_full, train_loader, val_loader, "MCRL_full", logger=logger)
     mcrl_full.eval()
-    mcrl_full_metrics = mcrl_full._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
+    mcrl_full_metrics = mcrl_full._validate_one_epoch(test_loader, stage_id=2, stage_kwargs=eval_kwargs)
     mcrl_full_metrics["model"] = "MCRL_full_TwoStage"
     results.append(mcrl_full_metrics)
     logger.info(f"MCRL完整模型: HR@10={mcrl_full_metrics.get('HR@10', 0):.4f}, NDCG@10={mcrl_full_metrics.get('NDCG@10', 0):.4f}")
@@ -402,7 +404,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
             ablation_model, train_loader, val_loader, f"MCRL_ablation_{ablation_module}", logger=logger
         )
         ablation_model.eval()
-        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
+        ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs=eval_kwargs)
         ablation_metrics["model"] = f"MCRL_w/o_{ablation_module}_TwoStage"
         results.append(ablation_metrics)
         logger.info(f"MCRL w/o {ablation_module}: HR@10={ablation_metrics.get('HR@10', 0):.4f}, NDCG@10={ablation_metrics.get('NDCG@10', 0):.4f}")
@@ -432,18 +434,20 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
     logger.info("=" * 70 + "\n")
 
     # 使用PMAT专用数据加载器
-    train_loader, val_loader, test_loader = get_pmat_dataloader(
+    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
         batch_size=config.batch_size,
         max_history_len=config.max_history_len,
         num_negative_samples=config.num_negative_samples,
-        eval_num_negative_samples=config.eval_num_negative_samples,
         shuffle=True,
         quick_mode=quick_mode,
         num_workers=NUM_WORKS,
         logger=logger
     )
+
+    # Full Ranking评估需要的stage_kwargs
+    eval_kwargs = {'all_item_features': all_item_features}
 
     results = []
 
@@ -473,7 +477,7 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
 
                 # 评估
                 model.eval()
-                metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+                metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
                 metrics["model"] = exp_name
                 metrics["id_length"] = id_length
                 metrics["lr"] = lr
@@ -518,7 +522,7 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
 
                 # 评估
                 model.eval()
-                metrics = model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs={})
+                metrics = model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs=eval_kwargs)
                 metrics["model"] = exp_name
                 metrics["mcrl_alpha"] = alpha
                 metrics["mcrl_beta"] = beta
@@ -574,18 +578,20 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
 
     # 使用PMAT专用数据加载器
     logger.info("加载数据（使用get_pmat_dataloader）...")
-    train_loader, val_loader, test_loader = get_pmat_dataloader(
+    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
         batch_size=effective_batch_size,
         max_history_len=config.max_history_len,
         num_negative_samples=config.num_negative_samples,
-        eval_num_negative_samples=config.eval_num_negative_samples,
         shuffle=True,
         quick_mode=quick_mode,
         num_workers=NUM_WORKS,
         logger=logger
     )
+
+    # Full Ranking评估需要的stage_kwargs
+    eval_kwargs = {'all_item_features': all_item_features}
 
     # 创建模型
     logger.info("创建PMAT-SASRec推荐模型...")
@@ -598,7 +604,7 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
     # 评估
     logger.info("评估模型...")
     model.eval()
-    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
 
     logger.info("\nPMAT-SASRec推荐模型评估结果:")
     for k, v in metrics.items():
@@ -633,17 +639,19 @@ def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
 
     # 使用PMAT专用数据加载器（MCRL-SASRec复用相同格式）
     logger.info("加载数据（使用get_pmat_dataloader）...")
-    train_loader, val_loader, test_loader = get_pmat_dataloader(
+    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
         batch_size=config.batch_size,
         max_history_len=config.max_history_len,
         num_negative_samples=config.num_negative_samples,
-        eval_num_negative_samples=config.eval_num_negative_samples,
         shuffle=True,
         quick_mode=quick_mode,
         num_workers=NUM_WORKS,
     )
+
+    # Full Ranking评估需要的stage_kwargs
+    eval_kwargs = {'all_item_features': all_item_features}
 
     # 创建模型
     logger.info("创建MCRL-SASRec推荐模型...")
@@ -676,7 +684,7 @@ def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
     # 评估
     logger.info("评估模型...")
     model.eval()
-    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs={})
+    metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
 
     logger.info("\nMCRL-SASRec推荐模型评估结果:")
     for k, v in metrics.items():

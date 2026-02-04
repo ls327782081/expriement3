@@ -53,7 +53,7 @@ class BaseConfig:
     semantic_loss_weight: float = 0.1  # 语义ID生成损失权重
     max_history_len: int = 50  # 用户历史序列最大长度
     num_negative_samples: int = 4  # 训练时每个正样本对应的负样本数量
-    eval_num_negative_samples: int = 99  # 评估时每个正样本对应的负样本数量（更多负样本确保指标准确）
+    # 注意：评估使用Full Ranking模式（对所有物品排序），不再使用负采样评估
 
     # MCRL特定配置
     mcrl_alpha: float = 1.0  # 模态内对比权重

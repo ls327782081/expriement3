@@ -1335,7 +1335,8 @@ class PMATDataset(Dataset):
     支持：
     1. 用户历史序列（用于用户兴趣建模）
     2. 目标物品（正样本）
-    3. 负样本采样（用于BPR损失）
+    3. 负样本采样（用于BPR损失训练）
+    4. Full Ranking评估模式（评估时对所有物品排序）
     """
 
     def __init__(
@@ -1344,6 +1345,7 @@ class PMATDataset(Dataset):
         sequence_key: str,
         max_history_len: int = 50,
         num_negative_samples: int = 4,
+        full_ranking: bool = False,
         logger: logging.Logger = None
     ):
         """
@@ -1351,12 +1353,14 @@ class PMATDataset(Dataset):
             data: 包含所有数据的字典
             sequence_key: 序列数据的键名（train_sequences/val_sequences/test_sequences）
             max_history_len: 最大历史长度
-            num_negative_samples: 每个正样本对应的负样本数量
+            num_negative_samples: 每个正样本对应的负样本数量（仅训练时使用）
+            full_ranking: 是否使用Full Ranking评估模式（评估时不采样负样本）
             logger: 日志记录器
         """
         self.logger = logger or logging.getLogger(__name__)
         self.max_history_len = max_history_len
         self.num_negative_samples = num_negative_samples
+        self.full_ranking = full_ranking
 
         # 获取序列数据
         self.sequences = data.get(sequence_key, {})
@@ -1386,7 +1390,8 @@ class PMATDataset(Dataset):
                     'target': target
                 })
 
-        self.logger.info(f"PMATDataset initialized: {len(self.samples)} samples from {len(self.sequences)} users")
+        mode_str = "Full Ranking" if full_ranking else f"Sampled ({num_negative_samples} negatives)"
+        self.logger.info(f"PMATDataset initialized: {len(self.samples)} samples from {len(self.sequences)} users, mode: {mode_str}")
 
     def __len__(self):
         return len(self.samples)
@@ -1424,12 +1429,7 @@ class PMATDataset(Dataset):
         target_text_feat = self.text_features[target]
         target_vision_feat = self.image_features[target]
 
-        # 采样负样本
-        negative_items = self._sample_negatives(user_id, self.num_negative_samples)
-        neg_text_feat = self.text_features[negative_items]
-        neg_vision_feat = self.image_features[negative_items]
-
-        return {
+        result = {
             'user_id': torch.tensor(user_id, dtype=torch.long),
             'history_items': torch.tensor(history, dtype=torch.long),
             'history_len': torch.tensor(history_len, dtype=torch.long),
@@ -1438,16 +1438,26 @@ class PMATDataset(Dataset):
             'target_item': torch.tensor(target, dtype=torch.long),
             'target_text_feat': target_text_feat,
             'target_vision_feat': target_vision_feat,
-            'negative_items': torch.tensor(negative_items, dtype=torch.long),
-            'neg_text_feat': neg_text_feat,
-            'neg_vision_feat': neg_vision_feat,
         }
+
+        # Full Ranking模式下不采样负样本，只返回目标物品ID
+        if not self.full_ranking:
+            # 训练模式：采样负样本
+            negative_items = self._sample_negatives(user_id, self.num_negative_samples)
+            neg_text_feat = self.text_features[negative_items]
+            neg_vision_feat = self.image_features[negative_items]
+            result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)
+            result['neg_text_feat'] = neg_text_feat
+            result['neg_vision_feat'] = neg_vision_feat
+
+        return result
 
 
 def pmat_collate_fn(batch):
     """
     PMAT数据集的collate函数
     处理变长的用户历史序列，进行padding
+    支持训练模式（有负样本）和Full Ranking评估模式（无负样本）
     """
     user_ids = []
     history_items_list = []
@@ -1457,9 +1467,14 @@ def pmat_collate_fn(batch):
     target_items = []
     target_text_feat_list = []
     target_vision_feat_list = []
-    negative_items_list = []
-    neg_text_feat_list = []
-    neg_vision_feat_list = []
+
+    # 检查是否是Full Ranking模式（没有负样本）
+    has_negatives = 'negative_items' in batch[0]
+
+    if has_negatives:
+        negative_items_list = []
+        neg_text_feat_list = []
+        neg_vision_feat_list = []
 
     # 找到最大历史长度
     max_history_len = max(item['history_len'].item() for item in batch)
@@ -1470,9 +1485,11 @@ def pmat_collate_fn(batch):
         target_items.append(item['target_item'])
         target_text_feat_list.append(item['target_text_feat'])
         target_vision_feat_list.append(item['target_vision_feat'])
-        negative_items_list.append(item['negative_items'])
-        neg_text_feat_list.append(item['neg_text_feat'])
-        neg_vision_feat_list.append(item['neg_vision_feat'])
+
+        if has_negatives:
+            negative_items_list.append(item['negative_items'])
+            neg_text_feat_list.append(item['neg_text_feat'])
+            neg_vision_feat_list.append(item['neg_vision_feat'])
 
         # Padding历史序列
         history_len = item['history_len'].item()
@@ -1500,7 +1517,7 @@ def pmat_collate_fn(batch):
         history_text_feat_list.append(history_text)
         history_vision_feat_list.append(history_vision)
 
-    return {
+    result = {
         'user_id': torch.stack(user_ids),
         'history_items': torch.stack(history_items_list),
         'history_len': torch.stack(history_lens),
@@ -1509,10 +1526,14 @@ def pmat_collate_fn(batch):
         'target_item': torch.stack(target_items),
         'target_text_feat': torch.stack(target_text_feat_list),
         'target_vision_feat': torch.stack(target_vision_feat_list),
-        'negative_items': torch.stack(negative_items_list),
-        'neg_text_feat': torch.stack(neg_text_feat_list),
-        'neg_vision_feat': torch.stack(neg_vision_feat_list),
     }
+
+    if has_negatives:
+        result['negative_items'] = torch.stack(negative_items_list)
+        result['neg_text_feat'] = torch.stack(neg_text_feat_list)
+        result['neg_vision_feat'] = torch.stack(neg_vision_feat_list)
+
+    return result
 
 
 def get_pmat_dataloader(
@@ -1521,14 +1542,17 @@ def get_pmat_dataloader(
     batch_size: int = 32,
     max_history_len: int = 50,
     num_negative_samples: int = 4,
-    eval_num_negative_samples: int = 99,
     shuffle: bool = True,
     num_workers: int = 0,
     quick_mode: bool = False,
     logger: logging.Logger = None
-) -> Tuple[DataLoader, DataLoader, DataLoader]:
+) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[str, torch.Tensor]]:
     """
     为PMAT推荐模型创建专用的数据加载器
+
+    使用 Full Ranking 评估协议：
+    - 训练集：使用负采样（BPR损失）
+    - 验证集/测试集：Full Ranking模式，对所有物品排序
 
     Args:
         cache_dir: 缓存目录
@@ -1536,20 +1560,22 @@ def get_pmat_dataloader(
         batch_size: 批次大小
         max_history_len: 最大历史长度
         num_negative_samples: 训练时负样本数量
-        eval_num_negative_samples: 评估时负样本数量（更多负样本确保指标准确）
         shuffle: 是否打乱
         num_workers: 工作进程数
         quick_mode: 快速模式
         logger: 日志记录器
 
     Returns:
-        (train_loader, val_loader, test_loader)
+        (train_loader, val_loader, test_loader, all_item_features)
+        all_item_features: 包含所有物品特征的字典，用于Full Ranking评估
+            - 'text': (num_items, text_dim) 文本特征
+            - 'visual': (num_items, visual_dim) 视觉特征
     """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
 
     logger.info("=" * 60)
-    logger.info("Creating PMAT Recommendation DataLoaders")
+    logger.info("Creating PMAT Recommendation DataLoaders (Full Ranking Mode)")
     logger.info("=" * 60)
 
     # 加载数据
@@ -1576,25 +1602,48 @@ def get_pmat_dataloader(
     config.item_vocab_size = data['num_items']
     config.user_vocab_size = data['num_users']
 
+    # 准备所有物品特征（用于Full Ranking评估）
+    text_features = data.get('text_features')
+    image_features = data.get('image_features')
+
+    # 确保是张量格式
+    if not isinstance(text_features, torch.Tensor):
+        text_features = torch.tensor(text_features, dtype=torch.float32)
+    if not isinstance(image_features, torch.Tensor):
+        image_features = torch.tensor(image_features, dtype=torch.float32)
+
+    all_item_features = {
+        'text': text_features,
+        'visual': image_features,
+        'num_items': data['num_items']
+    }
+
+    logger.info(f"All item features prepared: {text_features.shape[0]} items")
+    logger.info(f"  - Text features: {text_features.shape}")
+    logger.info(f"  - Visual features: {image_features.shape}")
+
     # 创建数据集
-    # 训练集使用较少负样本（加快训练）
+    # 训练集使用负采样（BPR损失）
     train_dataset = PMATDataset(
         data, "train_sequences",
         max_history_len=max_history_len,
         num_negative_samples=num_negative_samples,
+        full_ranking=False,  # 训练时使用负采样
         logger=logger
     )
-    # 验证集和测试集使用更多负样本（确保评估指标准确）
+    # 验证集和测试集使用Full Ranking模式
     val_dataset = PMATDataset(
         data, "val_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=eval_num_negative_samples,
+        num_negative_samples=0,  # Full Ranking模式不需要负样本
+        full_ranking=True,
         logger=logger
     )
     test_dataset = PMATDataset(
         data, "test_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=eval_num_negative_samples,
+        num_negative_samples=0,  # Full Ranking模式不需要负样本
+        full_ranking=True,
         logger=logger
     )
 
@@ -1627,10 +1676,11 @@ def get_pmat_dataloader(
     )
 
     logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}, Test samples: {len(test_dataset)}")
+    logger.info("Evaluation mode: Full Ranking (against all items)")
     logger.info("PMAT dataloaders created successfully!")
     logger.info("=" * 60)
 
-    return train_loader, val_loader, test_loader
+    return train_loader, val_loader, test_loader, all_item_features
 
 
 # ==================== DGMRec 数据适配器 ====================
