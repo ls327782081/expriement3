@@ -565,7 +565,12 @@ class MCRL_SASRec(AbstractTrainableModel):
                 )
 
                 # 2. 对所有物品计算分数（分批处理以节省内存）
-                item_batch_size = 512  # 每次处理的物品数量
+                # CPU模式下使用更小的batch size以避免内存溢出
+                if self.device.type == 'cpu':
+                    item_batch_size = 64  # CPU模式下每次处理64个物品
+                else:
+                    item_batch_size = 256  # GPU模式下每次处理256个物品
+
                 all_scores = []
 
                 for start_idx in range(0, num_items, item_batch_size):
@@ -573,27 +578,45 @@ class MCRL_SASRec(AbstractTrainableModel):
                     item_text = all_text_feat[start_idx:end_idx]  # (item_batch, text_dim)
                     item_visual = all_visual_feat[start_idx:end_idx]  # (item_batch, visual_dim)
 
-                    # 扩展为 (batch, item_batch, dim)
-                    item_text_expanded = item_text.unsqueeze(0).expand(batch_size, -1, -1)
-                    item_visual_expanded = item_visual.unsqueeze(0).expand(batch_size, -1, -1)
+                    # 逐样本处理以进一步节省内存（CPU模式）
+                    if self.device.type == 'cpu' and batch_size > 1:
+                        batch_scores = []
+                        for i in range(batch_size):
+                            # 单样本处理
+                            item_text_single = item_text.unsqueeze(0)  # (1, item_batch, dim)
+                            item_visual_single = item_visual.unsqueeze(0)
 
-                    # 编码物品
-                    item_repr = self.encode_items(item_text_expanded, item_visual_expanded)
+                            item_repr = self.encode_items(item_text_single, item_visual_single)
+                            scores = self.compute_match_score(user_repr[i:i+1], item_repr)
+                            batch_scores.append(scores)
 
-                    # 计算分数
-                    scores = self.compute_match_score(user_repr, item_repr)
-                    all_scores.append(scores)
+                        scores = torch.cat(batch_scores, dim=0)  # (batch, item_batch)
+                    else:
+                        # GPU模式或单样本：批量处理
+                        item_text_expanded = item_text.unsqueeze(0).expand(batch_size, -1, -1)
+                        item_visual_expanded = item_visual.unsqueeze(0).expand(batch_size, -1, -1)
+
+                        item_repr = self.encode_items(item_text_expanded, item_visual_expanded)
+                        scores = self.compute_match_score(user_repr, item_repr)
+
+                    all_scores.append(scores.cpu())  # 立即移到CPU释放GPU内存
+
+                    # 清理中间变量
+                    del scores
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
 
                 # 合并所有物品的分数
                 all_scores = torch.cat(all_scores, dim=1)  # (batch, num_items)
 
-                # 3. 计算目标物品的排名
+                # 3. 计算目标物品的排名（在CPU上计算以节省内存）
                 # 获取目标物品的分数
-                target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
+                target_items_cpu = target_items.cpu()
+                target_scores = all_scores[torch.arange(batch_size), target_items_cpu]
 
                 # 计算排名：有多少物品的分数 >= 目标物品的分数
                 ranks = (all_scores >= target_scores.unsqueeze(1)).sum(dim=1)  # (batch,)
-                all_ranks.append(ranks.cpu())
+                all_ranks.append(ranks)
 
         # 合并所有batch的结果
         all_target_items = torch.cat(all_target_items, dim=0)

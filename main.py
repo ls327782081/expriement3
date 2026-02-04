@@ -36,7 +36,7 @@ scaler = GradScaler()
 NUM_WORKS = 0 if os.name == 'nt' else 4
 
 
-def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None):
+def train_model(model, train_loader, val_loader, experiment_name, ablation_module=None, logger=None, eval_kwargs=None):
     """通用训练函数（使用 AbstractTrainableModel 统一训练框架）
 
     Args:
@@ -46,6 +46,7 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
         experiment_name: 实验名称
         ablation_module: 消融模块名称（可选）
         logger: 日志记录器
+        eval_kwargs: 评估时需要的额外参数（如 all_item_features）
 
     Returns:
         训练后的模型
@@ -60,20 +61,26 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
     # ✅ 使用 AbstractTrainableModel 的统一训练框架
     logger.info(f"✅ 使用 AbstractTrainableModel 统一训练框架训练 {model.__class__.__name__}")
 
+    # 构建 stage_kwargs
+    stage_kwargs = {
+        'lr': config.lr,
+        'weight_decay': config.weight_decay,
+        'experiment_name': experiment_name,
+        'num_positive_samples': getattr(config, 'num_positive_samples', 5),
+        'num_negative_samples': getattr(config, 'num_negative_samples', 20),
+    }
+
+    # 添加评估参数（用于 Full Ranking 评估）
+    if eval_kwargs:
+        stage_kwargs.update(eval_kwargs)
+
     # 配置单阶段训练
     stage_config = StageConfig(
         stage_id=1,
         epochs=config.epochs,
         start_epoch=0,
-        kwargs={
-            'lr': config.lr,
-            'weight_decay': config.weight_decay,
-            'experiment_name': experiment_name,
-            'num_positive_samples': getattr(config, 'num_positive_samples', 5),
-            'num_negative_samples': getattr(config, 'num_negative_samples', 20),
-        }
+        kwargs=stage_kwargs
     )
-
 
     # 调用模型的统一训练方法
     model.customer_train(
@@ -85,7 +92,7 @@ def train_model(model, train_loader, val_loader, experiment_name, ablation_modul
     return model
 
 
-def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logger=None):
+def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logger=None, eval_kwargs=None):
     """MCRL两阶段训练函数
 
     Stage 1 (表征塑形): 专注对比学习，低推荐权重，冻结matcher
@@ -97,6 +104,7 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
         val_loader: 验证数据加载器
         experiment_name: 实验名称
         logger: 日志记录器
+        eval_kwargs: 评估时需要的额外参数（如 all_item_features）
 
     Returns:
         训练后的模型
@@ -109,7 +117,7 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
 
     if not two_stage_enabled:
         logger.info("MCRL两阶段训练未启用，使用单阶段训练")
-        return train_model(model, train_loader, val_loader, experiment_name, logger=logger)
+        return train_model(model, train_loader, val_loader, experiment_name, logger=logger, eval_kwargs=eval_kwargs)
 
     logger.info("="*60)
     logger.info("MCRL两阶段训练")
@@ -130,6 +138,15 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
     logger.info(f"  - cl_weight: {getattr(config, 'mcrl_stage2_cl_weight', 0.3)}")
     logger.info("="*60)
 
+    # 构建基础 stage_kwargs
+    base_kwargs = {
+        'num_positive_samples': getattr(config, 'num_positive_samples', 5),
+        'num_negative_samples': getattr(config, 'num_negative_samples', 20),
+    }
+    # 添加评估参数（用于 Full Ranking 评估）
+    if eval_kwargs:
+        base_kwargs.update(eval_kwargs)
+
     # 配置两阶段训练
     stage_configs = [
         # Stage 1: 表征塑形
@@ -138,11 +155,10 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
             epochs=stage1_epochs,
             start_epoch=0,
             kwargs={
+                **base_kwargs,
                 'lr': config.lr,
                 'weight_decay': config.weight_decay,
                 'experiment_name': f"{experiment_name}_stage1",
-                'num_positive_samples': getattr(config, 'num_positive_samples', 5),
-                'num_negative_samples': getattr(config, 'num_negative_samples', 20),
             }
         ),
         # Stage 2: 推荐对齐
@@ -151,11 +167,10 @@ def train_mcrl_two_stage(model, train_loader, val_loader, experiment_name, logge
             epochs=stage2_epochs,
             start_epoch=0,
             kwargs={
+                **base_kwargs,
                 'lr': config.lr * 0.5,  # Stage 2使用较小学习率，避免破坏已学习的表征
                 'weight_decay': config.weight_decay,
                 'experiment_name': f"{experiment_name}_stage2",
-                'num_positive_samples': getattr(config, 'num_positive_samples', 5),
-                'num_negative_samples': getattr(config, 'num_negative_samples', 20),
             }
         )
     ]
@@ -359,7 +374,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
     # 完整PMAT模型
     logger.info("\n训练完整PMAT模型")
     pmat_full = PMAT(config).to(config.device)
-    pmat_full = train_model(pmat_full, train_loader, val_loader, "PMAT_full", logger=logger)
+    pmat_full = train_model(pmat_full, train_loader, val_loader, "PMAT_full", logger=logger, eval_kwargs=eval_kwargs)
     pmat_full.eval()
     pmat_full_metrics = pmat_full._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
     pmat_full_metrics["model"] = "PMAT_full"
@@ -372,7 +387,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
         logger.info(f"\n训练PMAT消融模型（移除{ablation_module}）")
         ablation_model = get_pmat_ablation_model(ablation_module, config).to(config.device)
         ablation_model = train_model(
-            ablation_model, train_loader, val_loader, f"PMAT_ablation_{ablation_module}", logger=logger
+            ablation_model, train_loader, val_loader, f"PMAT_ablation_{ablation_module}", logger=logger, eval_kwargs=eval_kwargs
         )
         ablation_model.eval()
         ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
@@ -388,7 +403,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
     # 完整MCRL模型（两阶段训练）
     logger.info("\n训练完整MCRL模型（两阶段训练）")
     mcrl_full = MCRL(config).to(config.device)
-    mcrl_full = train_mcrl_two_stage(mcrl_full, train_loader, val_loader, "MCRL_full", logger=logger)
+    mcrl_full = train_mcrl_two_stage(mcrl_full, train_loader, val_loader, "MCRL_full", logger=logger, eval_kwargs=eval_kwargs)
     mcrl_full.eval()
     mcrl_full_metrics = mcrl_full._validate_one_epoch(test_loader, stage_id=2, stage_kwargs=eval_kwargs)
     mcrl_full_metrics["model"] = "MCRL_full_TwoStage"
@@ -401,7 +416,7 @@ def run_ablation_experiment(logger=None, quick_mode: bool = False):
         logger.info(f"\n训练MCRL消融模型（移除{ablation_module}，两阶段训练）")
         ablation_model = get_mcrl_ablation_model(ablation_module, config).to(config.device)
         ablation_model = train_mcrl_two_stage(
-            ablation_model, train_loader, val_loader, f"MCRL_ablation_{ablation_module}", logger=logger
+            ablation_model, train_loader, val_loader, f"MCRL_ablation_{ablation_module}", logger=logger, eval_kwargs=eval_kwargs
         )
         ablation_model.eval()
         ablation_metrics = ablation_model._validate_one_epoch(test_loader, stage_id=2, stage_kwargs=eval_kwargs)
@@ -473,7 +488,7 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
                 # 训练模型
                 model = PMAT(config).to(config.device)
                 exp_name = f"PMAT_hyper_id{id_length}_lr{lr}_cb{codebook_size}"
-                model = train_model(model, train_loader, val_loader, exp_name, logger=logger)
+                model = train_model(model, train_loader, val_loader, exp_name, logger=logger, eval_kwargs=eval_kwargs)
 
                 # 评估
                 model.eval()
@@ -518,7 +533,7 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
                 # 训练模型（两阶段训练）
                 model = MCRL(config).to(config.device)
                 exp_name = f"MCRL_hyper_a{alpha}_b{beta}_lr{lr}_TwoStage"
-                model = train_mcrl_two_stage(model, train_loader, val_loader, exp_name, logger=logger)
+                model = train_mcrl_two_stage(model, train_loader, val_loader, exp_name, logger=logger, eval_kwargs=eval_kwargs)
 
                 # 评估
                 model.eval()
@@ -599,7 +614,7 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
 
     # 训练
     logger.info("开始训练...")
-    model = train_model(model, train_loader, val_loader, "PMAT_SASRec", logger=logger)
+    model = train_model(model, train_loader, val_loader, "PMAT_SASRec", logger=logger, eval_kwargs=eval_kwargs)
 
     # 评估
     logger.info("评估模型...")
@@ -662,15 +677,19 @@ def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"模型参数: 总计={total_params:,}, 可训练={trainable_params:,}")
 
+    # 构建 stage_kwargs（包含评估所需的 all_item_features）
+    stage_kwargs = {
+        'lr': config.lr,
+        'weight_decay': config.weight_decay,
+        'all_item_features': all_item_features,  # Full Ranking 评估需要
+    }
+
     # 配置单阶段训练（MCRL-SASRec使用单阶段训练，对比学习权重已降低）
     stage_config = StageConfig(
         stage_id=1,
         epochs=config.epochs,
         start_epoch=0,
-        kwargs={
-            'lr': config.lr,
-            'weight_decay': config.weight_decay,
-        }
+        kwargs=stage_kwargs
     )
 
     # 训练模型
