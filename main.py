@@ -577,30 +577,27 @@ def run_hyper_param_experiment(logger=None, quick_mode: bool = False):
 # ==================== 新增：PMAT/MCRL 推荐模型实验 ====================
 
 def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
-    """运行PMAT-SASRec推荐模型实验（使用真实用户历史）
+    """运行PMAT-SASRec推荐模型实验（两阶段训练）
 
-    这是PMAT-SASRec混合模型，使用：
-    - PMAT语义增强嵌入 + SASRec序列建模
-    - 真实用户历史序列
-    - BPR推荐损失（主任务）+ 语义ID损失（辅助任务）
-    - 推荐指标：HR@K, NDCG@K, MRR, AUC
+    两阶段训练流程：
+    - 阶段1：预训练物品编码器（对比学习）
+    - 阶段2：冻结物品编码器，训练序列模型（Cross Entropy）
     """
     if logger is None:
         logger = logging.getLogger("PMAT_Experiment")
 
     logger.info("\n" + "="*70)
-    logger.info("===== PMAT-SASRec推荐模型实验（真实用户历史） =====")
+    logger.info("===== PMAT-SASRec推荐模型实验（两阶段训练） =====")
     logger.info("="*70 + "\n")
 
-    # 在 CPU 模式下使用较小的 batch_size 以避免内存问题
-    # SemanticIDQuantizer 中的 torch.cdist 在大 batch 时会消耗大量内存
+    # 在 CPU 模式下使用较小的 batch_size
     effective_batch_size = config.batch_size
     if config.device == torch.device('cpu') or str(config.device) == 'cpu':
         effective_batch_size = min(config.batch_size, 16)
         logger.info(f"CPU模式：将batch_size从{config.batch_size}调整为{effective_batch_size}以节省内存")
 
-    # 使用PMAT专用数据加载器
-    logger.info("加载数据（使用get_pmat_dataloader）...")
+    # 加载数据
+    logger.info("加载数据...")
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
@@ -613,19 +610,85 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
         logger=logger
     )
 
-    # Full Ranking评估需要的stage_kwargs
     eval_kwargs = {'all_item_features': all_item_features}
 
     # 创建模型
     logger.info("创建PMAT-SASRec推荐模型...")
     model = PMAT_SASRec(config, device=config.device).to(config.device)
 
-    # 训练
-    logger.info("开始训练...")
-    model = train_model(model, train_loader, val_loader, "PMAT_SASRec", logger=logger, eval_kwargs=eval_kwargs)
+    # 打印模型参数
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"模型参数总数: {total_params:,}")
 
-    # 评估
-    logger.info("评估模型...")
+    # ==================== 两阶段训练 ====================
+    use_two_stage = getattr(config, 'two_stage_training', True)
+
+    if use_two_stage:
+        logger.info("\n" + "-"*50)
+        logger.info("===== 阶段1：预训练物品编码器（对比学习） =====")
+        logger.info("-"*50)
+
+        # 冻结序列编码器，只训练物品编码器
+        model.freeze_sequence_encoder()
+
+        stage1_epochs = getattr(config, 'stage1_epochs', 3)
+        stage1_lr = getattr(config, 'stage1_lr', 1e-3)
+
+        stage1_config = StageConfig(
+            stage_id=0,  # 预训练阶段
+            epochs=stage1_epochs,
+            start_epoch=0,
+            kwargs={'lr': stage1_lr, 'weight_decay': config.weight_decay}
+        )
+
+        logger.info(f"阶段1配置: epochs={stage1_epochs}, lr={stage1_lr}")
+        model.customer_train(
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            stage_configs=[stage1_config],
+            skip_validation=True  # 预训练阶段跳过验证
+        )
+
+        logger.info("\n" + "-"*50)
+        logger.info("===== 阶段2：训练序列模型（Cross Entropy） =====")
+        logger.info("-"*50)
+
+        # 解冻序列编码器，冻结物品编码器
+        model.unfreeze_sequence_encoder()
+        model.freeze_item_encoder()
+
+        # 预计算所有物品表征（使用训练好的物品编码器）
+        logger.info("预计算所有物品表征...")
+        model.set_all_item_features(all_item_features)
+
+        stage2_epochs = getattr(config, 'stage2_epochs', 5)
+        stage2_lr = getattr(config, 'stage2_lr', 1e-4)
+
+        stage2_config = StageConfig(
+            stage_id=1,  # 推荐阶段
+            epochs=stage2_epochs,
+            start_epoch=0,
+            kwargs={'lr': stage2_lr, 'weight_decay': config.weight_decay, 'all_item_features': all_item_features}
+        )
+
+        logger.info(f"阶段2配置: epochs={stage2_epochs}, lr={stage2_lr}")
+        model.customer_train(
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            stage_configs=[stage2_config],
+            skip_validation=True
+        )
+    else:
+        # 单阶段训练（原有逻辑）
+        logger.info("使用单阶段训练...")
+        model.set_all_item_features(all_item_features)
+        model = train_model(model, train_loader, val_loader, "PMAT_SASRec", logger=logger, eval_kwargs=eval_kwargs)
+
+    # ==================== 评估 ====================
+    logger.info("\n" + "-"*50)
+    logger.info("===== 最终评估 =====")
+    logger.info("-"*50)
+
     model.eval()
     metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
 
@@ -645,23 +708,21 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
 
 
 def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
-    """运行MCRL-SASRec推荐模型实验
+    """运行MCRL-SASRec推荐模型实验（两阶段训练）
 
-    这是MCRL-SASRec混合模型，使用：
-    - SASRec自回归序列建模（causal mask）
-    - MCRL三层对比学习作为辅助任务
-    - BPR推荐损失（主任务）+ 对比学习损失（辅助任务）
-    - 推荐指标：HR@K, NDCG@K, MRR, AUC
+    两阶段训练流程：
+    - 阶段1：预训练物品编码器（对比学习）
+    - 阶段2：冻结物品编码器，训练序列模型（Cross Entropy）
     """
     if logger is None:
-        logger = logging.getLogger("PMAT_Experiment")
+        logger = logging.getLogger("MCRL_Experiment")
 
     logger.info("\n" + "="*70)
-    logger.info("===== MCRL-SASRec推荐模型实验 =====")
+    logger.info("===== MCRL-SASRec推荐模型实验（两阶段训练） =====")
     logger.info("="*70 + "\n")
 
-    # 使用PMAT专用数据加载器（MCRL-SASRec复用相同格式）
-    logger.info("加载数据（使用get_pmat_dataloader）...")
+    # 加载数据
+    logger.info("加载数据...")
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category=config.category,
@@ -673,45 +734,98 @@ def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
         num_workers=NUM_WORKS,
     )
 
-    # Full Ranking评估需要的stage_kwargs
     eval_kwargs = {'all_item_features': all_item_features}
 
     # 创建模型
     logger.info("创建MCRL-SASRec推荐模型...")
     model = MCRL_SASRec(config).to(config.device)
 
-    # 打印模型信息
+    # 打印模型参数
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"模型参数: 总计={total_params:,}, 可训练={trainable_params:,}")
+    logger.info(f"模型参数总数: {total_params:,}")
 
-    # 构建 stage_kwargs（包含评估所需的 all_item_features）
-    stage_kwargs = {
-        'lr': config.lr,
-        'weight_decay': config.weight_decay,
-        'all_item_features': all_item_features,  # Full Ranking 评估需要
-    }
+    # ==================== 两阶段训练 ====================
+    use_two_stage = getattr(config, 'two_stage_training', True)
 
-    # 配置单阶段训练（MCRL-SASRec使用单阶段训练，对比学习权重已降低）
-    stage_config = StageConfig(
-        stage_id=1,
-        epochs=config.epochs,
-        start_epoch=0,
-        kwargs=stage_kwargs
-    )
+    if use_two_stage:
+        logger.info("\n" + "-"*50)
+        logger.info("===== 阶段1：预训练物品编码器（对比学习） =====")
+        logger.info("-"*50)
 
-    # 训练模型（跳过训练过程中的验证以加速）
-    logger.info("开始训练...")
-    logger.info("⏭️ 训练过程中跳过验证（仅在最后进行测试评估）")
-    model.customer_train(
-        train_dataloader=train_loader,
-        val_dataloader=val_loader,
-        stage_configs=[stage_config],
-        skip_validation=True
-    )
+        # 冻结序列编码器，只训练物品编码器
+        model.freeze_sequence_encoder()
 
-    # 评估
-    logger.info("评估模型...")
+        stage1_epochs = getattr(config, 'stage1_epochs', 3)
+        stage1_lr = getattr(config, 'stage1_lr', 1e-3)
+
+        stage1_config = StageConfig(
+            stage_id=0,  # 预训练阶段
+            epochs=stage1_epochs,
+            start_epoch=0,
+            kwargs={'lr': stage1_lr, 'weight_decay': config.weight_decay}
+        )
+
+        logger.info(f"阶段1配置: epochs={stage1_epochs}, lr={stage1_lr}")
+        model.customer_train(
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            stage_configs=[stage1_config],
+            skip_validation=True
+        )
+
+        logger.info("\n" + "-"*50)
+        logger.info("===== 阶段2：训练序列模型（Cross Entropy） =====")
+        logger.info("-"*50)
+
+        # 解冻序列编码器，冻结物品编码器
+        model.unfreeze_sequence_encoder()
+        model.freeze_item_encoder()
+
+        # 预计算所有物品表征
+        logger.info("预计算所有物品表征...")
+        model.set_all_item_features(all_item_features)
+
+        stage2_epochs = getattr(config, 'stage2_epochs', 5)
+        stage2_lr = getattr(config, 'stage2_lr', 1e-4)
+
+        stage2_config = StageConfig(
+            stage_id=1,  # 推荐阶段
+            epochs=stage2_epochs,
+            start_epoch=0,
+            kwargs={'lr': stage2_lr, 'weight_decay': config.weight_decay, 'all_item_features': all_item_features}
+        )
+
+        logger.info(f"阶段2配置: epochs={stage2_epochs}, lr={stage2_lr}")
+        model.customer_train(
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            stage_configs=[stage2_config],
+            skip_validation=True
+        )
+    else:
+        # 单阶段训练（原有逻辑）
+        logger.info("使用单阶段训练...")
+        model.set_all_item_features(all_item_features)
+
+        stage_config = StageConfig(
+            stage_id=1,
+            epochs=config.epochs,
+            start_epoch=0,
+            kwargs={'lr': config.lr, 'weight_decay': config.weight_decay, 'all_item_features': all_item_features}
+        )
+
+        model.customer_train(
+            train_dataloader=train_loader,
+            val_dataloader=val_loader,
+            stage_configs=[stage_config],
+            skip_validation=True
+        )
+
+    # ==================== 评估 ====================
+    logger.info("\n" + "-"*50)
+    logger.info("===== 最终评估 =====")
+    logger.info("-"*50)
+
     model.eval()
     metrics = model._validate_one_epoch(test_loader, stage_id=1, stage_kwargs=eval_kwargs)
 

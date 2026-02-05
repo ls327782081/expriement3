@@ -245,6 +245,10 @@ class PMAT_SASRec(AbstractTrainableModel):
         self.rec_loss_weight = getattr(config, 'rec_loss_weight', 1.0)
         self.semantic_loss_weight = getattr(config, 'semantic_loss_weight', 0.1)
 
+        # ===== 预计算的物品表征（用于 Cross Entropy 损失） =====
+        self._all_item_repr = None  # (num_items, hidden_dim)
+        self._all_quantized_emb = None  # (num_items, hidden_dim)
+
         # 缓存因果掩码
         self._causal_mask_cache = {}
 
@@ -262,6 +266,107 @@ class PMAT_SASRec(AbstractTrainableModel):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
+
+    # ==================== 两阶段训练支持 ====================
+
+    def freeze_item_encoder(self):
+        """冻结物品编码器（阶段2使用）"""
+        for param in self.item_encoder.parameters():
+            param.requires_grad = False
+        for param in self.prediction_layer.parameters():
+            param.requires_grad = False
+        print("物品编码器已冻结")
+
+    def unfreeze_item_encoder(self):
+        """解冻物品编码器"""
+        for param in self.item_encoder.parameters():
+            param.requires_grad = True
+        for param in self.prediction_layer.parameters():
+            param.requires_grad = True
+        print("物品编码器已解冻")
+
+    def freeze_sequence_encoder(self):
+        """冻结序列编码器（阶段1使用）"""
+        for param in self.pos_emb.parameters():
+            param.requires_grad = False
+        for param in self.input_layer_norm.parameters():
+            param.requires_grad = False
+        for block in self.transformer_blocks:
+            for param in block.parameters():
+                param.requires_grad = False
+        for param in self.user_item_matcher.parameters():
+            param.requires_grad = False
+        print("序列编码器已冻结")
+
+    def unfreeze_sequence_encoder(self):
+        """解冻序列编码器"""
+        for param in self.pos_emb.parameters():
+            param.requires_grad = True
+        for param in self.input_layer_norm.parameters():
+            param.requires_grad = True
+        for block in self.transformer_blocks:
+            for param in block.parameters():
+                param.requires_grad = True
+        for param in self.user_item_matcher.parameters():
+            param.requires_grad = True
+        print("序列编码器已解冻")
+
+    def compute_pretrain_loss(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """计算预训练损失（阶段1：对比学习）
+
+        使用模态内和模态间对比学习来预训练物品编码器
+        """
+        # 获取目标物品的多模态特征
+        text_feat = batch['target_text_feat'].to(self.device)  # (batch, text_dim)
+        visual_feat = batch['target_vision_feat'].to(self.device)  # (batch, visual_dim)
+        batch_size = text_feat.size(0)
+
+        # 编码物品
+        item_emb, semantic_logits, quantized_emb = self.item_encoder(
+            text_feat, visual_feat, return_semantic_logits=True
+        )
+        item_repr = self.prediction_layer(item_emb)  # (batch, hidden_dim)
+
+        # 获取各模态的编码
+        text_encoded = self.item_encoder.multimodal_encoder.text_encoder(text_feat.float())
+        visual_encoded = self.item_encoder.multimodal_encoder.visual_encoder(visual_feat.float())
+
+        temperature = getattr(self.config, 'pretrain_temperature', 0.07)
+
+        # ===== 模态内对比损失 =====
+        # 同一batch内，同一物品的不同表征应该相似
+        # 使用 item_repr 和 quantized_emb 作为同一物品的两个视图
+        item_repr_norm = F.normalize(item_repr, dim=-1)
+        quantized_emb_norm = F.normalize(quantized_emb, dim=-1)
+
+        # 计算相似度矩阵
+        sim_matrix = torch.matmul(item_repr_norm, quantized_emb_norm.T) / temperature
+        labels = torch.arange(batch_size, device=self.device)
+
+        intra_loss = (F.cross_entropy(sim_matrix, labels) +
+                      F.cross_entropy(sim_matrix.T, labels)) / 2
+
+        # ===== 模态间对比损失 =====
+        # 同一物品的文本和视觉表征应该相似
+        text_norm = F.normalize(text_encoded, dim=-1)
+        visual_norm = F.normalize(visual_encoded, dim=-1)
+
+        sim_tv = torch.matmul(text_norm, visual_norm.T) / temperature
+
+        inter_loss = (F.cross_entropy(sim_tv, labels) +
+                      F.cross_entropy(sim_tv.T, labels)) / 2
+
+        # 加权组合
+        intra_weight = getattr(self.config, 'pretrain_intra_weight', 1.0)
+        inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.5)
+
+        total_loss = intra_weight * intra_loss + inter_weight * inter_loss
+
+        return {
+            'total_loss': total_loss,
+            'intra_loss': intra_loss,
+            'inter_loss': inter_loss
+        }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """获取因果掩码（带缓存）"""
@@ -391,14 +496,52 @@ class PMAT_SASRec(AbstractTrainableModel):
 
     def _validate_batch(self, batch: Dict[str, torch.Tensor]) -> None:
         """验证batch数据完整性"""
+        # Cross Entropy 损失不需要负样本
         required_keys = [
             'history_text_feat', 'history_vision_feat', 'history_len',
-            'target_text_feat', 'target_vision_feat', 'target_item',
-            'neg_text_feat', 'neg_vision_feat', 'negative_items'
+            'target_text_feat', 'target_vision_feat', 'target_item'
         ]
         missing_keys = [k for k in required_keys if k not in batch]
         if missing_keys:
             raise KeyError(f"Batch缺少必要的键: {missing_keys}")
+
+    def set_all_item_features(self, all_item_features: Dict[str, torch.Tensor]):
+        """设置所有物品特征，用于预计算物品表征（Cross Entropy 损失需要）
+
+        Args:
+            all_item_features: 包含 'text' 和 'visual' 的字典
+        """
+        all_text_feat = all_item_features['text'].to(self.device)
+        all_visual_feat = all_item_features['visual'].to(self.device)
+        num_items = all_text_feat.shape[0]
+
+        print(f"预计算 {num_items} 个物品的表征（用于 Cross Entropy 损失）...")
+
+        item_batch_size = 256
+        all_item_repr_list = []
+        all_quantized_emb_list = []
+
+        with torch.no_grad():
+            for start_idx in range(0, num_items, item_batch_size):
+                end_idx = min(start_idx + item_batch_size, num_items)
+                item_text = all_text_feat[start_idx:end_idx]
+                item_visual = all_visual_feat[start_idx:end_idx]
+
+                # 使用全局模态权重编码
+                item_emb, _, quantized_emb = self.item_encoder(
+                    item_text, item_visual,
+                    user_interest=None,
+                    return_semantic_logits=False
+                )
+                item_repr = self.prediction_layer(item_emb)
+                all_item_repr_list.append(item_repr)
+                all_quantized_emb_list.append(quantized_emb)
+
+        self._all_item_repr = torch.cat(all_item_repr_list, dim=0)  # (num_items, hidden_dim)
+        self._all_quantized_emb = torch.cat(all_quantized_emb_list, dim=0)  # (num_items, hidden_dim)
+        # 预先 L2 归一化，避免每次 forward 重复计算
+        self._all_item_repr = F.normalize(self._all_item_repr, dim=-1)
+        print(f"物品表征预计算完成，形状: {self._all_item_repr.shape}（已L2归一化）")
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """前向传播
@@ -410,22 +553,33 @@ class PMAT_SASRec(AbstractTrainableModel):
                 - history_len: (batch,)
                 - target_text_feat: (batch, text_dim)
                 - target_vision_feat: (batch, visual_dim)
-                - neg_text_feat: (batch, num_neg, text_dim)
-                - neg_vision_feat: (batch, num_neg, visual_dim)
+                - target_item: (batch,) 目标物品ID
 
         Returns:
-            outputs: 包含分数和中间结果的字典
+            outputs: 包含 logits 和中间结果的字典
         """
         self._validate_batch(batch)
 
-        # 1. 编码历史序列 → 用户表示 + 短期/长期历史
+        # 1. 编码历史序列 → 用户表示
         user_repr, seq_output, history_semantic_logits, short_history, long_history = self.encode_sequence(
             batch['history_text_feat'],
             batch['history_vision_feat'],
             batch['history_len']
         )  # user_repr: (batch, hidden_dim)
 
-        # 2. 编码正样本（目标物品）- 使用个性化模态权重和动态ID更新
+        # 2. 计算对所有物品的 logits（Cross Entropy 损失）
+        if self._all_item_repr is not None:
+            # 使用预计算的物品表征计算 logits
+            # 重要：使用 L2 归一化 + 温度缩放，避免数值不稳定
+            # 注意：_all_item_repr 已经在 set_all_item_features 中预先归一化了
+            temperature = getattr(self.config, 'logit_temperature', 0.1)
+            user_repr_norm = F.normalize(user_repr, dim=-1)
+            logits = torch.matmul(user_repr_norm, self._all_item_repr.T) / temperature  # (batch, num_items)
+        else:
+            # 如果没有预计算，使用 None（会在 compute_loss 中处理）
+            logits = None
+
+        # 3. 编码正样本（用于语义ID损失）
         pos_repr, pos_semantic_logits, pos_quantized_emb = self.encode_items(
             batch['target_text_feat'],
             batch['target_vision_feat'],
@@ -433,69 +587,38 @@ class PMAT_SASRec(AbstractTrainableModel):
             short_history=short_history,
             long_history=long_history,
             return_semantic_logits=True
-        )  # (batch, hidden_dim)
-
-        # 3. 编码负样本 - 使用个性化模态权重和动态ID更新
-        neg_repr, neg_semantic_logits, neg_quantized_emb = self.encode_items(
-            batch['neg_text_feat'],
-            batch['neg_vision_feat'],
-            user_interest=user_repr,
-            short_history=short_history,
-            long_history=long_history,
-            return_semantic_logits=True
-        )  # (batch, num_neg, hidden_dim)
-
-        # 4. 使用UserItemMatcher计算分数
-        # 正样本分数
-        pos_scores = self.user_item_matcher(
-            user_repr, pos_repr, pos_quantized_emb
-        )  # (batch,)
-
-        # 负样本分数
-        neg_scores = self.user_item_matcher(
-            user_repr, neg_repr, neg_quantized_emb
-        )  # (batch, num_neg)
+        )
 
         return {
             'user_repr': user_repr,
-            'pos_scores': pos_scores,
-            'neg_scores': neg_scores,
-            'pos_repr': pos_repr,
-            'neg_repr': neg_repr,
-            'pos_quantized_emb': pos_quantized_emb,
-            'neg_quantized_emb': neg_quantized_emb,
+            'logits': logits,  # (batch, num_items) 对所有物品的分数
+            'target_item': batch['target_item'],  # (batch,) 目标物品ID
             'pos_semantic_logits': pos_semantic_logits,
-            'neg_semantic_logits': neg_semantic_logits,
             'history_semantic_logits': history_semantic_logits,
-            'target_item': batch['target_item'],
-            'negative_items': batch['negative_items']
         }
 
     def compute_loss(self, outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """计算多任务损失
 
-        主损失: BPR推荐损失
+        主损失: Cross Entropy 推荐损失（对所有物品的 softmax）
         辅助损失: 语义ID生成损失
         """
         losses = {}
-        device = outputs['pos_scores'].device
 
-        # ===== 1. BPR推荐损失 =====
-        pos_scores = outputs['pos_scores']  # (batch,)
-        neg_scores = outputs['neg_scores']  # (batch, num_neg)
+        # ===== 1. Cross Entropy 推荐损失 =====
+        logits = outputs['logits']  # (batch, num_items)
+        target_items = outputs['target_item']  # (batch,)
 
-        if neg_scores.numel() == 0 or neg_scores.size(1) == 0:
-            bpr_loss = F.relu(1.0 - pos_scores).mean()
+        if logits is not None:
+            # Cross Entropy loss: softmax over all items
+            ce_loss = F.cross_entropy(logits, target_items)
+            losses['ce_loss'] = self.rec_loss_weight * ce_loss
         else:
-            pos_scores_expanded = pos_scores.unsqueeze(1)
-            # 裁剪分数差值，防止数值溢出
-            score_diff = torch.clamp(pos_scores_expanded - neg_scores, min=-50, max=50)
-            bpr_loss = -F.logsigmoid(score_diff).mean()
-
-        losses['bpr_loss'] = self.rec_loss_weight * bpr_loss
+            # 如果没有预计算物品表征，使用占位损失
+            losses['ce_loss'] = torch.tensor(0.0, device=target_items.device)
 
         # ===== 2. 语义ID损失（辅助任务）=====
-        target_items = outputs['target_item']
+        device = target_items.device
 
         try:
             target_semantic_ids = item_id_to_semantic_id(
@@ -521,7 +644,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         losses['semantic_loss'] = self.semantic_loss_weight * semantic_loss
 
         # ===== 3. 总损失 =====
-        losses['total_loss'] = losses['bpr_loss'] + losses['semantic_loss']
+        losses['total_loss'] = losses['ce_loss'] + losses['semantic_loss']
 
         return losses
 
@@ -561,22 +684,28 @@ class PMAT_SASRec(AbstractTrainableModel):
             optimizer.step()
 
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
-        """单batch训练"""
-        outputs = self.forward(batch)
-        losses = self.compute_loss(outputs)
+        """单batch训练
 
-        pos_scores = outputs['pos_scores']
-        neg_scores = outputs['neg_scores']
-        pos_expanded = pos_scores.unsqueeze(1)
-        auc_approx = (pos_expanded > neg_scores).float().mean().item()
-
-        metrics = {
-            'bpr_loss': losses['bpr_loss'].item(),
-            'semantic_loss': losses['semantic_loss'].item(),
-            'auc_approx': auc_approx
-        }
-
-        return losses['total_loss'], metrics
+        stage_id=0: 预训练阶段（对比学习，只训练物品编码器）
+        stage_id=1: 推荐阶段（Cross Entropy，只训练序列编码器）
+        """
+        if stage_id == 0:
+            # 阶段1：预训练物品编码器
+            losses = self.compute_pretrain_loss(batch)
+            metrics = {
+                'intra_loss': losses['intra_loss'].item(),
+                'inter_loss': losses['inter_loss'].item(),
+            }
+            return losses['total_loss'], metrics
+        else:
+            # 阶段2：训练序列模型
+            outputs = self.forward(batch)
+            losses = self.compute_loss(outputs)
+            metrics = {
+                'ce_loss': losses['ce_loss'].item(),
+                'semantic_loss': losses['semantic_loss'].item(),
+            }
+            return losses['total_loss'], metrics
 
     def _validate_one_epoch(
         self,
@@ -604,6 +733,36 @@ class PMAT_SASRec(AbstractTrainableModel):
 
         # 添加进度条
         from tqdm import tqdm
+
+        # ========== 使用预计算的物品表征（与 Cross Entropy 训练一致） ==========
+        # 如果已经预计算了物品表征，直接使用；否则重新计算
+        if self._all_item_repr is not None:
+            all_item_repr = self._all_item_repr
+            print(f"使用预计算的物品表征，形状: {all_item_repr.shape}")
+        else:
+            print(f"预计算 {num_items} 个物品的表征...")
+            item_batch_size = 256
+            all_item_repr_list = []
+
+            with torch.no_grad():
+                for start_idx in tqdm(range(0, num_items, item_batch_size), desc="编码物品", leave=False):
+                    end_idx = min(start_idx + item_batch_size, num_items)
+                    item_text = all_text_feat[start_idx:end_idx]
+                    item_visual = all_visual_feat[start_idx:end_idx]
+
+                    item_emb, _, _ = self.item_encoder(
+                        item_text, item_visual,
+                        user_interest=None,
+                        return_semantic_logits=False
+                    )
+                    item_repr = self.prediction_layer(item_emb)
+                    all_item_repr_list.append(item_repr.cpu())
+
+                all_item_repr = torch.cat(all_item_repr_list, dim=0).to(self.device)
+
+            print(f"物品表征预计算完成，形状: {all_item_repr.shape}")
+
+        # ========== 评估用户-物品匹配（使用点积，与 Cross Entropy 训练一致） ==========
         val_pbar = tqdm(val_dataloader, desc=f"Stage {stage_id} Validate", leave=False)
 
         with torch.no_grad():
@@ -616,77 +775,19 @@ class PMAT_SASRec(AbstractTrainableModel):
                 all_target_items.append(target_items.cpu())
 
                 # 1. 编码用户序列
-                user_repr, _, _, short_history, long_history = self.encode_sequence(
+                user_repr, _, _, _, _ = self.encode_sequence(
                     batch['history_text_feat'],
                     batch['history_vision_feat'],
                     batch['history_len']
                 )
 
-                # 2. 对所有物品计算分数（分批处理以节省内存）
-                # CPU模式下使用更小的batch size以避免内存溢出
-                if self.device.type == 'cpu':
-                    item_batch_size = 64  # CPU模式下每次处理64个物品
-                else:
-                    item_batch_size = 256  # GPU模式下每次处理256个物品
+                # 2. 使用点积计算分数（与 Cross Entropy 训练一致！）
+                all_scores = torch.matmul(user_repr, all_item_repr.T)  # (batch, num_items)
 
-                all_scores = []
-
-                for start_idx in range(0, num_items, item_batch_size):
-                    end_idx = min(start_idx + item_batch_size, num_items)
-                    item_text = all_text_feat[start_idx:end_idx]  # (item_batch, text_dim)
-                    item_visual = all_visual_feat[start_idx:end_idx]  # (item_batch, visual_dim)
-
-                    # 逐样本处理以进一步节省内存（CPU模式）
-                    if self.device.type == 'cpu' and batch_size > 1:
-                        batch_scores = []
-                        for i in range(batch_size):
-                            # 单样本处理
-                            item_text_single = item_text.unsqueeze(0)  # (1, item_batch, dim)
-                            item_visual_single = item_visual.unsqueeze(0)
-
-                            item_repr, _, quantized_emb = self.encode_items(
-                                item_text_single, item_visual_single,
-                                user_interest=user_repr[i:i+1],
-                                short_history=short_history[i:i+1] if short_history is not None else None,
-                                long_history=long_history[i:i+1] if long_history is not None else None
-                            )
-
-                            scores = self.user_item_matcher(user_repr[i:i+1], item_repr, quantized_emb)
-                            batch_scores.append(scores)
-
-                        scores = torch.cat(batch_scores, dim=0)  # (batch, item_batch)
-                    else:
-                        # GPU模式或单样本：批量处理
-                        item_text_expanded = item_text.unsqueeze(0).expand(batch_size, -1, -1)
-                        item_visual_expanded = item_visual.unsqueeze(0).expand(batch_size, -1, -1)
-
-                        item_repr, _, quantized_emb = self.encode_items(
-                            item_text_expanded, item_visual_expanded,
-                            user_interest=user_repr,
-                            short_history=short_history,
-                            long_history=long_history
-                        )
-
-                        scores = self.user_item_matcher(user_repr, item_repr, quantized_emb)
-
-                    all_scores.append(scores.cpu())  # 立即移到CPU释放GPU内存
-
-                    # 清理中间变量
-                    del scores
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
-
-                # 合并所有物品的分数
-                all_scores = torch.cat(all_scores, dim=1)  # (batch, num_items)
-
-                # 3. 计算目标物品的排名（在CPU上计算以节省内存）
-                # 获取目标物品的分数
-                target_items_cpu = target_items.cpu()
-                target_scores = all_scores[torch.arange(batch_size), target_items_cpu]
-
-                # 计算排名：有多少物品的分数 >= 目标物品的分数
+                # 3. 计算目标物品的排名
+                target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
                 ranks = (all_scores >= target_scores.unsqueeze(1)).sum(dim=1)  # (batch,)
-                all_ranks.append(ranks)
+                all_ranks.append(ranks.cpu())
 
         # 合并所有batch的结果
         all_target_items = torch.cat(all_target_items, dim=0)

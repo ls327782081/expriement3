@@ -188,6 +188,9 @@ class MCRL_SASRec(AbstractTrainableModel):
         self.rec_loss_weight = getattr(config, 'rec_loss_weight', 1.0)
         self.cl_loss_weight = getattr(config, 'mcrl_loss_weight', 0.3)  # 降低对比学习权重
 
+        # ===== 预计算的物品表征（用于 Cross Entropy 损失） =====
+        self._all_item_repr = None  # (num_items, hidden_dim)
+
         # 缓存因果掩码
         self._causal_mask_cache = {}
 
@@ -215,6 +218,110 @@ class MCRL_SASRec(AbstractTrainableModel):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
+
+    # ==================== 两阶段训练支持 ====================
+
+    def freeze_item_encoder(self):
+        """冻结物品编码器（阶段2使用）"""
+        for param in self.item_encoder.parameters():
+            param.requires_grad = False
+        for param in self.prediction_layer.parameters():
+            param.requires_grad = False
+        print("物品编码器已冻结")
+
+    def unfreeze_item_encoder(self):
+        """解冻物品编码器"""
+        for param in self.item_encoder.parameters():
+            param.requires_grad = True
+        for param in self.prediction_layer.parameters():
+            param.requires_grad = True
+        print("物品编码器已解冻")
+
+    def freeze_sequence_encoder(self):
+        """冻结序列编码器（阶段1使用）"""
+        for param in self.pos_emb.parameters():
+            param.requires_grad = False
+        for param in self.input_layer_norm.parameters():
+            param.requires_grad = False
+        for block in self.transformer_blocks:
+            for param in block.parameters():
+                param.requires_grad = False
+        for param in self.matcher.parameters():
+            param.requires_grad = False
+        print("序列编码器已冻结")
+
+    def unfreeze_sequence_encoder(self):
+        """解冻序列编码器"""
+        for param in self.pos_emb.parameters():
+            param.requires_grad = True
+        for param in self.input_layer_norm.parameters():
+            param.requires_grad = True
+        for block in self.transformer_blocks:
+            for param in block.parameters():
+                param.requires_grad = True
+        for param in self.matcher.parameters():
+            param.requires_grad = True
+        print("序列编码器已解冻")
+
+    def compute_pretrain_loss(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """计算预训练损失（阶段1：对比学习）
+
+        使用模态内和模态间对比学习来预训练物品编码器
+        """
+        # 获取目标物品的多模态特征
+        text_feat = batch['target_text_feat'].to(self.device)  # (batch, text_dim)
+        visual_feat = batch['target_vision_feat'].to(self.device)  # (batch, visual_dim)
+        batch_size = text_feat.size(0)
+
+        # 编码物品
+        item_repr = self.item_encoder(text_feat, visual_feat)  # (batch, hidden_dim)
+
+        # 获取各模态的编码
+        text_encoded = self.item_encoder.text_encoder(text_feat.float())
+        visual_encoded = self.item_encoder.visual_encoder(visual_feat.float())
+
+        temperature = getattr(self.config, 'pretrain_temperature', 0.07)
+
+        # ===== 模态内对比损失 =====
+        # 使用 item_repr 作为锚点，与同batch内其他物品对比
+        item_repr_norm = F.normalize(item_repr, dim=-1)
+
+        # 自对比：同一batch内的物品互为负样本
+        sim_matrix = torch.matmul(item_repr_norm, item_repr_norm.T) / temperature
+        # 对角线是自己与自己的相似度，需要mask掉
+        mask = torch.eye(batch_size, device=self.device).bool()
+        sim_matrix = sim_matrix.masked_fill(mask, float('-inf'))
+
+        # 使用 InfoNCE 损失的变体：每个样本与其他所有样本对比
+        # 这里我们使用文本和视觉的融合表征作为正样本
+        text_norm = F.normalize(text_encoded, dim=-1)
+        visual_norm = F.normalize(visual_encoded, dim=-1)
+
+        # 模态间对比：同一物品的文本和视觉应该相似
+        sim_tv = torch.matmul(text_norm, visual_norm.T) / temperature
+        labels = torch.arange(batch_size, device=self.device)
+
+        inter_loss = (F.cross_entropy(sim_tv, labels) +
+                      F.cross_entropy(sim_tv.T, labels)) / 2
+
+        # 模态内对比：融合表征与各模态表征应该相似
+        sim_item_text = torch.matmul(item_repr_norm, text_norm.T) / temperature
+        sim_item_visual = torch.matmul(item_repr_norm, visual_norm.T) / temperature
+
+        intra_loss = (F.cross_entropy(sim_item_text, labels) +
+                      F.cross_entropy(sim_item_visual, labels)) / 2
+
+        # 加权组合
+        intra_weight = getattr(self.config, 'pretrain_intra_weight', 1.0)
+        inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.5)
+
+        total_loss = intra_weight * intra_loss + inter_weight * inter_loss
+
+        return {
+            'total_loss': total_loss,
+            'intra_loss': intra_loss,
+            'inter_loss': inter_loss
+        }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """获取因果掩码（带缓存）"""
@@ -333,23 +440,59 @@ class MCRL_SASRec(AbstractTrainableModel):
 
     def _validate_batch(self, batch: Dict[str, torch.Tensor]) -> None:
         """验证batch数据完整性"""
+        # Cross Entropy 损失不需要负样本
         required_keys = [
             'history_text_feat', 'history_vision_feat', 'history_len',
-            'target_text_feat', 'target_vision_feat',
-            'neg_text_feat', 'neg_vision_feat'
+            'target_text_feat', 'target_vision_feat', 'target_item'
         ]
         missing_keys = [k for k in required_keys if k not in batch]
         if missing_keys:
             raise KeyError(f"Batch缺少必要的键: {missing_keys}")
+
+    def set_all_item_features(self, all_item_features: Dict[str, torch.Tensor]):
+        """设置所有物品特征，用于预计算物品表征（Cross Entropy 损失需要）
+
+        Args:
+            all_item_features: 包含 'text' 和 'visual' 的字典
+        """
+        all_text_feat = all_item_features['text'].to(self.device)
+        all_visual_feat = all_item_features['visual'].to(self.device)
+        num_items = all_text_feat.shape[0]
+
+        print(f"预计算 {num_items} 个物品的表征（用于 Cross Entropy 损失）...")
+
+        item_batch_size = 256
+        all_item_repr_list = []
+
+        with torch.no_grad():
+            for start_idx in range(0, num_items, item_batch_size):
+                end_idx = min(start_idx + item_batch_size, num_items)
+                item_text = all_text_feat[start_idx:end_idx]
+                item_visual = all_visual_feat[start_idx:end_idx]
+
+                # 编码物品
+                item_repr = self.encode_items(item_text, item_visual)
+                all_item_repr_list.append(item_repr)
+
+        self._all_item_repr = torch.cat(all_item_repr_list, dim=0)  # (num_items, hidden_dim)
+        # 预先 L2 归一化，避免每次 forward 重复计算
+        self._all_item_repr = F.normalize(self._all_item_repr, dim=-1)
+        print(f"物品表征预计算完成，形状: {self._all_item_repr.shape}（已L2归一化）")
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """前向传播
 
         Args:
             batch: 包含历史序列和候选物品的字典
+                - history_text_feat: (batch, seq_len, text_dim)
+                - history_vision_feat: (batch, seq_len, visual_dim)
+                - history_len: (batch,)
+                - target_text_feat: (batch, text_dim)
+                - target_vision_feat: (batch, visual_dim)
+                - target_item: (batch,) 目标物品ID
 
         Returns:
-            outputs: 包含分数和对比学习损失的字典
+            outputs: 包含 logits 和对比学习损失的字典
         """
         self._validate_batch(batch)
 
@@ -360,23 +503,23 @@ class MCRL_SASRec(AbstractTrainableModel):
             batch['history_len']
         )
 
-        # 2. 编码正样本
+        # 2. 计算对所有物品的 logits（Cross Entropy 损失）
+        if self._all_item_repr is not None:
+            # 使用 L2 归一化 + 温度缩放，避免数值不稳定
+            # 注意：_all_item_repr 已经在 set_all_item_features 中预先归一化了
+            temperature = getattr(self.config, 'logit_temperature', 0.1)
+            user_repr_norm = F.normalize(user_repr, dim=-1)
+            logits = torch.matmul(user_repr_norm, self._all_item_repr.T) / temperature  # (batch, num_items)
+        else:
+            logits = None
+
+        # 3. 编码正样本（用于对比学习）
         pos_repr = self.encode_items(
             batch['target_text_feat'],
             batch['target_vision_feat']
         )
 
-        # 3. 编码负样本
-        neg_repr = self.encode_items(
-            batch['neg_text_feat'],
-            batch['neg_vision_feat']
-        )
-
-        # 4. 计算匹配分数
-        pos_scores = self.compute_match_score(user_repr, pos_repr)
-        neg_scores = self.compute_match_score(user_repr, neg_repr)
-
-        # 5. 编码历史物品表征（用于对比学习）
+        # 4. 编码历史物品表征（用于对比学习）
         batch_size, seq_len, _ = batch['history_text_feat'].shape
         history_text_flat = batch['history_text_feat'].view(batch_size * seq_len, -1)
         history_vision_flat = batch['history_vision_feat'].view(batch_size * seq_len, -1)
@@ -386,7 +529,7 @@ class MCRL_SASRec(AbstractTrainableModel):
         # 创建历史序列mask
         history_mask = torch.arange(seq_len, device=batch['history_len'].device).unsqueeze(0) < batch['history_len'].unsqueeze(1)
 
-        # 6. 准备模态特征（用于对比学习）
+        # 5. 准备模态特征（用于对比学习）
         modal_features = {
             'visual': batch['target_vision_feat'],
             'text': batch['target_text_feat']
@@ -396,17 +539,7 @@ class MCRL_SASRec(AbstractTrainableModel):
         modal_weights = F.softmax(self.item_encoder.modal_weight, dim=0)
         modal_weights = modal_weights.unsqueeze(0).expand(batch_size, -1)
 
-        # 7. 计算对比学习损失
-        # Layer 1: 用户偏好对比
-        L_user = self.user_preference_cl(
-            id_embeddings=pos_repr,
-            user_embeddings=user_repr,
-            positive_ids=pos_repr.unsqueeze(1),
-            negative_ids=neg_repr,
-            history_item_repr=history_item_repr,
-            history_mask=history_mask
-        )
-
+        # 6. 计算对比学习损失
         # Layer 2: 模态内对比
         L_intra = self.intra_modal_cl(
             id_embeddings=pos_repr,
@@ -419,12 +552,10 @@ class MCRL_SASRec(AbstractTrainableModel):
 
         return {
             'user_repr': user_repr,
+            'logits': logits,  # (batch, num_items) 对所有物品的分数
+            'target_item': batch['target_item'],  # (batch,) 目标物品ID
             'pos_repr': pos_repr,
-            'neg_repr': neg_repr,
-            'pos_scores': pos_scores,
-            'neg_scores': neg_scores,
             'contrastive_losses': {
-                'user_preference_loss': L_user,
                 'intra_modal_loss': L_intra,
                 'inter_modal_loss': L_inter
             }
@@ -434,35 +565,31 @@ class MCRL_SASRec(AbstractTrainableModel):
     def compute_loss(self, outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """计算多任务损失
 
-        主损失: BPR推荐损失
-        辅助损失: 三层对比学习损失
+        主损失: Cross Entropy 推荐损失（对所有物品的 softmax）
+        辅助损失: 对比学习损失
         """
-        pos_scores = outputs['pos_scores']
-        neg_scores = outputs['neg_scores']
+        # ===== 1. Cross Entropy 推荐损失 =====
+        logits = outputs['logits']  # (batch, num_items)
+        target_items = outputs['target_item']  # (batch,)
 
-        # 1. BPR推荐损失
-        if neg_scores.numel() == 0 or neg_scores.size(1) == 0:
-            bpr_loss = F.relu(1.0 - pos_scores).mean()
+        if logits is not None:
+            ce_loss = F.cross_entropy(logits, target_items)
         else:
-            pos_scores_expanded = pos_scores.unsqueeze(1)
-            score_diff = torch.clamp(pos_scores_expanded - neg_scores, min=-50, max=50)
-            bpr_loss = -F.logsigmoid(score_diff).mean()
+            ce_loss = torch.tensor(0.0, device=target_items.device)
 
-        # 2. 对比学习损失
+        # ===== 2. 对比学习损失 =====
         cl_losses = outputs['contrastive_losses']
         contrastive_loss = (
-            cl_losses['user_preference_loss'] +
             self.alpha * cl_losses['intra_modal_loss'] +
             self.beta * cl_losses['inter_modal_loss']
         )
 
-        # 3. 总损失
-        total_loss = self.rec_loss_weight * bpr_loss + self.cl_loss_weight * contrastive_loss
+        # ===== 3. 总损失 =====
+        total_loss = self.rec_loss_weight * ce_loss + self.cl_loss_weight * contrastive_loss
 
         return {
-            'bpr_loss': bpr_loss,
+            'ce_loss': ce_loss,
             'contrastive_loss': contrastive_loss,
-            'user_pref_loss': cl_losses['user_preference_loss'],
             'intra_modal_loss': cl_losses['intra_modal_loss'],
             'inter_modal_loss': cl_losses['inter_modal_loss'],
             'total_loss': total_loss
@@ -504,25 +631,30 @@ class MCRL_SASRec(AbstractTrainableModel):
             optimizer.step()
 
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
-        """单batch训练"""
-        outputs = self.forward(batch)
-        losses = self.compute_loss(outputs)
+        """单batch训练
 
-        pos_scores = outputs['pos_scores']
-        neg_scores = outputs['neg_scores']
-        pos_expanded = pos_scores.unsqueeze(1)
-        auc_approx = (pos_expanded > neg_scores).float().mean().item()
-
-        metrics = {
-            'bpr_loss': losses['bpr_loss'].item(),
-            'contrastive_loss': losses['contrastive_loss'].item(),
-            'user_pref_loss': losses['user_pref_loss'].item(),
-            'intra_modal_loss': losses['intra_modal_loss'].item(),
-            'inter_modal_loss': losses['inter_modal_loss'].item(),
-            'auc_approx': auc_approx
-        }
-
-        return losses['total_loss'], metrics
+        stage_id=0: 预训练阶段（对比学习，只训练物品编码器）
+        stage_id=1: 推荐阶段（Cross Entropy，只训练序列编码器）
+        """
+        if stage_id == 0:
+            # 阶段1：预训练物品编码器
+            losses = self.compute_pretrain_loss(batch)
+            metrics = {
+                'intra_loss': losses['intra_loss'].item(),
+                'inter_loss': losses['inter_loss'].item(),
+            }
+            return losses['total_loss'], metrics
+        else:
+            # 阶段2：训练序列模型
+            outputs = self.forward(batch)
+            losses = self.compute_loss(outputs)
+            metrics = {
+                'ce_loss': losses['ce_loss'].item(),
+                'contrastive_loss': losses['contrastive_loss'].item(),
+                'intra_modal_loss': losses['intra_modal_loss'].item(),
+                'inter_modal_loss': losses['inter_modal_loss'].item(),
+            }
+            return losses['total_loss'], metrics
 
     def _validate_one_epoch(
         self,
@@ -550,6 +682,30 @@ class MCRL_SASRec(AbstractTrainableModel):
 
         # 添加进度条
         from tqdm import tqdm
+
+        # ========== 使用预计算的物品表征（与 Cross Entropy 训练一致） ==========
+        if self._all_item_repr is not None:
+            all_item_repr = self._all_item_repr
+            print(f"使用预计算的物品表征，形状: {all_item_repr.shape}")
+        else:
+            print(f"预计算 {num_items} 个物品的表征...")
+            item_batch_size = 256
+            all_item_repr_list = []
+
+            with torch.no_grad():
+                for start_idx in tqdm(range(0, num_items, item_batch_size), desc="编码物品", leave=False):
+                    end_idx = min(start_idx + item_batch_size, num_items)
+                    item_text = all_text_feat[start_idx:end_idx]
+                    item_visual = all_visual_feat[start_idx:end_idx]
+
+                    item_repr = self.encode_items(item_text, item_visual)
+                    all_item_repr_list.append(item_repr.cpu())
+
+                all_item_repr = torch.cat(all_item_repr_list, dim=0).to(self.device)
+
+            print(f"物品表征预计算完成，形状: {all_item_repr.shape}")
+
+        # ========== 评估用户-物品匹配 ==========
         val_pbar = tqdm(val_dataloader, desc=f"Stage {stage_id} Validate", leave=False)
 
         with torch.no_grad():
@@ -568,59 +724,17 @@ class MCRL_SASRec(AbstractTrainableModel):
                     batch['history_len']
                 )
 
-                # 2. 对所有物品计算分数（分批处理以节省内存）
-                # CPU模式下使用更小的batch size以避免内存溢出
-                if self.device.type == 'cpu':
-                    item_batch_size = 64  # CPU模式下每次处理64个物品
-                else:
-                    item_batch_size = 256  # GPU模式下每次处理256个物品
+                # 2. 使用预计算的物品表征计算分数（高效评估）
+                # 直接用点积计算相似度，避免重复编码物品
+                all_scores = torch.matmul(user_repr, all_item_repr.T)  # (batch, num_items)
 
-                all_scores = []
-
-                for start_idx in range(0, num_items, item_batch_size):
-                    end_idx = min(start_idx + item_batch_size, num_items)
-                    item_text = all_text_feat[start_idx:end_idx]  # (item_batch, text_dim)
-                    item_visual = all_visual_feat[start_idx:end_idx]  # (item_batch, visual_dim)
-
-                    # 逐样本处理以进一步节省内存（CPU模式）
-                    if self.device.type == 'cpu' and batch_size > 1:
-                        batch_scores = []
-                        for i in range(batch_size):
-                            # 单样本处理
-                            item_text_single = item_text.unsqueeze(0)  # (1, item_batch, dim)
-                            item_visual_single = item_visual.unsqueeze(0)
-
-                            item_repr = self.encode_items(item_text_single, item_visual_single)
-                            scores = self.compute_match_score(user_repr[i:i+1], item_repr)
-                            batch_scores.append(scores)
-
-                        scores = torch.cat(batch_scores, dim=0)  # (batch, item_batch)
-                    else:
-                        # GPU模式或单样本：批量处理
-                        item_text_expanded = item_text.unsqueeze(0).expand(batch_size, -1, -1)
-                        item_visual_expanded = item_visual.unsqueeze(0).expand(batch_size, -1, -1)
-
-                        item_repr = self.encode_items(item_text_expanded, item_visual_expanded)
-                        scores = self.compute_match_score(user_repr, item_repr)
-
-                    all_scores.append(scores.cpu())  # 立即移到CPU释放GPU内存
-
-                    # 清理中间变量
-                    del scores
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
-
-                # 合并所有物品的分数
-                all_scores = torch.cat(all_scores, dim=1)  # (batch, num_items)
-
-                # 3. 计算目标物品的排名（在CPU上计算以节省内存）
+                # 3. 计算目标物品的排名
                 # 获取目标物品的分数
-                target_items_cpu = target_items.cpu()
-                target_scores = all_scores[torch.arange(batch_size), target_items_cpu]
+                target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
 
                 # 计算排名：有多少物品的分数 >= 目标物品的分数
                 ranks = (all_scores >= target_scores.unsqueeze(1)).sum(dim=1)  # (batch,)
-                all_ranks.append(ranks)
+                all_ranks.append(ranks.cpu())
 
         # 合并所有batch的结果
         all_target_items = torch.cat(all_target_items, dim=0)
