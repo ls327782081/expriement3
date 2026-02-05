@@ -231,12 +231,21 @@ class PMAT_SASRec(AbstractTrainableModel):
         self.input_layer_norm = nn.LayerNorm(config.hidden_dim)
         self.dropout = nn.Dropout(dropout_rate)
 
-        # ===== 预测层 =====
-        self.prediction_layer = nn.Sequential(
+        # ===== 投影层（分离用户和物品，支持两阶段训练） =====
+        # 用户投影层：用于序列编码器输出
+        self.user_projection = nn.Sequential(
             nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.LayerNorm(config.hidden_dim),
             nn.GELU()
         )
+        # 物品投影层：用于物品编码器输出
+        self.item_projection = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.GELU()
+        )
+        # 保留 prediction_layer 作为别名（向后兼容，指向物品投影层）
+        self.prediction_layer = self.item_projection
 
         # ===== 用户-物品匹配层 (来自PMAT) =====
         self.user_item_matcher = UserItemMatcher(config)
@@ -261,7 +270,12 @@ class PMAT_SASRec(AbstractTrainableModel):
         nn.init.constant_(self.input_layer_norm.weight, 1.0)
         nn.init.constant_(self.input_layer_norm.bias, 0.0)
 
-        for module in self.prediction_layer.modules():
+        for module in self.user_projection.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
+        for module in self.item_projection.modules():
             if isinstance(module, nn.Linear):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
                 if module.bias is not None:
@@ -273,17 +287,17 @@ class PMAT_SASRec(AbstractTrainableModel):
         """冻结物品编码器（阶段2使用）"""
         for param in self.item_encoder.parameters():
             param.requires_grad = False
-        for param in self.prediction_layer.parameters():
+        for param in self.item_projection.parameters():
             param.requires_grad = False
-        print("物品编码器已冻结")
+        print("物品编码器已冻结（包括item_projection）")
 
     def unfreeze_item_encoder(self):
         """解冻物品编码器"""
         for param in self.item_encoder.parameters():
             param.requires_grad = True
-        for param in self.prediction_layer.parameters():
+        for param in self.item_projection.parameters():
             param.requires_grad = True
-        print("物品编码器已解冻")
+        print("物品编码器已解冻（包括item_projection）")
 
     def freeze_sequence_encoder(self):
         """冻结序列编码器（阶段1使用）"""
@@ -449,8 +463,8 @@ class PMAT_SASRec(AbstractTrainableModel):
         seq_lens_idx = (seq_lens - 1).clamp(min=0, max=seq_len - 1).long()
         user_repr = seq_emb[torch.arange(batch_size, device=device), seq_lens_idx]
 
-        # 7. 预测层投影
-        user_repr = self.prediction_layer(user_repr)
+        # 7. 用户投影层（注意：使用 user_projection 而不是 prediction_layer）
+        user_repr = self.user_projection(user_repr)
 
         # 8. 准备短期和长期历史（用于动态ID更新）
         short_len = min(getattr(self.config, 'short_history_len', 10), seq_len)
