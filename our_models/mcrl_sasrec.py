@@ -702,8 +702,10 @@ class MCRL_SASRec(AbstractTrainableModel):
                     all_item_repr_list.append(item_repr.cpu())
 
                 all_item_repr = torch.cat(all_item_repr_list, dim=0).to(self.device)
+                # 重要：需要归一化以与训练一致
+                all_item_repr = F.normalize(all_item_repr, dim=-1)
 
-            print(f"物品表征预计算完成，形状: {all_item_repr.shape}")
+            print(f"物品表征预计算完成，形状: {all_item_repr.shape}（已L2归一化）")
 
         # ========== 评估用户-物品匹配 ==========
         val_pbar = tqdm(val_dataloader, desc=f"Stage {stage_id} Validate", leave=False)
@@ -725,8 +727,11 @@ class MCRL_SASRec(AbstractTrainableModel):
                 )
 
                 # 2. 使用预计算的物品表征计算分数（高效评估）
-                # 直接用点积计算相似度，避免重复编码物品
-                all_scores = torch.matmul(user_repr, all_item_repr.T)  # (batch, num_items)
+                # 重要：必须使用与训练时相同的归一化和温度缩放
+                temperature = getattr(self.config, 'logit_temperature', 0.1)
+                user_repr_norm = F.normalize(user_repr, dim=-1)
+                # 注意：all_item_repr 已经归一化了
+                all_scores = torch.matmul(user_repr_norm, all_item_repr.T) / temperature  # (batch, num_items)
 
                 # 3. 计算目标物品的排名
                 # 获取目标物品的分数

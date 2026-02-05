@@ -759,8 +759,10 @@ class PMAT_SASRec(AbstractTrainableModel):
                     all_item_repr_list.append(item_repr.cpu())
 
                 all_item_repr = torch.cat(all_item_repr_list, dim=0).to(self.device)
+                # 重要：需要归一化以与训练一致
+                all_item_repr = F.normalize(all_item_repr, dim=-1)
 
-            print(f"物品表征预计算完成，形状: {all_item_repr.shape}")
+            print(f"物品表征预计算完成，形状: {all_item_repr.shape}（已L2归一化）")
 
         # ========== 评估用户-物品匹配（使用点积，与 Cross Entropy 训练一致） ==========
         val_pbar = tqdm(val_dataloader, desc=f"Stage {stage_id} Validate", leave=False)
@@ -782,7 +784,11 @@ class PMAT_SASRec(AbstractTrainableModel):
                 )
 
                 # 2. 使用点积计算分数（与 Cross Entropy 训练一致！）
-                all_scores = torch.matmul(user_repr, all_item_repr.T)  # (batch, num_items)
+                # 重要：必须使用与训练时相同的归一化和温度缩放
+                temperature = getattr(self.config, 'logit_temperature', 0.1)
+                user_repr_norm = F.normalize(user_repr, dim=-1)
+                # 注意：all_item_repr 已经在 set_all_item_features 中预先归一化了
+                all_scores = torch.matmul(user_repr_norm, all_item_repr.T) / temperature  # (batch, num_items)
 
                 # 3. 计算目标物品的排名
                 target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
