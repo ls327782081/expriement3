@@ -292,11 +292,22 @@ class PureSASRec(AbstractTrainableModel):
         }
     
     # ==================== AbstractTrainableModel 实现 ====================
-    
+
     def _get_optimizer(self, stage_id: int, stage_kwargs: Dict) -> torch.optim.Optimizer:
         lr = stage_kwargs.get('lr', 0.001)
         weight_decay = stage_kwargs.get('weight_decay', 0.01)
-        return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
+
+        # 重要：只训练序列编码器，冻结 item_encoder
+        # 因为物品表征是预计算的，如果 item_encoder 参数更新，
+        # 预计算的表征就会与当前模型不一致
+        seq_params = []
+        for name, param in self.named_parameters():
+            if name.startswith('item_encoder'):
+                param.requires_grad = False  # 冻结 item_encoder
+            else:
+                seq_params.append(param)
+
+        return torch.optim.AdamW(seq_params, lr=lr, weight_decay=weight_decay)
 
     def _get_optimizer_state_dict(self) -> Dict:
         """获取优化器状态"""
