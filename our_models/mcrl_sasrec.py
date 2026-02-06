@@ -395,15 +395,19 @@ class MCRL_SASRec(AbstractTrainableModel):
         device = text_feat.device
 
         # 1. 创建掩码
-        positions = torch.arange(seq_len, device=device).unsqueeze(0)
-        padding_mask = positions >= seq_lens.unsqueeze(1)  # (batch, seq_len)
+        # 注意：数据是左 padding！格式为 [PAD, PAD, ..., item1, item2, item3]
+        # padding 在前面，有效内容在后面
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, seq_len)
+        pad_start = seq_len - seq_lens.unsqueeze(1)  # (batch, 1)
+        padding_mask = positions < pad_start  # (batch, seq_len), True 表示 padding
 
         # 2. 物品编码
         item_emb = self.item_encoder(text_feat, vision_feat)  # (batch, seq_len, hidden_dim)
 
         # 3. 添加位置嵌入
-        pos_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-        pos_indices = pos_indices.clamp(max=self.max_seq_len - 1)
+        # 对于左 padding，给有效位置分配正确的相对位置编码
+        pos_indices = positions - pad_start  # 相对位置
+        pos_indices = pos_indices.clamp(min=0, max=self.max_seq_len - 1)
         seq_emb = item_emb + self.pos_emb(pos_indices)
 
         # 4. 处理padding位置
@@ -425,11 +429,11 @@ class MCRL_SASRec(AbstractTrainableModel):
         # 处理NaN
         seq_emb = torch.nan_to_num(seq_emb, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # 8. 获取用户表示（最后一个有效位置）
-        seq_lens_idx = (seq_lens - 1).clamp(min=0, max=seq_len - 1).long()
-        user_repr = seq_emb[torch.arange(batch_size, device=device), seq_lens_idx]
+        # 8. 获取用户表示（最后一个位置，即序列末尾）
+        # 对于左 padding，最后一个有效位置就是 seq_len - 1
+        user_repr = seq_emb[:, -1, :]  # (batch, hidden_dim)
 
-        # 9. 用户投影层（注意：使用 user_projection 而不是 prediction_layer）
+        # 9. 用户投影层
         user_repr = self.user_projection(user_repr)
 
         return user_repr, seq_emb

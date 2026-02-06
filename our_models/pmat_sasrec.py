@@ -417,11 +417,13 @@ class PMAT_SASRec(AbstractTrainableModel):
         device = text_feat.device
 
         # 0. 创建掩码（提前创建，用于后续处理）
-        # Padding mask: 后面的位置是 padding (True 表示被 mask 的位置)
-        # 注意：数据是左对齐的，即有效内容在序列开头，padding 在末尾
-        # 例如 seq_len=4, seq_lens=1 时，位置 0 是有效的，位置 1-3 是 padding
+        # 注意：数据是左 padding！格式为 [PAD, PAD, ..., item1, item2, item3]
+        # padding 在前面，有效内容在后面
+        # 例如 seq_len=5, seq_lens=3 时，位置 0,1 是 padding，位置 2,3,4 是有效的
         positions = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, seq_len)
-        padding_mask = positions >= seq_lens.unsqueeze(1)  # (batch, seq_len)
+        # padding 位置：位置 < (seq_len - history_len)
+        pad_start = seq_len - seq_lens.unsqueeze(1)  # (batch, 1)
+        padding_mask = positions < pad_start  # (batch, seq_len), True 表示 padding
 
         # 1. PMAT物品编码（不使用个性化权重，因为还没有用户表示）
         item_emb, semantic_logits, _ = self.item_encoder(
@@ -429,15 +431,14 @@ class PMAT_SASRec(AbstractTrainableModel):
         )  # (batch, seq_len, hidden_dim)
 
         # 2. 添加位置嵌入
-        pos_indices = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-        pos_indices = pos_indices.clamp(max=self.max_seq_len - 1)
+        # 对于左 padding，我们需要给有效位置分配正确的位置编码
+        # 有效位置从 0 开始编号（相对位置）
+        pos_indices = positions - pad_start  # 相对位置
+        pos_indices = pos_indices.clamp(min=0, max=self.max_seq_len - 1)
         seq_emb = item_emb + self.pos_emb(pos_indices)
 
         # 3. 处理 padding 位置：将 padding 位置的嵌入设为小的随机值
-        # 这样可以避免 LayerNorm 在处理全零输入时产生 NaN
-        # 使用 detach() 确保梯度不会流向这些随机值
         padding_mask_expanded = padding_mask.unsqueeze(-1).expand_as(seq_emb)
-        # 生成小的随机噪声（不需要梯度）
         noise = torch.randn_like(seq_emb) * 0.01
         seq_emb = torch.where(padding_mask_expanded, noise.detach(), seq_emb)
 
@@ -449,24 +450,21 @@ class PMAT_SASRec(AbstractTrainableModel):
         causal_mask = self._get_causal_mask(seq_len, device)
 
         # 5. Transformer编码
-        # 使用分离的 padding_mask 和 causal_mask
-        # 由于是左对齐，有效位置在前面，causal mask 不会导致有效位置的所有 key 被 mask
         for block in self.transformer_blocks:
             seq_emb = block(seq_emb, padding_mask=padding_mask, causal_mask=causal_mask)
 
         # 处理可能的 NaN（保护措施）
         seq_emb = torch.nan_to_num(seq_emb, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # 6. 获取用户表示（最后一个有效位置）
-        # 注意：序列是左对齐的，有效内容在开头
-        # 最后一个有效位置的索引是 seq_lens - 1
-        seq_lens_idx = (seq_lens - 1).clamp(min=0, max=seq_len - 1).long()
-        user_repr = seq_emb[torch.arange(batch_size, device=device), seq_lens_idx]
+        # 6. 获取用户表示（最后一个位置，即序列末尾）
+        # 对于左 padding，最后一个有效位置就是 seq_len - 1
+        user_repr = seq_emb[:, -1, :]  # (batch, hidden_dim)
 
-        # 7. 用户投影层（注意：使用 user_projection 而不是 prediction_layer）
+        # 7. 用户投影层
         user_repr = self.user_projection(user_repr)
 
         # 8. 准备短期和长期历史（用于动态ID更新）
+        # 对于左 padding，最后 short_len 个位置是最近的历史
         short_len = min(getattr(self.config, 'short_history_len', 10), seq_len)
         short_history = seq_emb[:, -short_len:, :]  # (batch, short_len, hidden)
         long_history = seq_emb  # (batch, seq_len, hidden)

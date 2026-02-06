@@ -25,6 +25,7 @@ from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
 from our_models.pmat_sasrec import PMAT_SASRec
 from our_models.mcrl_sasrec import MCRL_SASRec
+from our_models.pure_sasrec import PureSASRec
 from metrics import calculate_metrics
 from util import item_id_to_semantic_id, save_checkpoint, load_checkpoint, save_results
 from base_model import AbstractTrainableModel, StageConfig
@@ -844,6 +845,100 @@ def run_mcrl_sasrec_experiment(logger=None, quick_mode=False):
     return metrics
 
 
+def run_pure_sasrec_experiment(logger=None, quick_mode=False):
+    """运行纯净SASRec基线实验（验证骨架）
+
+    这是一个最简化的实现，用于验证：
+    1. 数据加载是否正确
+    2. SASRec 骨架是否正常工作
+    3. Cross Entropy 损失是否正确
+
+    不包含任何创新组件。
+    """
+    if logger is None:
+        logger = logging.getLogger("PureSASRec_Experiment")
+
+    logger.info("\n" + "="*70)
+    logger.info("===== 纯净SASRec基线实验（验证骨架） =====")
+    logger.info("="*70 + "\n")
+
+    # batch_size
+    effective_batch_size = config.batch_size
+    if config.device == torch.device('cpu') or str(config.device) == 'cpu':
+        effective_batch_size = min(config.batch_size, 16)
+        logger.info(f"CPU模式：将batch_size从{config.batch_size}调整为{effective_batch_size}")
+
+    # 加载数据
+    logger.info("加载数据...")
+    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
+        cache_dir="./data",
+        category=config.category,
+        batch_size=effective_batch_size,
+        max_history_len=config.max_history_len,
+        num_negative_samples=config.num_negative_samples,
+        shuffle=True,
+        quick_mode=quick_mode,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
+
+    eval_kwargs = {'all_item_features': all_item_features}
+
+    # 创建模型
+    logger.info("创建纯净SASRec模型...")
+    model = PureSASRec(config, device=config.device).to(config.device)
+
+    # 打印模型参数
+    total_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"模型参数总数: {total_params:,}")
+
+    # 预计算物品表征
+    logger.info("预计算所有物品表征...")
+    model.set_all_item_features(all_item_features)
+
+    # 单阶段训练
+    logger.info("\n" + "-"*50)
+    logger.info("===== 训练（单阶段，Cross Entropy） =====")
+    logger.info("-"*50)
+
+    stage_config = StageConfig(
+        stage_id=0,
+        epochs=config.epochs,
+        start_epoch=0,
+        kwargs={'lr': config.lr, 'weight_decay': config.weight_decay, 'all_item_features': all_item_features}
+    )
+
+    logger.info(f"训练配置: epochs={config.epochs}, lr={config.lr}")
+    model.customer_train(
+        train_dataloader=train_loader,
+        val_dataloader=val_loader,
+        stage_configs=[stage_config],
+        skip_validation=True
+    )
+
+    # 评估
+    logger.info("\n" + "-"*50)
+    logger.info("===== 最终评估 =====")
+    logger.info("-"*50)
+
+    model.eval()
+    metrics = model._validate_one_epoch(test_loader, stage_id=0, stage_kwargs=eval_kwargs)
+
+    logger.info("\n纯净SASRec评估结果:")
+    for k, v in metrics.items():
+        logger.info(f"  {k}: {v:.4f}")
+
+    # 保存结果
+    results = [{"model": "PureSASRec", **metrics}]
+    save_results(results, "pure_sasrec_experiment", logger=logger)
+
+    logger.info("\n" + "="*70)
+    logger.info("纯净SASRec基线实验完成")
+    logger.info("="*70 + "\n")
+
+    return metrics
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='PMAT & MCRL 实验')
@@ -851,7 +946,7 @@ def parse_args():
     # 模式选择
     parser.add_argument('--mode', type=str, default='all',
                         choices=['all', 'baseline', 'ablation', 'hyper',
-                                'pmat_rec', 'mcrl_sasrec'],
+                                'pmat_rec', 'mcrl_sasrec', 'pure_sasrec'],
                         help='实验模式: all(运行PMAT和MCRL)/baseline(基线对比)/ablation(消融实验)/hyper(超参实验)/pmat_rec(PMAT推荐)/mcrl_sasrec(MCRL-SASRec推荐)')
 
     # 快速模式（独立参数）
@@ -965,5 +1060,8 @@ if __name__ == "__main__":
     elif args.mode == 'mcrl_sasrec':
         logger.info(f"MCRL-SASRec推荐模型实验模式 (quick_mode={quick_mode})")
         run_mcrl_sasrec_experiment(logger=logger, quick_mode=quick_mode)
+    elif args.mode == 'pure_sasrec':
+        logger.info(f"纯净SASRec基线实验模式 (quick_mode={quick_mode})")
+        run_pure_sasrec_experiment(logger=logger, quick_mode=quick_mode)
 
     logger.info("所有实验完成！")
