@@ -23,8 +23,9 @@ class BaseConfig:
     epochs: int = 5  # 减少到5个epoch以节省时间
     lr: float = 1e-4
     weight_decay: float = 1e-5
-    warmup_steps: int = 1000
+    warmup_steps: int = 5
     max_grad_norm: float = 1.0
+    eta_min: float = 1e-5
 
     # 语义ID配置
     id_length: int = 8  # ID长度

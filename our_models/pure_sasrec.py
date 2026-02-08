@@ -433,6 +433,38 @@ class PureSASRec(AbstractTrainableModel):
         # 训练所有参数（包括item_encoder）
         return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
 
+        # 实现调度器创建（核心：Warmup + 余弦退火）
+
+    def _get_scheduler(self, optimizer: torch.optim.Optimizer, stage_id: int,
+                       stage_kwargs: Dict) -> torch.optim.lr_scheduler.LRScheduler:
+        """
+        创建Warmup+余弦退火调度器
+        - 前warmup_epochs轮：学习率从0.1*lr线性升到lr
+        - 剩余轮数：余弦退火到eta_min
+        """
+        warmup_epochs = stage_kwargs.get('warmup_epochs', 5)
+        eta_min = stage_kwargs.get('eta_min', 1e-5)
+        total_epochs = stage_kwargs.get('total_epochs', 50)  # 当前阶段总轮数
+
+        # 定义Warmup和余弦退火调度器
+        scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.1,  # 初始学习率=0.1*lr
+            total_iters=warmup_epochs
+        )
+        scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=total_epochs - warmup_epochs,  # 余弦退火的总轮数
+            eta_min=eta_min  # 最小学习率
+        )
+        # 组合调度器
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[scheduler_warmup, scheduler_cosine],
+            milestones=[warmup_epochs]  # warmup结束后切换到余弦退火
+        )
+        return scheduler
+
     def _get_optimizer_state_dict(self) -> Dict:
         """获取优化器状态"""
         optimizer_states = {}
@@ -446,8 +478,6 @@ class PureSASRec(AbstractTrainableModel):
             if stage_id in self._stage_optimizers:
                 self._stage_optimizers[stage_id].load_state_dict(opt_state)
 
-    def _get_scheduler(self, optimizer, stage_id: int, stage_kwargs: Dict):
-        return None
     
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
         outputs = self.forward(batch)

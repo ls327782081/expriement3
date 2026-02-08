@@ -42,6 +42,11 @@ class StageConfig:
     def __post_init__(self):
         self.kwargs = self.kwargs or {}
 
+        # 设置调度器默认参数（可在外部传入kwargs覆盖）
+        self.kwargs.setdefault('warmup_epochs', 5)  # warmup轮数
+        self.kwargs.setdefault('eta_min', 1e-5)  # 余弦退火最小学习率
+        self.kwargs.setdefault('weight_decay', 1e-4)  # L2正则
+
 
 class AbstractTrainableModel(nn.Module, abc.ABC):
     """
@@ -55,6 +60,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         self.current_stage_epoch = 0  # 当前阶段内的已训练epoch
         self.best_metric = 0.0  # 通用最优指标存储
         self._stage_optimizers = {}  # 缓存各阶段的优化器
+        self._stage_schedulers = {} # 缓存各阶段的学习率调度器
         self.checkpoint_dir = './checkpoints'
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
@@ -64,6 +70,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         checkpoint = {
             "model_state_dict": self.state_dict(),
             "optimizer_state_dict": self._get_optimizer_state_dict(),
+            "scheduler_state_dict": self._get_scheduler_state_dict(),
             "current_stage_id": self.current_stage_id,
             "current_stage_epoch": self.current_stage_epoch,
             "best_metric": self.best_metric,
@@ -90,6 +97,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         if unexpected_keys:
             print(f"Warning: Unexpected keys in checkpoint (ignored): {unexpected_keys}")
         self._load_optimizer_state_dict(checkpoint["optimizer_state_dict"])
+        self._load_scheduler_state_dict(checkpoint["scheduler_state_dict"])
         self.current_stage_id = checkpoint["current_stage_id"]
         self.current_stage_epoch = checkpoint["current_stage_epoch"]
         self.best_metric = checkpoint["best_metric"]
@@ -119,7 +127,31 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
             loss.backward()
             optimizer.step()
 
+
+    def _get_scheduler_state_dict(self) -> Dict:
+        """获取当前阶段调度器的状态字典"""
+        if self.current_stage_id in self._stage_schedulers:
+            return self._stage_schedulers[self.current_stage_id].state_dict()
+        return {}
+
+    def _load_scheduler_state_dict(self, state_dict: Dict):
+        """加载当前阶段调度器的状态字典"""
+        if self.current_stage_id in self._stage_schedulers and state_dict:
+            self._stage_schedulers[self.current_stage_id].load_state_dict(state_dict)
+
     # -------------------------- 抽象方法（实现类必须重写） --------------------------
+    @abc.abstractmethod
+    def _get_scheduler(self, optimizer: torch.optim.Optimizer, stage_id: int,
+                       stage_kwargs: Dict) -> torch.optim.lr_scheduler.LRScheduler:
+        """
+        获取指定阶段的学习率调度器（子类实现）
+        :param optimizer: 当前阶段的优化器
+        :param stage_id: 阶段ID
+        :param stage_kwargs: 阶段自定义参数
+        :return: 学习率调度器
+        """
+        pass
+
     @abc.abstractmethod
     def _get_optimizer(self, stage_id: int, stage_kwargs: Dict) -> torch.optim.Optimizer:
         """
@@ -161,9 +193,14 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         """epoch开始钩子"""
         pass
 
-    def on_epoch_end(self, epoch: int, stage_id: int, stage_kwargs: Dict, train_metrics: Dict, val_metrics: Dict):
+    def on_epoch_end(self, epoch: int, stage_id: int, stage_kwargs: Dict,
+                     train_metrics: Dict, val_metrics: Dict):
         """epoch结束钩子：默认实现保存检查点"""
-
+        if stage_id in self._stage_schedulers:
+            scheduler = self._stage_schedulers[stage_id]
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
+            print(f"\nEpoch {epoch+1} | Stage {stage_id} | 当前学习率: {current_lr:.6f}")
 
         experiment_name = stage_kwargs.get('experiment_name', self.__class__.__name__)
         val_loss = val_metrics.get('loss', float('inf'))
@@ -218,6 +255,8 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         if stage_id not in self._stage_optimizers:
             self._stage_optimizers[stage_id] = self._get_optimizer(stage_id, stage_kwargs)
         optimizer = self._stage_optimizers[stage_id]
+        if stage_id not in self._stage_schedulers:
+            self._stage_schedulers[stage_id] = self._get_scheduler(optimizer, stage_id, stage_kwargs)
 
         # 混合精度训练配置
         # 注意：某些模型架构（如包含自定义层的模型）可能与AMP不兼容
@@ -321,7 +360,8 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
                     val_metrics = self._validate_one_epoch(val_dataloader, stage_id, stage_kwargs)
 
                 # Epoch结束钩子
-                self.on_epoch_end(epoch, stage_id, stage_kwargs, train_metrics, val_metrics)
+                self.on_epoch_end(epoch, stage_id, stage_kwargs, train_metrics,
+                                  val_metrics)
 
             # -------------------------- 阶段结束 --------------------------
             self.on_stage_end(stage_id, stage_kwargs)
@@ -331,12 +371,3 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         # 训练全部完成
         print("\n===== All Stages Training Completed =====")
         self.current_stage_id = 0  # 重置阶段ID
-
-    # 兼容原有接口（可选）
-    def train_one_stage(self, train_dataloader, val_dataloader, epochs, start_epoch=0, stage_kwargs=None):
-        """兼容一阶段训练的快捷方法"""
-        self.train(
-            train_dataloader=train_dataloader,
-            val_dataloader=val_dataloader,
-            stage_configs=[StageConfig(stage_id=1, epochs=epochs, start_epoch=start_epoch, kwargs=stage_kwargs)]
-        )

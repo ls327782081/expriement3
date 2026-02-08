@@ -905,7 +905,13 @@ def run_pure_sasrec_experiment(logger=None, quick_mode=False):
         stage_id=0,
         epochs=config.epochs,
         start_epoch=0,
-        kwargs={'lr': config.lr, 'weight_decay': config.weight_decay, 'all_item_features': all_item_features}
+        kwargs={
+            'lr': config.lr,
+            'weight_decay': config.weight_decay,
+            "warmup_epochs": config.warmup_steps,
+            "eta_min": config.eta_min,
+            'all_item_features': all_item_features
+        }
     )
 
     logger.info(f"训练配置: epochs={config.epochs}, lr={config.lr}")
