@@ -89,3 +89,45 @@ def early_stopping(current_value, best_value, cur_step, max_step, bigger=True):
 
     stop_flag = cur_step >= max_step
     return best_value, cur_step, stop_flag, update_flag
+
+
+# ==================== 新增：通用NaN/Inf检查函数 ====================
+def check_tensor(tensor: torch.Tensor, module_name: str, step: str = "") :
+    """
+    检查张量是否包含NaN/Inf，并输出详细信息
+    Args:
+        tensor: 待检查的张量
+        module_name: 模块名称（如"SimpleItemEncoder/text_feat"）
+        step: 步骤描述（可选）
+    Returns:
+        has_error: 是否包含NaN/Inf
+    """
+    if tensor is None:
+        print(f"[检查点] {module_name} {step}: 张量为None")
+        return
+
+    # 转换为float（避免bool/int张量干扰）
+    tensor = tensor.float()
+
+    # 统计NaN/Inf数量
+    nan_count = torch.isnan(tensor).sum().item()
+    inf_count = torch.isinf(tensor).sum().item()
+    total_count = tensor.numel()
+
+    # 计算最值（处理全NaN/Inf的情况）
+    try:
+        tensor_clamped = torch.clamp(tensor, min=-1e10, max=1e10)  # 防止最值计算溢出
+        max_val = tensor_clamped.max().item()
+        min_val = tensor_clamped.min().item()
+    except:
+        max_val = "NaN"
+        min_val = "NaN"
+
+    # 输出检查结果
+    if nan_count > 0 or inf_count > 0:
+        print(f"\n❌ [数值异常] {module_name} {step}:")
+        print(f"  - NaN数量: {nan_count}/{total_count} ({nan_count / total_count * 100:.2f}%)")
+        print(f"  - Inf数量: {inf_count}/{total_count} ({inf_count / total_count * 100:.2f}%)")
+        print(f"  - 最值: {min_val} ~ {max_val}")
+        print(f"  - 张量形状: {tensor.shape}")
+        return

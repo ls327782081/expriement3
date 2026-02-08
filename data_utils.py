@@ -218,7 +218,7 @@ class AmazonBooksProcessor:
         unique_items = sorted(df['item_id'].unique())
 
         user_mapping = {user_id: i for i, user_id in enumerate(unique_users)}  # 从0开始
-        item_mapping = {item_id: i+1 for i, item_id in enumerate(unique_items)}  # 从1开始，0保留给padding
+        item_mapping = {item_id: i for i, item_id in enumerate(unique_items)}  # 从0开始
 
         # 应用映射
         df['user_id'] = df['user_id'].map(user_mapping)
