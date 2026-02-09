@@ -918,7 +918,7 @@ def run_pure_sasrec_experiment(logger=None, quick_mode=False):
         train_dataloader=train_loader,
         val_dataloader=val_loader,
         stage_configs=[stage_config],
-        skip_validation=True
+        skip_validation=False
     )
 
     # 评估

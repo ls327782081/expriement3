@@ -715,12 +715,12 @@ class CustomMultiheadSelfAttention(nn.Module):
         v = v.view(batch_size, seq_len, self.num_heads, self.d_k).transpose(1, 2)
 
         # 4. 强制清空PAD位置的Q/K/V（左对齐核心！）
-        if key_padding_mask is not None:
-            # 扩展mask维度：[batch, seq_len] → [batch, 1, seq_len, 1]
-            pad_mask = key_padding_mask.unsqueeze(1).unsqueeze(-1)
-            q = q.masked_fill(pad_mask, 0.0)
-            k = k.masked_fill(pad_mask, 0.0)
-            v = v.masked_fill(pad_mask, 0.0)
+        # if key_padding_mask is not None:
+        #     # 扩展mask维度：[batch, seq_len] → [batch, 1, seq_len, 1]
+        #     pad_mask = key_padding_mask.unsqueeze(1).unsqueeze(-1)
+        #     q = q.masked_fill(pad_mask, 0.0)
+        #     k = k.masked_fill(pad_mask, 0.0)
+        #     v = v.masked_fill(pad_mask, 0.0)
 
         # 5. 计算注意力分数：Q @ K^T / sqrt(d_k) → [batch, num_heads, seq_len, seq_len]
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
@@ -762,4 +762,3 @@ class CustomMultiheadSelfAttention(nn.Module):
             attn_output = attn_output.transpose(0, 1)
 
         return attn_output, attn_weights
-
