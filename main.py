@@ -908,7 +908,6 @@ def run_pure_sasrec_experiment(logger=None, quick_mode=False):
         kwargs={
             'lr': config.lr,
             'weight_decay': config.weight_decay,
-            "warmup_epochs": config.warmup_steps,
             "eta_min": config.eta_min,
             'all_item_features': all_item_features
         }

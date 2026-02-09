@@ -84,6 +84,10 @@ class SimpleItemEncoder(nn.Module):
         text_encoded = self.text_encoder(text_feat)
         visual_encoded = self.visual_encoder(vision_feat)
 
+        # ===== 编码后特征归一化 =====
+        text_encoded = F.normalize(text_encoded, dim=-1, p=2)
+        visual_encoded = F.normalize(visual_encoded, dim=-1, p=2)
+
         check_tensor(text_encoded, "SimpleItemEncoder", "编码后text_encoded")
         check_tensor(visual_encoded, "SimpleItemEncoder", "编码后visual_encoded")
         
@@ -430,6 +434,10 @@ class PureSASRec(AbstractTrainableModel):
         lr = stage_kwargs.get('lr', 0.001)
         weight_decay = stage_kwargs.get('weight_decay', 0.01)
 
+        print(f"\n===== 优化器参数 =====")
+        print(f"stage_kwargs['lr']: {stage_kwargs.get('lr', '未传，使用默认0.001')}")
+        print(f"实际使用的base_lr: {lr:.6f}")
+
         # 训练所有参数（包括item_encoder）
         return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -442,27 +450,48 @@ class PureSASRec(AbstractTrainableModel):
         - 前warmup_epochs轮：学习率从0.1*lr线性升到lr
         - 剩余轮数：余弦退火到eta_min
         """
-        warmup_epochs = stage_kwargs.get('warmup_epochs', 5)
+        lr = stage_kwargs.get('lr', 0.001)
+        warmup_epochs = max(1, int(self.config.epochs * 0.15))  # 15%的轮数用于warmup
         eta_min = stage_kwargs.get('eta_min', 1e-5)
-        total_epochs = stage_kwargs.get('total_epochs', 50)  # 当前阶段总轮数
 
-        # 定义Warmup和余弦退火调度器
+        total_epochs = self.config.epochs
+        warmup_epochs = min(warmup_epochs, total_epochs - 1)  # 至少留1轮退火
+        cosine_T_max = max(1, (total_epochs - warmup_epochs) // 2)  # 退火轮数=剩余轮数的1/2
+
+        # 3. 定义Warmup调度器（0.2*base_lr → base_lr，3轮完成）
         scheduler_warmup = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            start_factor=0.1,  # 初始学习率=0.1*lr
+            start_factor=0.2,  # 初始学习率=0.2*0.0001=0.00002（而非0.1，避免过低）
             total_iters=warmup_epochs
         )
+
+        # 4. 定义余弦退火调度器（快速下降到eta_min）
         scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=total_epochs - warmup_epochs,  # 余弦退火的总轮数
-            eta_min=eta_min  # 最小学习率
+            T_max=cosine_T_max,  # 比如20轮总训练→(20-3)//2=8轮退火
+            eta_min=eta_min
         )
-        # 组合调度器
+
+        # 5. 定义收尾调度器（稳定在eta_min）
+        scheduler_constant = torch.optim.lr_scheduler.ConstantLR(
+            optimizer,
+            factor=1.0,
+            total_iters=total_epochs - warmup_epochs - cosine_T_max
+        )
+
+        # 6. 组合调度器
         scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
-            schedulers=[scheduler_warmup, scheduler_cosine],
-            milestones=[warmup_epochs]  # warmup结束后切换到余弦退火
+            schedulers=[scheduler_warmup, scheduler_cosine, scheduler_constant],
+            milestones=[warmup_epochs, warmup_epochs + cosine_T_max]
         )
+
+        # 打印配置（验证参数是否匹配）
+        print(f"\n===== 调度器参数（base_lr=1e-4） =====")
+        print(f"warmup_epochs={warmup_epochs}, total_epochs={total_epochs}")
+        print(f"cosine_T_max={cosine_T_max}, eta_min={eta_min}")
+        print(f"Warmup初始LR：{0.2 * lr:.6f} → Warmup结束LR：{lr:.6f}")
+        print(f"余弦退火结束LR：{eta_min:.6f}")
         return scheduler
 
     def _get_optimizer_state_dict(self) -> Dict:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any, List, Union
 from tqdm import tqdm
 import os
+import matplotlib.pyplot as plt
 
 
 # ==================== 模型基类说明 ====================
@@ -43,7 +44,6 @@ class StageConfig:
         self.kwargs = self.kwargs or {}
 
         # 设置调度器默认参数（可在外部传入kwargs覆盖）
-        self.kwargs.setdefault('warmup_epochs', 5)  # warmup轮数
         self.kwargs.setdefault('eta_min', 1e-5)  # 余弦退火最小学习率
         self.kwargs.setdefault('weight_decay', 1e-4)  # L2正则
 
@@ -63,6 +63,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         self._stage_schedulers = {} # 缓存各阶段的学习率调度器
         self.checkpoint_dir = './checkpoints'
         os.makedirs(self.checkpoint_dir, exist_ok=True)
+        self.lr_history = []
 
     # -------------------------- 通用工具方法（无需重写） --------------------------
     def save_checkpoint(self, path: str, additional_info: Optional[Dict] = None):
@@ -139,6 +140,18 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
         if self.current_stage_id in self._stage_schedulers and state_dict:
             self._stage_schedulers[self.current_stage_id].load_state_dict(state_dict)
 
+    # 训练结束后绘制学习率曲线
+    def plot_lr_curve(self, save_path="./results/lr_curve.png"):
+        plt.figure(figsize=(10, 6))
+        plt.plot(range(1, len(self.lr_history) + 1), self.lr_history, marker='o', label='Actual LR')
+        plt.xlabel("Epoch")
+        plt.ylabel("Learning Rate")
+        plt.title("Learning Rate Schedule Curve")
+        plt.grid(True)
+        plt.legend()
+        plt.savefig(save_path)
+        print(f"学习率曲线已保存到：{save_path}")
+
     # -------------------------- 抽象方法（实现类必须重写） --------------------------
     @abc.abstractmethod
     def _get_scheduler(self, optimizer: torch.optim.Optimizer, stage_id: int,
@@ -201,6 +214,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
             scheduler.step()
             current_lr = scheduler.get_last_lr()[0]
             print(f"\nEpoch {epoch+1} | Stage {stage_id} | 当前学习率: {current_lr:.6f}")
+            self.lr_history.append(current_lr)
 
         experiment_name = stage_kwargs.get('experiment_name', self.__class__.__name__)
         val_loss = val_metrics.get('loss', float('inf'))
@@ -237,7 +251,9 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
 
     def on_stage_end(self, stage_id: int, stage_kwargs: Dict):
         """阶段结束钩子"""
-        pass
+        experiment_name = stage_kwargs.get('experiment_name', self.__class__.__name__)
+        self.plot_lr_curve(f"./results/{experiment_name}_stage_{stage_id}_lr_curve.png")
+
 
     def on_stage_switch(self, from_stage_id: int, to_stage_id: int, to_stage_kwargs: Dict):
         """阶段切换钩子（核心：处理模块冻结/解冻、学习率调整等）"""
