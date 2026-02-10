@@ -49,21 +49,24 @@ class SimpleItemEncoder(nn.Module):
         
         # 简单的线性投影
         self.text_encoder = nn.Sequential(
-            nn.Linear(config.text_dim, config.hidden_dim),
+            nn.Linear(config.text_dim, config.hidden_dim * 2),  # 先扩维
             nn.ReLU(),
-            nn.LayerNorm(config.hidden_dim),
-            nn.Dropout(config.dropout)
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),  # 再降维
+            nn.LayerNorm(config.hidden_dim)  # 仅在最后加LayerNorm，避免过度压缩
         )
-        
+
         self.visual_encoder = nn.Sequential(
-            nn.Linear(config.visual_dim, config.hidden_dim),
+            nn.Linear(config.visual_dim, config.hidden_dim * 2),
             nn.ReLU(),
-            nn.LayerNorm(config.hidden_dim),
-            nn.Dropout(config.dropout)
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim)
         )
-        
-        # 可学习的模态权重
-        self.modal_weight = nn.Parameter(torch.ones(2) / 2)
+
+        self._validate_print_done = False  # 避免重复打印
+
+        # ===== 修复权重初始化，让梯度可学习 =====
+        self.modal_weight = nn.Parameter(torch.tensor([1.0, 1.0]))  # 初始值[1,1]，softmax后0.5:0.5
+        self.modal_scale = nn.Parameter(torch.ones(1))  # 新增缩放参数，增强融合能力
         
     def forward(self, text_feat: torch.Tensor, vision_feat: torch.Tensor) -> torch.Tensor:
         """
@@ -77,6 +80,21 @@ class SimpleItemEncoder(nn.Module):
         text_feat = text_feat.float()
         vision_feat = vision_feat.float()
 
+        # ===== 新增：输入特征兜底清理 =====
+        text_feat = torch.nan_to_num(text_feat, nan=0.0, posinf=0.0, neginf=0.0)
+        vision_feat = torch.nan_to_num(vision_feat, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # ===== 核心：仅在验证阶段打印，且只打印一次 =====
+        if not self.training and not self._validate_print_done:
+            print(f"\n===== Batch级特征校验（验证阶段）=====")
+            print(
+                f"输入text_feat方差：{text_feat.var(-1).mean().item():.6f}，vision_feat方差：{vision_feat.var(-1).mean().item():.6f}")
+            print(f"输入text_feat范围：[{text_feat.min():.4f}, {text_feat.max():.4f}]")
+            print(f"输入vision_feat范围：[{vision_feat.min():.4f}, {vision_feat.max():.4f}]")
+
+            check_tensor(text_feat, "SimpleItemEncoder", "输入text_feat")
+            check_tensor(vision_feat, "SimpleItemEncoder", "输入vision_feat")
+
         check_tensor(text_feat, "SimpleItemEncoder", "输入text_feat")
         check_tensor(vision_feat, "SimpleItemEncoder", "输入vision_feat")
         
@@ -85,18 +103,56 @@ class SimpleItemEncoder(nn.Module):
         visual_encoded = self.visual_encoder(vision_feat)
 
         # ===== 编码后特征归一化 =====
-        text_encoded = F.normalize(text_encoded, dim=-1, p=2)
-        visual_encoded = F.normalize(visual_encoded, dim=-1, p=2)
+        text_encoded = F.normalize(text_encoded, dim=-1) * math.sqrt(self.hidden_dim)
+        visual_encoded = F.normalize(visual_encoded, dim=-1) * math.sqrt(self.hidden_dim)
 
-        check_tensor(text_encoded, "SimpleItemEncoder", "编码后text_encoded")
-        check_tensor(visual_encoded, "SimpleItemEncoder", "编码后visual_encoded")
-        
-        # 加权融合
+        # 融合（优化权重）
         weights = F.softmax(self.modal_weight, dim=0)
         item_emb = weights[0] * text_encoded + weights[1] * visual_encoded
+        item_emb = item_emb * self.modal_scale  # 缩放增强
+
+        # TODO
+        if not self.training and not self._validate_print_done:
+            # 编码后特征校验
+            print(f"\n===== 编码后特征校验（验证阶段）=====")
+            print(
+                f"text_encoded 均值：{text_encoded.mean().item():.4f}，方差：{text_encoded.var().item():.4f}，范围：[{text_encoded.min():.4f}, {text_encoded.max():.4f}]")
+            print(
+                f"visual_encoded 均值：{visual_encoded.mean().item():.4f}，方差：{visual_encoded.var().item():.4f}，范围：[{visual_encoded.min():.4f}, {visual_encoded.max():.4f}]")
+
+            # 检查编码后是否有NaN/Inf
+            print(
+                f"text_encoded 含NaN：{torch.isnan(text_encoded).any().item()}，含Inf：{torch.isinf(text_encoded).any().item()}")
+            print(
+                f"visual_encoded 含NaN：{torch.isnan(visual_encoded).any().item()}，含Inf：{torch.isinf(visual_encoded).any().item()}")
+
+            # 检查激活后是否饱和（ReLU导致全零）
+            text_encoded_zero_ratio = (text_encoded.abs().sum(-1) < 1e-6).float().mean().item()
+            visual_encoded_zero_ratio = (visual_encoded.abs().sum(-1) < 1e-6).float().mean().item()
+            print(
+                f"text_encoded全零比例：{text_encoded_zero_ratio:.4f}，visual_encoded全零比例：{visual_encoded_zero_ratio:.4f}")
+
+            check_tensor(text_encoded, "SimpleItemEncoder", "编码后text_encoded")
+            check_tensor(visual_encoded, "SimpleItemEncoder", "编码后visual_encoded")
+
+            # 融合后校验
+            print(f"\n===== 融合后特征校验（验证阶段）=====")
+            weight_text = weights[0].item()
+            weight_vision = weights[1].item()
+            item_emb_mean = item_emb.mean().item()
+            item_emb_var = item_emb.var().item()
+            item_emb_min = item_emb.min().item()
+            item_emb_max = item_emb.max().item()
+
+            print(f"模态权重：text={weight_text:.4f}，vision={weight_vision:.4f}")
+            print(
+                f"item_emb 均值：{item_emb_mean:.4f}，方差：{item_emb_var:.4f}，范围：[{item_emb_min:.4f}, {item_emb_max:.4f}]")
 
         check_tensor(weights, "SimpleItemEncoder", "模态权重weights")
         check_tensor(item_emb, "SimpleItemEncoder", "融合后item_emb")
+
+        # 标记为已打印，避免验证阶段重复打印
+        self._validate_print_done = True
         
         return item_emb
 
@@ -119,6 +175,7 @@ class PureSASRec(AbstractTrainableModel):
         self.config = config
         self.hidden_dim = config.hidden_dim
         self.max_seq_len = getattr(config, 'max_history_len', 50)
+
 
         # ===== 物品编码器（最简单的版本） =====
         self.item_encoder = SimpleItemEncoder(config)
@@ -243,6 +300,68 @@ class PureSASRec(AbstractTrainableModel):
         self.all_item_text_feat = all_item_features['text'].to(self.device)
         self.all_item_vision_feat = all_item_features['visual'].to(self.device)
         self.num_items = all_item_features['num_items']
+
+        # ===== 核心修复：鲁棒的L2归一化（防除零）=====
+        def robust_l2_normalize(feat):
+            # 计算每个物品特征的L2范数
+            norm = feat.norm(dim=-1, keepdim=True)  # [num_items, 1]
+            # 对全零向量（范数=0），设范数为1e-8（避免除零）
+            norm = torch.where(norm == 0, torch.tensor(1e-8, device=feat.device), norm)
+            # 归一化
+            feat_normed = feat / norm
+            # 兜底：替换NaN/Inf为0
+            feat_normed = torch.nan_to_num(feat_normed, nan=0.0, posinf=0.0, neginf=0.0)
+            return feat_normed
+
+        # 对text/vision特征做鲁棒归一化
+        self.all_item_text_feat = robust_l2_normalize(self.all_item_text_feat)
+        self.all_item_vision_feat = robust_l2_normalize(self.all_item_vision_feat)
+
+        # TODO
+        # L2归一化到单位球（消除范围过大问题）
+        self.all_item_text_feat = F.normalize(self.all_item_text_feat, dim=-1, p=2)
+        self.all_item_vision_feat = F.normalize(self.all_item_vision_feat, dim=-1, p=2)
+
+        # 全量特征校验（原有逻辑）
+        print("\n===== 全量物品特征校验 =====")
+        # 1. 先强制清理全量特征的NaN/Inf（兜底）
+        self.all_item_text_feat = torch.nan_to_num(self.all_item_text_feat, nan=0.0, posinf=0.0, neginf=0.0)
+        self.all_item_vision_feat = torch.nan_to_num(self.all_item_vision_feat, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 2. 计算统计值（转标量+防NaN）
+        text_mean = self.all_item_text_feat.mean().item() if self.num_items > 0 else 0.0
+        text_var = self.all_item_text_feat.var().item() if self.num_items > 0 else 0.0
+        text_max = self.all_item_text_feat.max().item() if self.num_items > 0 else 0.0
+        text_min = self.all_item_text_feat.min().item() if self.num_items > 0 else 0.0
+        vision_mean = self.all_item_vision_feat.mean().item() if self.num_items > 0 else 0.0
+        vision_var = self.all_item_vision_feat.var().item() if self.num_items > 0 else 0.0
+        vision_max = self.all_item_vision_feat.max().item() if self.num_items > 0 else 0.0
+        vision_min = self.all_item_vision_feat.min().item() if self.num_items > 0 else 0.0
+
+        # 3. 兜底：若统计值为nan，设为0.0
+        text_mean = text_mean if not math.isnan(text_mean) else 0.0
+        text_var = text_var if not math.isnan(text_var) else 0.0
+        text_max = text_max if not math.isnan(text_max) else 0.0
+        text_min = text_min if not math.isnan(text_min) else 0.0
+        vision_mean = vision_mean if not math.isnan(vision_mean) else 0.0
+        vision_var = vision_var if not math.isnan(vision_var) else 0.0
+        vision_max = vision_max if not math.isnan(vision_max) else 0.0
+        vision_min = vision_min if not math.isnan(vision_min) else 0.0
+
+        print(f"物品总数：{self.num_items}")
+        print(
+            f"归一化后text_feat - 均值：{text_mean:.4f}，方差：{text_var:.4f}，范围：[{text_min:.4f}, {text_max:.4f}]（预期[-1,1]）")
+        print(
+            f"归一化后vision_feat - 均值：{vision_mean:.4f}，方差：{vision_var:.4f}，范围：[{vision_min:.4f}, {vision_max:.4f}]（预期[-1,1]）")
+
+        # 检查NaN/Inf（原有逻辑）
+        text_has_nan = torch.isnan(self.all_item_text_feat).any().item()
+        text_has_inf = torch.isinf(self.all_item_text_feat).any().item()
+        vision_has_nan = torch.isnan(self.all_item_vision_feat).any().item()
+        vision_has_inf = torch.isinf(self.all_item_vision_feat).any().item()
+        print(f"text_feat 含NaN：{text_has_nan}，含Inf：{text_has_inf}")
+        print(f"vision_feat 含NaN：{vision_has_nan}，含Inf：{vision_has_inf}")
+
         # 首次更新缓存
         self.update_item_repr_cache()
 
@@ -261,6 +380,8 @@ class PureSASRec(AbstractTrainableModel):
                 item_repr = self.item_projection(item_emb)
                 item_repr_list.append(F.normalize(item_repr, dim=-1))
             self._all_item_repr = torch.cat(item_repr_list, dim=0)
+
+
         self.train()
     
     def encode_sequence(
@@ -548,6 +669,8 @@ class PureSASRec(AbstractTrainableModel):
                 )
                 user_repr_norm = F.normalize(user_repr, dim=-1)
 
+
+
                 # 用缓存计算全量分数（RecBole逻辑）
                 all_scores = torch.matmul(user_repr_norm, self._all_item_repr.T) / self.config.logit_temperature
 
@@ -571,6 +694,23 @@ class PureSASRec(AbstractTrainableModel):
                 all_ranks.append(ranks.cpu())
         
         all_ranks = torch.cat(all_ranks, dim=0).float()
+
+        # ===== 验证阶段打印物品表征缓存信息 =====
+        print(f"\n===== 验证阶段 - 物品表征缓存校验 =====")
+        print(f"_all_item_repr 形状：{self._all_item_repr.shape}（预期：[{self.num_items}, {self.hidden_dim}]）")
+        print(
+            f"_all_item_repr 均值：{self._all_item_repr.mean().item():.4f}，方差：{self._all_item_repr.var().item():.4f}")
+        print(f"_all_item_repr 范围：[{self._all_item_repr.min():.4f}, {self._all_item_repr.max():.4f}]")
+        # 检查表征是否归一化（L2范数应≈1）
+        repr_norm = self._all_item_repr.norm(dim=-1).mean().item()
+        print(f"_all_item_repr 平均L2范数：{repr_norm:.4f}（预期≈1.0）")
+        # 检查表征区分度
+        sample_idx = torch.randint(0, self.num_items, (1000,), device=self.device)
+        sample_repr = self._all_item_repr[sample_idx]
+        sim_matrix = torch.matmul(sample_repr, sample_repr.T)
+        mask = 1 - torch.eye(1000, device=self.device)
+        avg_sim = (sim_matrix * mask).sum() / mask.sum()
+        print(f"随机1000个表征的平均余弦相似度：{avg_sim.item():.4f}（预期<0.5，越低区分度越高）")
         
         # 计算指标
         metrics = self._compute_metrics(all_ranks)
