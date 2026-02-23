@@ -886,6 +886,7 @@ def run_pure_sasrec_experiment(logger=None, quick_mode=False):
 
     # 创建模型
     logger.info("创建纯净SASRec模型...")
+    config.num_items = all_item_features["num_items"]
     model = PureSASRec(config, device=config.device).to(config.device)
 
     # 打印模型参数

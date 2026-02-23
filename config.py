@@ -16,6 +16,7 @@ class BaseConfig:
     max_samples: int = 5000  # 控制样本量
     item_vocab_size: int = None # 物品库规模
     user_vocab_size: int = None   # 用户库规模
+    num_items: int = None
 
     # 训练配置
     batch_size: int = 64  # 增加batch size以加快训练
