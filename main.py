@@ -25,7 +25,7 @@ from our_models.pmat import PMAT
 from our_models.mcrl import MCRL
 from our_models.pmat_sasrec import PMAT_SASRec
 from our_models.mcrl_sasrec import MCRL_SASRec
-from our_models.pure_sasrec import PureSASRec
+from our_models.pure_sasrec import RecBoleSASRec
 from metrics import calculate_metrics
 from util import item_id_to_semantic_id, save_checkpoint, load_checkpoint, save_results
 from base_model import AbstractTrainableModel, StageConfig
@@ -887,7 +887,7 @@ def run_pure_sasrec_experiment(logger=None, quick_mode=False):
     # 创建模型
     logger.info("创建纯净SASRec模型...")
     config.num_items = all_item_features["num_items"]
-    model = PureSASRec(config, device=config.device).to(config.device)
+    model = RecBoleSASRec(config, device=config.device).to(config.device)
 
     # 打印模型参数
     total_params = sum(p.numel() for p in model.parameters())
@@ -895,7 +895,7 @@ def run_pure_sasrec_experiment(logger=None, quick_mode=False):
 
     # 预计算物品表征
     logger.info("预计算所有物品表征...")
-    model.set_all_item_features(all_item_features)
+
 
     # 单阶段训练
     logger.info("\n" + "-"*50)

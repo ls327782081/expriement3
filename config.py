@@ -34,9 +34,9 @@ class BaseConfig:
 
     # 模型配置
     attention_heads: int = 4
-    hidden_dim: int = 256
+    hidden_dim: int = 64
     mlp_dim: int = 512
-    dropout: float = 0.1
+    dropout: float = 0.5
 
     # 多模态配置
     num_modalities: int = 2  # 视觉+文本（实际使用的模态数量）
