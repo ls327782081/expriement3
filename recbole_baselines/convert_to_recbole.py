@@ -63,10 +63,28 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
     )
 
     # 加载评论数据（包含user_id, item_id, timestamp）
-    reviews_df, user_mapping, item_mapping = processor.load_reviews()
+    reviews_df, user_mapping_original, item_mapping_original = processor.load_reviews()
+
+    # ======================================
+    # 新增打印1：原始数据（你自己模型使用的数据集）关键指标
+    # ======================================
+    logger.info("=" * 80)
+    logger.info("【关键对比1：你自己模型使用的原始数据集】")
+    logger.info(f"  原始交互总数: {len(reviews_df)}")
+    logger.info(f"  原始用户总数: {len(user_mapping_original)}")
+    logger.info(f"  原始物品总数: {len(item_mapping_original)}")
+    # 计算原始序列长度统计
+    user_seq_len_original = reviews_df.groupby('user_id').size()
+    logger.info(f"  原始用户平均序列长度: {user_seq_len_original.mean():.2f}")
+    logger.info(f"  原始用户序列长度中位数: {user_seq_len_original.median():.2f}")
+    logger.info(f"  原始用户序列长度最大值: {user_seq_len_original.max()}")
+    logger.info(f"  原始用户序列长度最小值: {user_seq_len_original.min()}")
+    logger.info(
+        f"  原始中交互数<5的用户占比: {len(user_seq_len_original[user_seq_len_original < 5]) / len(user_seq_len_original) * 100:.2f}%")
+    logger.info("=" * 80)
 
     logger.info(f"Loaded {len(reviews_df)} interactions (before filtering)")
-    logger.info(f"Users: {len(user_mapping)}, Items: {len(item_mapping)}")
+    logger.info(f"Users: {len(user_mapping_original)}, Items: {len(item_mapping_original)}")
 
     # 过滤冷启动用户和物品（迭代过滤直到稳定）
     logger.info("Filtering cold-start users and items...")
@@ -97,6 +115,43 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
     unique_items = reviews_df['item_id'].unique()
     user_mapping = {uid: idx for idx, uid in enumerate(unique_users)}
     item_mapping = {iid: idx for idx, iid in enumerate(unique_items)}
+
+    # ======================================
+    # 新增打印2：RecBole使用的过滤后数据集关键指标
+    # ======================================
+    logger.info("=" * 80)
+    logger.info("【关键对比2：RecBole使用的过滤后数据集】")
+    logger.info(f"  过滤后交互总数: {len(reviews_df)}")
+    logger.info(f"  过滤后用户总数: {len(user_mapping)}")
+    logger.info(f"  过滤后物品总数: {len(item_mapping)}")
+    # 计算过滤后序列长度统计
+    user_seq_len_filtered = reviews_df.groupby('user_id').size()
+    logger.info(f"  过滤后用户平均序列长度: {user_seq_len_filtered.mean():.2f}")
+    logger.info(f"  过滤后用户序列长度中位数: {user_seq_len_filtered.median():.2f}")
+    logger.info(f"  过滤后用户序列长度最大值: {user_seq_len_filtered.max()}")
+    logger.info(f"  过滤后用户序列长度最小值: {user_seq_len_filtered.min()}")
+    # 计算数据缩减比例
+    user_reduce_ratio = (len(user_mapping_original) - len(user_mapping)) / len(user_mapping_original) * 100
+    item_reduce_ratio = (len(item_mapping_original) - len(item_mapping)) / len(item_mapping_original) * 100
+    inter_reduce_ratio = (len(reviews_df) / len(processor.load_reviews()[0])) * 100
+    logger.info(
+        f"  用户数缩减比例: {user_reduce_ratio:.2f}% (原始{len(user_mapping_original)} → 过滤后{len(user_mapping)})")
+    logger.info(
+        f"  物品数缩减比例: {item_reduce_ratio:.2f}% (原始{len(item_mapping_original)} → 过滤后{len(item_mapping)})")
+    logger.info(
+        f"  交互数保留比例: {inter_reduce_ratio:.2f}% (原始{len(processor.load_reviews()[0])} → 过滤后{len(reviews_df)})")
+    logger.info("=" * 80)
+
+    # ======================================
+    # 新增打印3：ID映射规则对比
+    # ======================================
+    logger.info("=" * 80)
+    logger.info("【关键对比3：ID映射规则】")
+    logger.info(f"  RecBole使用的ID映射: 从0开始编码（RecBole内部会自动+1，最终从1开始）")
+    logger.info(f"  你自己模型的ID映射: 从0开始编码（无+1，padding用num_items）")
+    logger.info(f"  RecBole padding ID: 0（真实ID从1开始）")
+    logger.info(f"  你自己模型padding ID: {len(item_mapping_original)}（真实ID从0开始）")
+    logger.info("=" * 80)
 
     logger.info(f"After filtering: {len(reviews_df)} interactions")
     logger.info(f"Users: {len(user_mapping)}, Items: {len(item_mapping)}")

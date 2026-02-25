@@ -132,15 +132,6 @@ class AmazonBooksProcessor:
         """加载评论数据"""
         self.logger.info("Loading reviews data...")
 
-        # 如果是mock数据，从pkl文件加载
-        if self.category == "mock":
-            self.logger.info("Loading mock reviews from pkl file...")
-            mock_path = './data/mock/interactions.pkl'
-            if os.path.exists(mock_path):
-                with open(mock_path, 'rb') as f:
-                    mock_data = pickle.load(f)
-                # mock_data应该包含reviews_df, user_mapping, item_mapping
-                return mock_data['reviews_df'], mock_data['user_mapping'], mock_data['item_mapping']
 
         # 直接从JSONL文件加载数据（不依赖datasets库）
         self.logger.info("Loading reviews from JSONL file...")
@@ -852,6 +843,134 @@ def get_dataloader(cache_dir: str,
         with open(cache_file_name, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    logger.info("=" * 80)
+    logger.info("========== 物品ID连续性验证 ==========")
+    logger.info("=" * 80)
+
+    # 1. 原始物品ID分析（从item_mapping反推）
+    logger.info("1. 原始物品ID分布验证")
+    original_item_ids = list(data['item_mapping'].keys())
+    logger.info(f"原始物品ID数量: {len(original_item_ids)}")
+
+    # 尝试转换为数字（如果是字符串ID）
+    numeric_item_ids = []
+    for item_id in original_item_ids:
+        try:
+            numeric_item_ids.append(int(item_id))
+        except (ValueError, TypeError):
+            continue
+
+    if numeric_item_ids:
+        logger.info(f"可转换为数字的物品ID范围: min={min(numeric_item_ids)}, max={max(numeric_item_ids)}")
+        logger.info(f"数字ID的跨度: {max(numeric_item_ids) - min(numeric_item_ids)}")
+        logger.info(f"有效物品数/ID跨度比: {len(numeric_item_ids)}/{max(numeric_item_ids) - min(numeric_item_ids):.4f}")
+    else:
+        logger.info("物品ID为非数字格式，无法计算数值范围")
+
+    # 2. 映射后物品ID分析
+    logger.info("\n2. 映射后物品ID验证")
+    mapped_item_ids = list(data['item_mapping'].values())
+    logger.info(f"映射后物品ID数量: {len(mapped_item_ids)}")
+    logger.info(f"映射后物品ID范围: min={min(mapped_item_ids)}, max={max(mapped_item_ids)}")
+    logger.info(f"映射后ID是否连续: {max(mapped_item_ids) == len(mapped_item_ids) - 1}")
+
+    # 检查是否有间隙
+    all_expected_ids = set(range(len(mapped_item_ids)))
+    actual_ids = set(mapped_item_ids)
+    missing_ids = all_expected_ids - actual_ids
+    logger.info(f"映射后ID缺失数量: {len(missing_ids)}")
+    if missing_ids:
+        logger.info(f"缺失的ID示例: {list(missing_ids)[:10]}")
+
+    # 3. 数据集核心信息验证
+    logger.info("\n3. 数据集核心信息验证")
+    logger.info(f"最终物品总数 (num_items): {data['num_items']}")
+    logger.info(
+        f"文本特征覆盖的物品数: {len(data['text_features']) if isinstance(data['text_features'], dict) else data['text_features'].shape[0]}")
+    logger.info(
+        f"图像特征覆盖的物品数: {len(data['image_features']) if isinstance(data['image_features'], dict) else data['image_features'].shape[0]}")
+
+    # 4. 用户序列ID验证
+    logger.info("\n4. 用户序列ID验证")
+    # 抽样检查前5个用户的序列
+    sample_users = list(data['user_sequences'].keys())[:5]
+    for user_id in sample_users:
+        seq = data['user_sequences'][user_id]
+        item_indices = seq.get('item_indices', [])
+        logger.info(f"用户{user_id}的序列: {item_indices[:10]}... (长度: {len(item_indices)})")
+        logger.info(f"用户{user_id}序列中最大item_id: {max(item_indices) if item_indices else 0}")
+        logger.info(f"用户{user_id}序列中最小item_id: {min(item_indices) if item_indices else 0}")
+
+    # 5. 特征张量最终验证
+    logger.info("\n5. 特征张量最终验证")
+    logger.info(f"num_items (原始): {data['num_items']}")
+    logger.info(
+        f"text_features shape: {data['text_features'].shape if isinstance(data['text_features'], torch.Tensor) else 'dict'}")
+    logger.info(
+        f"image_features shape: {data['image_features'].shape if isinstance(data['image_features'], torch.Tensor) else 'dict'}")
+
+    if isinstance(data['text_features'], torch.Tensor):
+        logger.info(f"text_features 维度0 (含padding): {data['text_features'].shape[0]}")
+        logger.info(f"padding预留位置验证: {data['text_features'].shape[0] == data['num_items'] + 1}")
+
+    # 6. 数据范围深度验证
+    logger.info("\n6. 数据范围深度验证")
+    num_items = data['num_items']
+    num_users = data['num_users']
+
+    # 检查所有序列中的item_id
+    all_sequences = {**data['train_sequences'], **data['val_sequences'], **data['test_sequences']}
+    max_item_id = 0
+    max_user_id = 0
+    invalid_items = []
+    total_items = 0
+
+    for user_id, seq in all_sequences.items():
+        max_user_id = max(max_user_id, user_id)
+        item_indices = seq.get('item_indices', [])
+        total_items += len(item_indices)
+
+        for item_id in item_indices:
+            max_item_id = max(max_item_id, item_id)
+            if item_id > num_items:
+                invalid_items.append((user_id, item_id))
+
+    logger.info(f"num_users: {num_users}, max_user_id: {max_user_id}, 是否匹配: {max_user_id == num_users - 1}")
+    logger.info(f"num_items: {num_items}, max_item_id: {max_item_id}, 是否匹配: {max_item_id == num_items - 1}")
+    logger.info(f"总物品交互数: {total_items}")
+    logger.info(f"无效item_id数量: {len(invalid_items)}")
+
+    if invalid_items:
+        logger.warning(f"无效item_id示例: {invalid_items[:10]}")
+        logger.warning(f"无效item_id最大值: {max([x[1] for x in invalid_items]) if invalid_items else 0}")
+
+    # 7. item_id分布统计
+    all_item_ids = []
+    for user_id, seq in all_sequences.items():
+        all_item_ids.extend(seq.get('item_indices', []))
+
+    if all_item_ids:
+        item_id_array = np.array(all_item_ids)
+        logger.info(f"\n7. 所有item_id的统计:")
+        logger.info(f"  均值: {np.mean(item_id_array):.2f}")
+        logger.info(f"  中位数: {np.median(item_id_array):.2f}")
+        logger.info(f"  95分位数: {np.percentile(item_id_array, 95):.2f}")
+        logger.info(f"  空置率 (item_id=0): {np.sum(item_id_array == 0) / len(item_id_array):.4f}")
+
+    # 8. DataLoader配置验证
+    logger.info(f"\n8. DataLoader配置验证")
+    logger.info(f"config.item_vocab_size 赋值: {data['num_items']}")
+    logger.info(f"config.user_vocab_size 赋值: {data['num_users']}")
+    logger.info(f"text_features 最终shape: {data['text_features'].shape}")
+    logger.info(f"image_features 最终shape: {data['image_features'].shape}")
+    logger.info(
+        f"item_vocab_size vs text_features维度: {data['num_items']} vs {data['text_features'].shape[0] - 1} (减1是padding)")
+    logger.info(f"维度匹配验证: {data['num_items'] == data['text_features'].shape[0] - 1}")
+
+    logger.info("=" * 80)
+    logger.info("========== 验证完成 ==========")
+    logger.info("=" * 80)
+
     """
        data的格式
        {
@@ -1470,6 +1589,133 @@ def get_pmat_dataloader(
         with open(cache_file_name, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
+    logger.info("=" * 80)
+    logger.info("========== 物品ID连续性验证 ==========")
+    logger.info("=" * 80)
+
+    # 1. 原始物品ID分析（从item_mapping反推）
+    logger.info("1. 原始物品ID分布验证")
+    original_item_ids = list(data['item_mapping'].keys())
+    logger.info(f"原始物品ID数量: {len(original_item_ids)}")
+
+    # 尝试转换为数字（如果是字符串ID）
+    numeric_item_ids = []
+    for item_id in original_item_ids:
+        try:
+            numeric_item_ids.append(int(item_id))
+        except (ValueError, TypeError):
+            continue
+
+    if numeric_item_ids:
+        logger.info(f"可转换为数字的物品ID范围: min={min(numeric_item_ids)}, max={max(numeric_item_ids)}")
+        logger.info(f"数字ID的跨度: {max(numeric_item_ids) - min(numeric_item_ids)}")
+        logger.info(f"有效物品数/ID跨度比: {len(numeric_item_ids)}/{max(numeric_item_ids) - min(numeric_item_ids):.4f}")
+    else:
+        logger.info("物品ID为非数字格式，无法计算数值范围")
+
+    # 2. 映射后物品ID分析
+    logger.info("\n2. 映射后物品ID验证")
+    mapped_item_ids = list(data['item_mapping'].values())
+    logger.info(f"映射后物品ID数量: {len(mapped_item_ids)}")
+    logger.info(f"映射后物品ID范围: min={min(mapped_item_ids)}, max={max(mapped_item_ids)}")
+    logger.info(f"映射后ID是否连续: {max(mapped_item_ids) == len(mapped_item_ids) - 1}")
+
+    # 检查是否有间隙
+    all_expected_ids = set(range(len(mapped_item_ids)))
+    actual_ids = set(mapped_item_ids)
+    missing_ids = all_expected_ids - actual_ids
+    logger.info(f"映射后ID缺失数量: {len(missing_ids)}")
+    if missing_ids:
+        logger.info(f"缺失的ID示例: {list(missing_ids)[:10]}")
+
+    # 3. 数据集核心信息验证
+    logger.info("\n3. 数据集核心信息验证")
+    logger.info(f"最终物品总数 (num_items): {data['num_items']}")
+    logger.info(
+        f"文本特征覆盖的物品数: {len(data['text_features']) if isinstance(data['text_features'], dict) else data['text_features'].shape[0]}")
+    logger.info(
+        f"图像特征覆盖的物品数: {len(data['image_features']) if isinstance(data['image_features'], dict) else data['image_features'].shape[0]}")
+
+    # 4. 用户序列ID验证
+    logger.info("\n4. 用户序列ID验证")
+    # 抽样检查前5个用户的序列
+    sample_users = list(data['user_sequences'].keys())[:5]
+    for user_id in sample_users:
+        seq = data['user_sequences'][user_id]
+        item_indices = seq.get('item_indices', [])
+        logger.info(f"用户{user_id}的序列: {item_indices[:10]}... (长度: {len(item_indices)})")
+        logger.info(f"用户{user_id}序列中最大item_id: {max(item_indices) if item_indices else 0}")
+        logger.info(f"用户{user_id}序列中最小item_id: {min(item_indices) if item_indices else 0}")
+
+    # 5. 特征张量最终验证
+    logger.info("\n5. 特征张量最终验证")
+    logger.info(f"num_items (原始): {data['num_items']}")
+    logger.info(
+        f"text_features shape: {data['text_features'].shape if isinstance(data['text_features'], torch.Tensor) else 'dict'}")
+    logger.info(
+        f"image_features shape: {data['image_features'].shape if isinstance(data['image_features'], torch.Tensor) else 'dict'}")
+
+    if isinstance(data['text_features'], torch.Tensor):
+        logger.info(f"text_features 维度0 (含padding): {data['text_features'].shape[0]}")
+        logger.info(f"padding预留位置验证: {data['text_features'].shape[0] == data['num_items'] + 1}")
+
+    # 6. 数据范围深度验证
+    logger.info("\n6. 数据范围深度验证")
+    num_items = data['num_items']
+    num_users = data['num_users']
+
+    # 检查所有序列中的item_id
+    all_sequences = {**data['train_sequences'], **data['val_sequences'], **data['test_sequences']}
+    max_item_id = 0
+    max_user_id = 0
+    invalid_items = []
+    total_items = 0
+
+    for user_id, seq in all_sequences.items():
+        max_user_id = max(max_user_id, user_id)
+        item_indices = seq.get('item_indices', [])
+        total_items += len(item_indices)
+
+        for item_id in item_indices:
+            max_item_id = max(max_item_id, item_id)
+            if item_id > num_items:
+                invalid_items.append((user_id, item_id))
+
+    logger.info(f"num_users: {num_users}, max_user_id: {max_user_id}, 是否匹配: {max_user_id == num_users - 1}")
+    logger.info(f"num_items: {num_items}, max_item_id: {max_item_id}, 是否匹配: {max_item_id == num_items - 1}")
+    logger.info(f"总物品交互数: {total_items}")
+    logger.info(f"无效item_id数量: {len(invalid_items)}")
+
+    if invalid_items:
+        logger.warning(f"无效item_id示例: {invalid_items[:10]}")
+        logger.warning(f"无效item_id最大值: {max([x[1] for x in invalid_items]) if invalid_items else 0}")
+
+    # 7. item_id分布统计
+    all_item_ids = []
+    for user_id, seq in all_sequences.items():
+        all_item_ids.extend(seq.get('item_indices', []))
+
+    if all_item_ids:
+        item_id_array = np.array(all_item_ids)
+        logger.info(f"\n7. 所有item_id的统计:")
+        logger.info(f"  均值: {np.mean(item_id_array):.2f}")
+        logger.info(f"  中位数: {np.median(item_id_array):.2f}")
+        logger.info(f"  95分位数: {np.percentile(item_id_array, 95):.2f}")
+        logger.info(f"  空置率 (item_id=0): {np.sum(item_id_array == 0) / len(item_id_array):.4f}")
+
+    # 8. DataLoader配置验证
+    logger.info(f"\n8. DataLoader配置验证")
+    logger.info(f"config.item_vocab_size 赋值: {data['num_items']}")
+    logger.info(f"config.user_vocab_size 赋值: {data['num_users']}")
+    logger.info(f"text_features 最终shape: {data['text_features'].shape}")
+    logger.info(f"image_features 最终shape: {data['image_features'].shape}")
+    logger.info(
+        f"item_vocab_size vs text_features维度: {data['num_items']} vs {data['text_features'].shape[0] - 1} (减1是padding)")
+    logger.info(f"维度匹配验证: {data['num_items'] == data['text_features'].shape[0] - 1}")
+
+    logger.info("=" * 80)
+    logger.info("========== 验证完成 ==========")
+    logger.info("=" * 80)
     # 更新config
     config.item_vocab_size = data['num_items']
     config.user_vocab_size = data['num_users']

@@ -995,7 +995,7 @@ def apply_args_to_config(args):
     """将命令行参数应用到config"""
     # 根据quick模式设置默认参数
     if args.quick:
-        config.epochs = args.epochs if args.epochs is not None else 25
+        config.epochs = args.epochs if args.epochs is not None else 50
         config.batch_size = args.batch_size if args.batch_size is not None else 32
         config.category = "Video_Games"
     else:

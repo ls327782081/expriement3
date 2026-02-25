@@ -22,7 +22,7 @@ class BaseConfig:
     batch_size: int = 64  # 增加batch size以加快训练
     gradient_accumulation_steps: int = 1  # 不使用梯度累积
     epochs: int = 5  # 减少到5个epoch以节省时间
-    lr: float = 1e-4
+    lr: float = 1e-3
     weight_decay: float = 1e-5
     warmup_steps: int = 5
     max_grad_norm: float = 1.0
@@ -32,11 +32,15 @@ class BaseConfig:
     id_length: int = 8  # ID长度
     codebook_size: int = 1024  # 码本规模
 
-    # 模型配置
-    attention_heads: int = 4
+    # sasrec模型配置
+    attention_heads: int = 2
+    num_transformer_blocks: int = 2
     hidden_dim: int = 64
+    inner_size: int = 256  # 前馈网络内部维度
     mlp_dim: int = 512
     dropout: float = 0.5
+    initializer_range    : float = 0.02  # 初始化范围
+    layer_norm_eps: float = 1e-12  # LayerNorm epsilon
 
     # 多模态配置
     num_modalities: int = 2  # 视觉+文本（实际使用的模态数量）
