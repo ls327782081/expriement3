@@ -36,7 +36,7 @@ class RecBoleSASRec(AbstractTrainableModel):
 
         # 1. 物品Embedding（RecBole官方：共享权重）
         self.item_embedding = nn.Embedding(
-            self.n_items,
+            self.n_items + 1,
             self.hidden_size,
             padding_idx=0
         )
