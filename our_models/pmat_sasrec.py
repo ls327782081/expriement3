@@ -357,7 +357,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         text_encoded = self.item_encoder.multimodal_encoder.text_encoder(text_feat.float())
         visual_encoded = self.item_encoder.multimodal_encoder.visual_encoder(visual_feat.float())
 
-        temperature = getattr(self.config, 'pretrain_temperature', 0.07)
+        temperature = getattr(self.config, 'pretrain_temperature', 0.8)
 
         # ===== 模态内对比损失 =====
         # 同一batch内，同一物品的不同表征应该相似
@@ -388,11 +388,18 @@ class PMAT_SASRec(AbstractTrainableModel):
 
         total_loss = intra_weight * intra_loss + inter_weight * inter_loss
 
+        print(f"\n===== Stage1对比损失 (step={self.current_stage_epoch}) =====")
+        print(f"intra_loss (模态内): {intra_loss.item():.4f}")
+        print(f"inter_loss (模态间): {inter_loss.item():.4f}")
+        print(f"total_loss (总损失): {total_loss.item():.4f}")
+        print(f"sim_matrix均值: {sim_matrix.mean().item():.4f}")  # 新增：相似度矩阵均值
+        print(f"sim_tv均值: {sim_tv.mean().item():.4f}")
+
         return {
-            'total_loss': total_loss,
-            'intra_loss': intra_loss,
-            'inter_loss': inter_loss
-        }
+                'total_loss': total_loss,
+                'intra_loss': intra_loss,
+                'inter_loss': inter_loss
+            }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         cache_key = (seq_len, device)
@@ -631,31 +638,31 @@ class PMAT_SASRec(AbstractTrainableModel):
         # ===== 2. 语义ID损失（辅助任务）=====
         device = target_items.device
 
-        try:
-            target_semantic_ids = item_id_to_semantic_id(
-                target_items,
-                self.config.id_length,
-                self.config.codebook_size
-            ).to(device)
-        except Exception as e:
-            import warnings
-            warnings.warn(f"语义ID转换失败: {e}")
-            batch_size = target_items.size(0)
-            target_semantic_ids = torch.randint(
-                0, self.config.codebook_size,
-                (batch_size, self.config.id_length),
-                device=device
-            )
-
-        pos_semantic_logits = outputs['pos_semantic_logits']
-        semantic_loss = F.cross_entropy(
-            pos_semantic_logits.reshape(-1, self.config.codebook_size),
-            target_semantic_ids.reshape(-1)
-        )
-        losses['semantic_loss'] = self.semantic_loss_weight * semantic_loss
+        # try:
+        #     target_semantic_ids = item_id_to_semantic_id(
+        #         target_items,
+        #         self.config.id_length,
+        #         self.config.codebook_size
+        #     ).to(device)
+        # except Exception as e:
+        #     import warnings
+        #     warnings.warn(f"语义ID转换失败: {e}")
+        #     batch_size = target_items.size(0)
+        #     target_semantic_ids = torch.randint(
+        #         0, self.config.codebook_size,
+        #         (batch_size, self.config.id_length),
+        #         device=device
+        #     )
+        #
+        # pos_semantic_logits = outputs['pos_semantic_logits']
+        # semantic_loss = F.cross_entropy(
+        #     pos_semantic_logits.reshape(-1, self.config.codebook_size),
+        #     target_semantic_ids.reshape(-1)
+        # )
+        # losses['semantic_loss'] = self.semantic_loss_weight * semantic_loss
 
         # ===== 3. 总损失 =====
-        losses['total_loss'] = losses['ce_loss'] + losses['semantic_loss']
+        losses['total_loss'] = losses['ce_loss']
 
         return losses
 
@@ -718,7 +725,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             losses = self.compute_loss(outputs)
             metrics = {
                 'ce_loss': losses['ce_loss'].item(),
-                'semantic_loss': losses['semantic_loss'].item(),
+                # 'semantic_loss': losses['semantic_loss'].item(),
             }
             return losses['total_loss'], metrics
 
@@ -826,7 +833,12 @@ class PMAT_SASRec(AbstractTrainableModel):
                     # 过滤掉超出物品总数的ID（避免数组越界报错）
                     valid_hist_ids = valid_hist_ids[valid_hist_ids < num_items]
                     if len(valid_hist_ids) > 0:
-                        history_mask[i, valid_hist_ids] = True  # 标记为True（是历史物品）
+                        history_mask[i, valid_hist_ids] = True  # 标记历史物品
+
+                        # ===== 关键修复：把目标物品从屏蔽列表中移除 =====
+                        target_id = target_items[i]
+                        if target_id < num_items:  # 防止索引越界
+                            history_mask[i, target_id] = False  # 允许模型选中目标物品
 
                 # 关键：把历史物品的分数设为-inf，使其不参与排名
                 all_scores = all_scores.masked_fill(history_mask, -float('inf'))
@@ -841,138 +853,36 @@ class PMAT_SASRec(AbstractTrainableModel):
         all_ranks = torch.cat(all_ranks, dim=0).float()
 
         # 计算指标
-        metrics = self._compute_full_ranking_metrics(all_ranks, num_items)
+        metrics = self._compute_metrics(all_ranks, k_list=[5, 10, 20])
 
         return metrics
 
-    def _compute_full_ranking_metrics(
-        self,
-        ranks: torch.Tensor,
-        num_items: int,
-        k_list: List[int] = [1, 5, 10, 20]
-    ) -> Dict[str, float]:
-        """计算Full Ranking评估指标
-
-        Args:
-            ranks: (num_samples,) 每个样本的目标物品排名（1-based）
-            num_items: 总物品数量
-            k_list: 计算指标的K值列表
-
-        Returns:
-            metrics: 各项推荐指标
-        """
+    def _compute_metrics(self, ranks: torch.Tensor, k_list: List[int] = [5, 10, 20]) -> Dict[str, float]:
         metrics = {}
-        num_samples = ranks.size(0)
-
         for k in k_list:
-            # HR@K: 目标物品排名在前K的比例
             hits = (ranks <= k).float()
             metrics[f'HR@{k}'] = hits.mean().item()
+            metrics[f'hit@{k}'] = hits.mean().item()  # 新增：RecBole原生hit@k
+            metrics[f'recall@{k}'] = hits.mean().item()  # 新增：RecBole原生recall@k（单目标下=hit@k）
 
-            # NDCG@K: 只有排名在前K的才有贡献
-            dcg = (ranks <= k).float() / torch.log2(ranks.float() + 1)
+            dcg = 1.0 / torch.log2(ranks.clamp(min=1).float() + 1)
+            dcg = torch.where(ranks <= k, dcg, torch.zeros_like(dcg))
             metrics[f'NDCG@{k}'] = dcg.mean().item()
+            metrics[f'ndcg@{k}'] = dcg.mean().item()  # 新增：RecBole原生ndcg@k
 
-            # MRR@K: 只考虑排名在前K的
-            mrr = (ranks <= k).float() / ranks.float()
-            metrics[f'MRR@{k}'] = mrr.mean().item()
+            rr = 1.0 / ranks.clamp(min=1).float()
+            rr = torch.where(ranks <= k, rr, torch.zeros_like(rr))
+            metrics[f'MRR@{k}'] = rr.mean().item()
+            metrics[f'mrr@{k}'] = rr.mean().item()  # 新增：RecBole原生mrr@k
 
-        # 全局MRR
-        metrics['MRR'] = (1.0 / ranks.float()).mean().item()
+            # 新增：RecBole原生precision@k
+            precision = (ranks <= k).float() / k
+            metrics[f'precision@{k}'] = precision.mean().item()
 
-        # 平均排名
+        metrics['MRR'] = (1.0 / ranks.clamp(min=1).float()).mean().item()
         metrics['Mean_Rank'] = ranks.mean().item()
-
         return metrics
 
-    def _compute_recommendation_metrics(
-        self,
-        pos_scores: torch.Tensor,
-        neg_scores: torch.Tensor,
-        k_list: List[int] = [1, 5, 10, 20]
-    ) -> Dict[str, float]:
-        """计算推荐指标（已废弃，保留用于兼容性）
-
-        注意：此方法使用Sampled Evaluation，已被Full Ranking替代
-        """
-        metrics = {}
-        num_samples = pos_scores.size(0)
-        num_neg = neg_scores.size(1)
-
-        all_scores = torch.cat([pos_scores.unsqueeze(1), neg_scores], dim=1)
-        _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)
-        predictions = sorted_indices.tolist()
-        ground_truth = [[0] for _ in range(num_samples)]
-
-        for k in k_list:
-            precision = 0.0
-            recall = 0.0
-            ndcg = 0.0
-            mrr_k = 0.0
-
-            for i in range(num_samples):
-                pred_k = predictions[i][:k]
-                gt = ground_truth[i]
-
-                hits = len(set(pred_k) & set(gt))
-                precision += hits / k
-                recall += hits / len(gt) if len(gt) > 0 else 0
-
-                dcg = 0.0
-                for j, item in enumerate(pred_k):
-                    if item in gt:
-                        dcg += 1.0 / np.log2(j + 2)
-                idcg = 1.0 / np.log2(2)
-                ndcg += dcg / idcg if idcg > 0 else 0
-
-                for j, item in enumerate(pred_k):
-                    if item in gt:
-                        mrr_k += 1.0 / (j + 1)
-                        break
-
-            metrics[f'Precision@{k}'] = precision / num_samples
-            metrics[f'Recall@{k}'] = recall / num_samples
-            metrics[f'HR@{k}'] = recall / num_samples
-            metrics[f'NDCG@{k}'] = ndcg / num_samples
-            metrics[f'MRR@{k}'] = mrr_k / num_samples
-
-        # 计算MRR (不限制K)
-        # 计算排名（降序排列后正样本的位置）
-        _, indices = torch.sort(all_scores, dim=1, descending=True)
-        ranks = (indices == 0).nonzero(as_tuple=True)[1] + 1  # 1-based rank
-        ranks = ranks.float()
-        mrr = (1.0 / ranks).mean().item()
-        metrics['MRR'] = mrr
-
-        # 计算AUC
-        # 正样本分数大于负样本分数的比例
-        pos_expanded = pos_scores.unsqueeze(1)  # (num_samples, 1)
-        auc = (pos_expanded > neg_scores).float().mean().item()
-        metrics['AUC'] = auc
-
-        # 计算MAP (Mean Average Precision)
-        map_score = 0.0
-        for i in range(num_samples):
-            pred = predictions[i]
-            gt = ground_truth[i]
-            hits = 0
-            precision_sum = 0.0
-            for j, item in enumerate(pred):
-                if item in gt:
-                    hits += 1
-                    precision_sum += hits / (j + 1)
-            map_score += precision_sum / len(gt) if len(gt) > 0 else 0.0
-        metrics['MAP'] = map_score / num_samples
-
-        # 计算Coverage@K (使用最大的K)
-        max_k = max(k_list)
-        all_items = set(range(num_neg + 1))  # 所有可能的物品ID
-        recommended_items = set()
-        for i in range(num_samples):
-            recommended_items.update(predictions[i][:max_k])
-        metrics[f'Coverage@{max_k}'] = len(recommended_items) / len(all_items) if all_items else 0.0
-
-        return metrics
 
     def predict(
         self,
