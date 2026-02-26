@@ -388,13 +388,6 @@ class PMAT_SASRec(AbstractTrainableModel):
 
         total_loss = intra_weight * intra_loss + inter_weight * inter_loss
 
-        print(f"\n===== Stage1对比损失 (step={self.current_stage_epoch}) =====")
-        print(f"intra_loss (模态内): {intra_loss.item():.4f}")
-        print(f"inter_loss (模态间): {inter_loss.item():.4f}")
-        print(f"total_loss (总损失): {total_loss.item():.4f}")
-        print(f"sim_matrix均值: {sim_matrix.mean().item():.4f}")  # 新增：相似度矩阵均值
-        print(f"sim_tv均值: {sim_tv.mean().item():.4f}")
-
         return {
                 'total_loss': total_loss,
                 'intra_loss': intra_loss,
