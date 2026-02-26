@@ -632,7 +632,7 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
         # 冻结序列编码器，只训练物品编码器
         model.freeze_sequence_encoder()
 
-        stage1_epochs = getattr(config, 'stage1_epochs', 3)
+        stage1_epochs = getattr(config, 'stage1_epochs', 10)
         stage1_lr = getattr(config, 'stage1_lr', 1e-3)
 
         stage1_config = StageConfig(
@@ -662,7 +662,7 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
         logger.info("预计算所有物品表征...")
         model.set_all_item_features(all_item_features)
 
-        stage2_epochs = getattr(config, 'stage2_epochs', 5)
+        stage2_epochs = getattr(config, 'stage2_epochs', 50)
         stage2_lr = getattr(config, 'stage2_lr', 1e-4)
 
         stage2_config = StageConfig(

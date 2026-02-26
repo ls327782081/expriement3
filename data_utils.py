@@ -6,6 +6,7 @@ import time
 import gc
 import json
 import numpy as np
+import pandas
 import pandas as pd
 import torch
 import requests
@@ -1577,7 +1578,7 @@ def get_pmat_dataloader(
     if os.path.exists(cache_file_name):
         logger.info(f"Loading cached data from {cache_file_name}")
         with open(cache_file_name, "rb") as f:
-            data = pickle.load(f)
+            data = pandas.read_pickle(f)
 
     if data is None:
         processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)

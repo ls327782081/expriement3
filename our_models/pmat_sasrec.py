@@ -37,10 +37,6 @@ from our_models.pmat import (
     UserItemMatcher
 )
 
-# 复用SASRec的Transformer块
-from baseline_models.sasrec import TransformerBlock
-
-
 class PMATItemEncoder(nn.Module):
     """PMAT风格的物品编码器
 
@@ -163,14 +159,30 @@ class PMATItemEncoder(nn.Module):
             # 根据漂移分数动态更新语义ID嵌入
             # 需要处理维度匹配
             if quantized_emb.size(0) != drift_score.size(0):
-                num_items_per_user = quantized_emb.size(0) // drift_score.size(0)
-                quantized_emb_reshaped = quantized_emb.view(drift_score.size(0), num_items_per_user, -1)
-                fused_feat_reshaped = fused_feat.view(drift_score.size(0), num_items_per_user, -1)
-                quantized_emb_updated = self.dynamic_updater.update(
-                    quantized_emb_reshaped, fused_feat_reshaped, drift_score
-                )
-                quantized_emb = quantized_emb_updated.view(-1, self.hidden_dim)
+                num_users = drift_score.size(0)
+                num_items_total = quantized_emb.size(0)
+
+                # 关键：检查是否能整除，避免view操作崩溃
+                if num_items_total % num_users != 0:
+                    # 无法整除时，跳过动态更新（不报错，保留训练）
+                    import warnings
+                    warnings.warn(
+                        f"物品数量({num_items_total})不能被用户数量({num_users})整除，跳过本轮动态ID更新",
+                        UserWarning
+                    )
+                    # 直接跳过后续更新逻辑，避免崩溃
+                    pass
+                else:
+                    # 能整除时，执行你的原有逻辑
+                    num_items_per_user = num_items_total // num_users
+                    quantized_emb_reshaped = quantized_emb.view(num_users, num_items_per_user, -1)
+                    fused_feat_reshaped = fused_feat.view(num_users, num_items_per_user, -1)
+                    quantized_emb_updated = self.dynamic_updater.update(
+                        quantized_emb_reshaped, fused_feat_reshaped, drift_score
+                    )
+                    quantized_emb = quantized_emb_updated.view(-1, self.hidden_dim)
             else:
+                # 维度匹配时，正常更新
                 quantized_emb = self.dynamic_updater.update(quantized_emb, fused_feat, drift_score)
 
         # 6. 组合: concat + projection
@@ -383,91 +395,78 @@ class PMAT_SASRec(AbstractTrainableModel):
         }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        """获取因果掩码（带缓存）"""
         cache_key = (seq_len, device)
         if cache_key not in self._causal_mask_cache:
-            causal_mask = torch.triu(
-                torch.ones(seq_len, seq_len, device=device) * float('-inf'),
-                diagonal=1
-            )
-            self._causal_mask_cache[cache_key] = causal_mask
+            mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
+            mask = mask.masked_fill(mask == 1, float('-inf'))
+            self._causal_mask_cache[cache_key] = mask
         return self._causal_mask_cache[cache_key]
 
+    def clear_causal_mask_cache(self):
+        """清理因果掩码缓存（释放显存，关键优化）"""
+        self._causal_mask_cache.clear()
+        # 可选：打印清理日志，方便调试
+        # print(f"因果掩码缓存已清理，释放显存约 {len(self._causal_mask_cache)} 个掩码")
+
+
     def encode_sequence(
-        self,
-        text_feat: torch.Tensor,
-        vision_feat: torch.Tensor,
-        seq_lens: torch.Tensor
+            self,
+            text_feat: torch.Tensor,
+            vision_feat: torch.Tensor,
+            seq_lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """编码历史序列
-
-        Args:
-            text_feat: (batch, seq_len, text_dim)
-            vision_feat: (batch, seq_len, visual_dim)
-            seq_lens: (batch,) 实际序列长度
-
-        Returns:
-            user_repr: (batch, hidden_dim) 用户表示
-            seq_output: (batch, seq_len, hidden_dim) 序列输出
-            semantic_logits: (batch, seq_len, id_length, codebook_size) 语义ID logits
-            short_history: (batch, short_len, hidden_dim) 短期历史（用于动态更新）
-            long_history: (batch, long_len, hidden_dim) 长期历史（用于动态更新）
-        """
+        """编码历史序列（3D因果掩码+右对齐+多模态适配）"""
         batch_size, seq_len, _ = text_feat.shape
         device = text_feat.device
 
-        # 0. 创建掩码（提前创建，用于后续处理）
-        # 注意：数据是左 padding！格式为 [PAD, PAD, ..., item1, item2, item3]
-        # padding 在前面，有效内容在后面
-        # 例如 seq_len=5, seq_lens=3 时，位置 0,1 是 padding，位置 2,3,4 是有效的
+        # ========== 1. 右对齐Padding Mask（RecBole原生） ==========
         positions = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, seq_len)
-        # padding 位置：位置 < (seq_len - history_len)
-        pad_start = seq_len - seq_lens.unsqueeze(1)  # (batch, 1)
-        padding_mask = positions < pad_start  # (batch, seq_len), True 表示 padding
+        padding_mask = positions >= seq_lens.unsqueeze(1)  # (batch, seq_len)，True=padding（末尾）
 
-        # 1. PMAT物品编码（不使用个性化权重，因为还没有用户表示）
+        # ========== 2. PMAT多模态物品编码 ==========
         item_emb, semantic_logits, _ = self.item_encoder(
             text_feat, vision_feat, return_semantic_logits=True
         )  # (batch, seq_len, hidden_dim)
 
-        # 2. 添加位置嵌入
-        # 对于左 padding，我们需要给有效位置分配正确的位置编码
-        # 有效位置从 0 开始编号（相对位置）
-        pos_indices = positions - pad_start  # 相对位置
-        pos_indices = pos_indices.clamp(min=0, max=self.max_seq_len - 1)
+        # ========== 3. 右对齐位置编码（RecBole原生） ==========
+        pos_indices = positions.clamp(min=0, max=self.max_seq_len - 1)
         seq_emb = item_emb + self.pos_emb(pos_indices)
 
-        # 3. 处理 padding 位置：将 padding 位置的嵌入设为小的随机值
-        padding_mask_expanded = padding_mask.unsqueeze(-1).expand_as(seq_emb)
-        noise = torch.randn_like(seq_emb) * 0.01
-        seq_emb = torch.where(padding_mask_expanded, noise.detach(), seq_emb)
+        # ========== 4. Padding位置设为0（RecBole原生） ==========
+        padding_mask_expanded = padding_mask.unsqueeze(-1).expand(seq_emb.size())
+        seq_emb = seq_emb.masked_fill(padding_mask_expanded, 0.0)
 
-        # 4. LayerNorm + Dropout
+        # ========== 5. LayerNorm + Dropout（Pre-LN） ==========
         seq_emb = self.input_layer_norm(seq_emb)
         seq_emb = self.dropout(seq_emb)
 
-        # Causal mask: 上三角为 -inf，防止看到未来
-        causal_mask = self._get_causal_mask(seq_len, device)
+        # ========== 6. 2D因果掩码（PyTorch兼容+RecBole原生） ==========
+        # 移除batch_size参数，仅传seq_len和device
+        causal_mask = self._get_causal_mask(seq_len, device)  # [seq_len, seq_len]
 
-        # 5. Transformer编码
+        # ========== 7. Transformer编码（2D掩码+Padding Mask） ==========
         for block in self.transformer_blocks:
-            seq_emb = block(seq_emb, padding_mask=padding_mask, causal_mask=causal_mask)
+            seq_emb = block(
+                seq_emb,
+                padding_mask=padding_mask,  # [batch, seq_len] 2D Padding Mask
+                attn_mask=causal_mask  # [seq_len, seq_len] 2D因果掩码（自动广播到整个批次）
+            )
 
-        # 处理可能的 NaN（保护措施）
+        # 防止NaN（保护措施）
         seq_emb = torch.nan_to_num(seq_emb, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # 6. 获取用户表示（最后一个位置，即序列末尾）
-        # 对于左 padding，最后一个有效位置就是 seq_len - 1
-        user_repr = seq_emb[:, -1, :]  # (batch, hidden_dim)
+        # ========== 8. 提取用户表征（最后有效位置，RecBole原生） ==========
+        last_indices = torch.clamp(seq_lens - 1, min=0)  # (batch,)
+        batch_idx = torch.arange(batch_size, device=device)
+        user_repr = seq_emb[batch_idx, last_indices, :]  # (batch, hidden_dim)
 
-        # 7. 用户投影层
+        # ========== 9. 用户投影层 ==========
         user_repr = self.user_projection(user_repr)
 
-        # 8. 准备短期和长期历史（用于动态ID更新）
-        # 对于左 padding，最后 short_len 个位置是最近的历史
+        # ========== 10. 短期/长期历史 ==========
         short_len = min(getattr(self.config, 'short_history_len', 10), seq_len)
-        short_history = seq_emb[:, -short_len:, :]  # (batch, short_len, hidden)
-        long_history = seq_emb  # (batch, seq_len, hidden)
+        short_history = seq_emb[:, -short_len:, :]
+        long_history = seq_emb
 
         return user_repr, seq_emb, semantic_logits, short_history, long_history
 
@@ -668,6 +667,10 @@ class PMAT_SASRec(AbstractTrainableModel):
         weight_decay = stage_kwargs.get('weight_decay', 0.01)
         return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
 
+    def _get_scheduler(self, optimizer: torch.optim.Optimizer, stage_id: int, stage_kwargs: Dict) -> torch.optim.lr_scheduler.LRScheduler:
+        """RecBole官方：StepLR（不是余弦退火）"""
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=1.0)
+
     def _get_optimizer_state_dict(self) -> Dict:
         """获取优化器状态"""
         optimizer_states = {}
@@ -730,6 +733,8 @@ class PMAT_SASRec(AbstractTrainableModel):
         使用Full Ranking评估协议：对所有物品计算分数，然后排序
         """
         self.eval()
+
+        self.clear_causal_mask_cache()
 
         # 获取所有物品特征（从stage_kwargs中获取）
         all_item_features = stage_kwargs.get('all_item_features', None)
@@ -801,6 +806,30 @@ class PMAT_SASRec(AbstractTrainableModel):
                 user_repr_norm = F.normalize(user_repr, dim=-1)
                 # 注意：all_item_repr 已经在 set_all_item_features 中预先归一化了
                 all_scores = torch.matmul(user_repr_norm, all_item_repr.T) / temperature  # (batch, num_items)
+
+                history_item_ids = batch['history_items']  # (batch, seq_len)
+
+                # 初始化历史掩码：(batch, num_items)，默认False（非历史物品）
+                history_mask = torch.zeros_like(all_scores, dtype=torch.bool, device=self.device)
+
+                # 遍历每个用户，标记其历史物品
+                for i in range(batch_size):
+                    # 步骤1：过滤PAD值（右对齐下PAD=0，不是真实物品ID）
+                    user_hist_ids = history_item_ids[i]
+                    valid_hist_ids = user_hist_ids[user_hist_ids != 0]  # 只保留非PAD的历史物品ID
+
+                    # 步骤2：跳过无历史的用户
+                    if len(valid_hist_ids) == 0:
+                        continue
+
+                    # 步骤3：标记历史物品（防止索引越界）
+                    # 过滤掉超出物品总数的ID（避免数组越界报错）
+                    valid_hist_ids = valid_hist_ids[valid_hist_ids < num_items]
+                    if len(valid_hist_ids) > 0:
+                        history_mask[i, valid_hist_ids] = True  # 标记为True（是历史物品）
+
+                # 关键：把历史物品的分数设为-inf，使其不参与排名
+                all_scores = all_scores.masked_fill(history_mask, -float('inf'))
 
                 # 3. 计算目标物品的排名
                 target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
@@ -1013,3 +1042,52 @@ class PMAT_SASRec(AbstractTrainableModel):
             item_embedding = torch.cat([item_repr, quantized_emb], dim=-1)
             return item_embedding
 
+
+class TransformerBlock(nn.Module):
+    """适配3D因果掩码的TransformerBlock（兼容多模态）"""
+
+    def __init__(self, hidden_dim, num_heads, dropout_rate):
+        super().__init__()
+        self.attention = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout_rate,
+            batch_first=True  # 必须设为True，适配3D掩码
+        )
+        self.feed_forward = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim * 4, hidden_dim)
+        )
+        self.layer_norm1 = nn.LayerNorm(hidden_dim)
+        self.layer_norm2 = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout_rate)
+
+    def forward(self, x, padding_mask=None, attn_mask=None):
+        """
+        Args:
+            x: [batch_size, seq_len, hidden_dim]
+            padding_mask: [batch_size, seq_len] 2D Padding Mask（True=padding）
+            attn_mask: [batch_size, seq_len, seq_len] 3D因果掩码
+        """
+        # Pre-LN（RecBole原生）
+        x_norm = self.layer_norm1(x)
+
+        # 自注意力（支持3D attn_mask）
+        attn_output, _ = self.attention(
+            query=x_norm,
+            key=x_norm,
+            value=x_norm,
+            key_padding_mask=padding_mask,  # 2D Padding Mask
+            attn_mask=attn_mask,  # 3D因果掩码
+            need_weights=False
+        )
+        x = x + self.dropout(attn_output)
+
+        # 前馈网络
+        x_norm = self.layer_norm2(x)
+        ff_output = self.feed_forward(x_norm)
+        x = x + self.dropout(ff_output)
+
+        return x
