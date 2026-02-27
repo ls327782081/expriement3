@@ -1398,6 +1398,12 @@ class PMATDataset(Dataset):
             if neg_item not in user_items and neg_item not in negatives:
                 negatives.append(neg_item)
 
+        # 校验：负样本是否真的不在交互列表中
+        invalid = [n for n in negatives if n in user_items]
+        if invalid:
+            print(f"[负采样验证] 用户{user_id}：交互物品数={len(user_items)}, 采样负样本={negatives}")
+            print(f"⚠️  用户{user_id}负采样错误：{invalid}在交互列表中！")
+
         return negatives
 
     def __getitem__(self, idx):

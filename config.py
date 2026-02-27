@@ -75,7 +75,7 @@ class BaseConfig:
     stage2_lr: float = 1e-4  # 阶段2学习率
 
     # 阶段1：物品编码器预训练（对比学习）
-    pretrain_temperature: float = 0.8  # 对比学习温度
+    pretrain_temperature: float = 0.1  # 对比学习温度
     pretrain_intra_weight: float = 1.0  # 模态内对比损失权重
     pretrain_inter_weight: float = 0.5  # 模态间对比损失权重
 

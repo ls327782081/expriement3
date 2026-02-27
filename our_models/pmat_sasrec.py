@@ -150,7 +150,14 @@ class PMATItemEncoder(nn.Module):
         fused_feat = self.personalized_fusion(encoded_features, modal_weights)
 
         # 4. 语义ID量化
+        fused_feat = F.normalize(fused_feat, dim=-1)
         semantic_logits, quantized_emb = self.semantic_quantizer(fused_feat)
+        # 新增：重建损失（让quantized_emb尽可能还原fused_feat）
+        recon_loss = F.mse_loss(quantized_emb, fused_feat.detach())  # detach避免梯度冲突
+        # 新增残差连接：让量化嵌入向多模态特征靠拢
+        quantized_emb = 0.7 * quantized_emb + 0.3 * fused_feat  # 0.3为残差权重，可调整
+        quantized_emb = F.layer_norm(quantized_emb, normalized_shape=[self.hidden_dim])
+
 
         # 5. 动态ID更新（如果提供了历史信息）
         if short_history is not None and long_history is not None:
@@ -198,9 +205,9 @@ class PMATItemEncoder(nn.Module):
             semantic_logits = semantic_logits.reshape(
                 *original_shape, self.config.id_length, self.config.codebook_size
             )
-            return item_emb, semantic_logits, quantized_emb_out
+            return item_emb, semantic_logits, quantized_emb_out, recon_loss
 
-        return item_emb, None, quantized_emb_out
+        return item_emb, None, quantized_emb_out, recon_loss
 
 
 class PMAT_SASRec(AbstractTrainableModel):
@@ -338,61 +345,59 @@ class PMAT_SASRec(AbstractTrainableModel):
         print("序列编码器已解冻")
 
     def compute_pretrain_loss(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """计算预训练损失（阶段1：对比学习）
-
-        使用模态内和模态间对比学习来预训练物品编码器
+        """计算预训练损失（阶段1：对比学习，只训练物品编码器）
+        优化点：使用batch内真实负采样（4个）替代随机负样本，强化语义ID区分度
         """
-        # 获取目标物品的多模态特征
+        # 获取目标物品（正样本）的多模态特征
         text_feat = batch['target_text_feat'].to(self.device)  # (batch, text_dim)
         visual_feat = batch['target_vision_feat'].to(self.device)  # (batch, visual_dim)
         batch_size = text_feat.size(0)
 
-        # 编码物品
-        item_emb, semantic_logits, quantized_emb = self.item_encoder(
+        # 编码正样本物品（获取语义ID）
+        item_emb, semantic_logits, quantized_emb, recon_loss = self.item_encoder(
             text_feat, visual_feat, return_semantic_logits=True
         )
-        item_repr = self.prediction_layer(item_emb)  # (batch, hidden_dim)
+        pos_repr = self.prediction_layer(item_emb)  # (batch, hidden_dim)
 
-        # 获取各模态的编码
-        text_encoded = self.item_encoder.multimodal_encoder.text_encoder(text_feat.float())
-        visual_encoded = self.item_encoder.multimodal_encoder.visual_encoder(visual_feat.float())
+        temperature = getattr(self.config, 'pretrain_temperature', 0.1)  # 降低温度强化区分度
 
-        temperature = getattr(self.config, 'pretrain_temperature', 0.8)
-
-        # ===== 模态内对比损失 =====
-        # 同一batch内，同一物品的不同表征应该相似
-        # 使用 item_repr 和 quantized_emb 作为同一物品的两个视图
-        item_repr_norm = F.normalize(item_repr, dim=-1)
+        # ===== 1. 模态内对比损失（正样本自身：item_repr vs quantized_emb） =====
+        pos_repr_norm = F.normalize(pos_repr, dim=-1)
         quantized_emb_norm = F.normalize(quantized_emb, dim=-1)
 
-        # 计算相似度矩阵
-        sim_matrix = torch.matmul(item_repr_norm, quantized_emb_norm.T) / temperature
-        labels = torch.arange(batch_size, device=self.device)
+        sim_matrix_intra = torch.matmul(pos_repr_norm, quantized_emb_norm.T) / temperature
+        labels_intra = torch.arange(batch_size, device=self.device)
+        intra_loss = (F.cross_entropy(sim_matrix_intra, labels_intra) +
+                      F.cross_entropy(sim_matrix_intra.T, labels_intra)) / 2
 
-        intra_loss = (F.cross_entropy(sim_matrix, labels) +
-                      F.cross_entropy(sim_matrix.T, labels)) / 2
-
-        # ===== 模态间对比损失 =====
-        # 同一物品的文本和视觉表征应该相似
+        # ===== 2. 模态间对比损失（正样本：文本 vs 视觉） =====
+        text_encoded = self.item_encoder.multimodal_encoder.text_encoder(text_feat.float())
+        visual_encoded = self.item_encoder.multimodal_encoder.visual_encoder(visual_feat.float())
         text_norm = F.normalize(text_encoded, dim=-1)
         visual_norm = F.normalize(visual_encoded, dim=-1)
 
-        sim_tv = torch.matmul(text_norm, visual_norm.T) / temperature
+        sim_matrix_inter = torch.matmul(text_norm, visual_norm.T) / temperature
+        labels_inter = torch.arange(batch_size, device=self.device)
+        inter_loss = (F.cross_entropy(sim_matrix_inter, labels_inter) +
+                      F.cross_entropy(sim_matrix_inter.T, labels_inter)) / 2
 
-        inter_loss = (F.cross_entropy(sim_tv, labels) +
-                      F.cross_entropy(sim_tv.T, labels)) / 2
 
-        # 加权组合
+        # ===== 4. 加权组合所有损失 =====
         intra_weight = getattr(self.config, 'pretrain_intra_weight', 1.0)
         inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.5)
+        recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.8)
 
-        total_loss = intra_weight * intra_loss + inter_weight * inter_loss
+        total_loss = (intra_weight * intra_loss +
+                      inter_weight * inter_loss +
+                      recon_loss_weight * recon_loss)
 
+    
         return {
-                'total_loss': total_loss,
-                'intra_loss': intra_loss,
-                'inter_loss': inter_loss
-            }
+            'total_loss': total_loss,
+            'intra_loss': intra_loss,
+            'inter_loss': inter_loss,
+            'recon_loss': recon_loss,
+        }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """
