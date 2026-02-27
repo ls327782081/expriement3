@@ -395,12 +395,13 @@ class PMAT_SASRec(AbstractTrainableModel):
             }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        cache_key = (seq_len, device)
-        if cache_key not in self._causal_mask_cache:
-            mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
-            mask = mask.masked_fill(mask == 1, float('-inf'))
-            self._causal_mask_cache[cache_key] = mask
-        return self._causal_mask_cache[cache_key]
+        """
+            生成PyTorch Transformer专用的float型因果掩码（0=可关注，-inf=不可关注）
+            确保上三角全为-inf，对角线全为0
+            """
+        mask = (torch.triu(torch.ones(seq_len, seq_len, device=device)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
 
     def clear_causal_mask_cache(self):
         """清理因果掩码缓存（释放显存，关键优化）"""
@@ -408,31 +409,37 @@ class PMAT_SASRec(AbstractTrainableModel):
         # 可选：打印清理日志，方便调试
         # print(f"因果掩码缓存已清理，释放显存约 {len(self._causal_mask_cache)} 个掩码")
 
-
     def encode_sequence(
             self,
             text_feat: torch.Tensor,
             vision_feat: torch.Tensor,
             seq_lens: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """编码历史序列（3D因果掩码+右对齐+多模态适配）"""
+        """编码历史序列（左对齐适配版，与pure_sasrec完全一致）"""
         batch_size, seq_len, _ = text_feat.shape
         device = text_feat.device
 
-        # ========== 1. 右对齐Padding Mask（RecBole原生） ==========
-        positions = torch.arange(seq_len, device=device).unsqueeze(0)  # (1, seq_len)
-        padding_mask = positions >= seq_lens.unsqueeze(1)  # (batch, seq_len)，True=padding（末尾）
+        # ========== 1. 左对齐Padding Mask（核心修改） ==========
+        # 左对齐：padding在末尾，sum(dim=-1)==0的位置是padding
+        padding_mask = (text_feat.sum(dim=-1) == 0)  # (batch, seq_len)，True=padding（末尾）
+        # 兼容seq_lens（确保和pure_sasrec一致）
+        valid_len_mask = torch.arange(seq_len, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
+        padding_mask = padding_mask | (~valid_len_mask)  # 双重保障
 
         # ========== 2. PMAT多模态物品编码 ==========
         item_emb, semantic_logits, _ = self.item_encoder(
             text_feat, vision_feat, return_semantic_logits=True
         )  # (batch, seq_len, hidden_dim)
 
-        # ========== 3. 右对齐位置编码（RecBole原生） ==========
-        pos_indices = positions.clamp(min=0, max=self.max_seq_len - 1)
-        seq_emb = item_emb + self.pos_emb(pos_indices)
+        # ========== 3. 左对齐位置编码（核心修改） ==========
+        # 左对齐：有效位置从0开始连续编码，padding位置编码为0
+        position_ids = torch.arange(seq_len, device=device).unsqueeze(0).repeat(batch_size, 1)  # (batch, seq_len)
+        position_ids = position_ids * (~padding_mask).long()  # padding位置置0
+        # 防止位置编码越界
+        position_ids = position_ids.clamp(min=0, max=self.max_seq_len - 1)
+        seq_emb = item_emb + self.pos_emb(position_ids)
 
-        # ========== 4. Padding位置设为0（RecBole原生） ==========
+        # ========== 4. Padding位置设为0（左对齐兼容） ==========
         padding_mask_expanded = padding_mask.unsqueeze(-1).expand(seq_emb.size())
         seq_emb = seq_emb.masked_fill(padding_mask_expanded, 0.0)
 
@@ -440,22 +447,22 @@ class PMAT_SASRec(AbstractTrainableModel):
         seq_emb = self.input_layer_norm(seq_emb)
         seq_emb = self.dropout(seq_emb)
 
-        # ========== 6. 2D因果掩码（PyTorch兼容+RecBole原生） ==========
-        # 移除batch_size参数，仅传seq_len和device
+        # ========== 6. 2D因果掩码（兼容左对齐） ==========
         causal_mask = self._get_causal_mask(seq_len, device)  # [seq_len, seq_len]
 
-        # ========== 7. Transformer编码（2D掩码+Padding Mask） ==========
+        # ========== 7. Transformer编码（左对齐兼容） ==========
         for block in self.transformer_blocks:
             seq_emb = block(
                 seq_emb,
-                padding_mask=padding_mask,  # [batch, seq_len] 2D Padding Mask
-                attn_mask=causal_mask  # [seq_len, seq_len] 2D因果掩码（自动广播到整个批次）
+                padding_mask=padding_mask,  # [batch, seq_len] 左对齐Padding Mask
+                attn_mask=causal_mask  # [seq_len, seq_len] 因果掩码
             )
 
-        # 防止NaN（保护措施）
+        # 防止NaN
         seq_emb = torch.nan_to_num(seq_emb, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # ========== 8. 提取用户表征（最后有效位置，RecBole原生） ==========
+        # ========== 8. 提取用户表征（左对齐逻辑） ==========
+        # 左对齐：最后有效位置 = seq_lens - 1（和pure_sasrec一致）
         last_indices = torch.clamp(seq_lens - 1, min=0)  # (batch,)
         batch_idx = torch.arange(batch_size, device=device)
         user_repr = seq_emb[batch_idx, last_indices, :]  # (batch, hidden_dim)
@@ -463,9 +470,9 @@ class PMAT_SASRec(AbstractTrainableModel):
         # ========== 9. 用户投影层 ==========
         user_repr = self.user_projection(user_repr)
 
-        # ========== 10. 短期/长期历史 ==========
+        # ========== 10. 短期/长期历史（左对齐兼容） ==========
         short_len = min(getattr(self.config, 'short_history_len', 10), seq_len)
-        short_history = seq_emb[:, -short_len:, :]
+        short_history = seq_emb[:, -short_len:, :]  # 左对齐下，最后short_len个是最新的
         long_history = seq_emb
 
         return user_repr, seq_emb, semantic_logits, short_history, long_history
@@ -583,7 +590,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             # 使用预计算的物品表征计算 logits
             # 重要：使用 L2 归一化 + 温度缩放，避免数值不稳定
             # 注意：_all_item_repr 已经在 set_all_item_features 中预先归一化了
-            temperature = getattr(self.config, 'logit_temperature', 0.1)
+            temperature = getattr(self.config, 'logit_temperature', 0.8)
             user_repr_norm = F.normalize(user_repr, dim=-1)
             logits = torch.matmul(user_repr_norm, self._all_item_repr.T) / temperature  # (batch, num_items)
         else:
@@ -716,137 +723,232 @@ class PMAT_SASRec(AbstractTrainableModel):
             # 阶段2：训练序列模型
             outputs = self.forward(batch)
             losses = self.compute_loss(outputs)
+
             metrics = {
                 'ce_loss': losses['ce_loss'].item(),
                 # 'semantic_loss': losses['semantic_loss'].item(),
             }
             return losses['total_loss'], metrics
 
+    import torch
+    import torch.nn.functional as F
+    from typing import Dict
+
     def _validate_one_epoch(
-        self,
-        val_dataloader: torch.utils.data.DataLoader,
-        stage_id: int,
-        stage_kwargs: Dict
+            self,
+            val_dataloader: torch.utils.data.DataLoader,
+            stage_id: int,
+            stage_kwargs: Dict
     ) -> Dict:
-        """单轮验证 - Full Ranking评估
-
-        使用Full Ranking评估协议：对所有物品计算分数，然后排序
-        """
         self.eval()
-
         self.clear_causal_mask_cache()
 
-        # 获取所有物品特征（从stage_kwargs中获取）
+        # ========== 基础配置 ==========
         all_item_features = stage_kwargs.get('all_item_features', None)
         if all_item_features is None:
             raise ValueError("Full Ranking评估需要提供all_item_features")
 
-        all_text_feat = all_item_features['text'].to(self.device)
-        all_visual_feat = all_item_features['visual'].to(self.device)
+        all_text_feat = all_item_features['text'].to(self.device, non_blocking=True)
+        all_visual_feat = all_item_features['visual'].to(self.device, non_blocking=True)
         num_items = all_text_feat.shape[0]
+        hidden_dim = self.config.hidden_dim
+        temperature = 0.8
 
-        all_target_items = []
-        all_ranks = []
-
-        # 添加进度条
-        from tqdm import tqdm
-
-        # ========== 使用预计算的物品表征（与 Cross Entropy 训练一致） ==========
-        # 如果已经预计算了物品表征，直接使用；否则重新计算
-        if self._all_item_repr is not None:
-            all_item_repr = self._all_item_repr
-            print(f"使用预计算的物品表征，形状: {all_item_repr.shape}")
-        else:
-            print(f"预计算 {num_items} 个物品的表征...")
-            item_batch_size = 256
-            all_item_repr_list = []
-
-            with torch.no_grad():
-                for start_idx in tqdm(range(0, num_items, item_batch_size), desc="编码物品", leave=False):
-                    end_idx = min(start_idx + item_batch_size, num_items)
-                    item_text = all_text_feat[start_idx:end_idx]
-                    item_visual = all_visual_feat[start_idx:end_idx]
-
-                    item_emb, _, _ = self.item_encoder(
-                        item_text, item_visual,
-                        user_interest=None,
-                        return_semantic_logits=False
-                    )
-                    item_repr = self.prediction_layer(item_emb)
-                    all_item_repr_list.append(item_repr.cpu())
-
-                all_item_repr = torch.cat(all_item_repr_list, dim=0).to(self.device)
-                # 重要：需要归一化以与训练一致
-                all_item_repr = F.normalize(all_item_repr, dim=-1)
-
-            print(f"物品表征预计算完成，形状: {all_item_repr.shape}（已L2归一化）")
-
-        # ========== 评估用户-物品匹配（使用点积，与 Cross Entropy 训练一致） ==========
-        val_pbar = tqdm(val_dataloader, desc=f"Stage {stage_id} Validate", leave=False)
+        # ========== 第一步：遍历所有batch，获取全局最大长度 ==========
+        print("检测全局最大序列长度（解决维度不匹配）...")
+        max_history_len = 0  # history_items的最大长度
+        max_short_len = 0  # short_history的最大长度
+        max_long_len = 0  # long_history的最大长度
 
         with torch.no_grad():
-            for batch in val_pbar:
-                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-                        for k, v in batch.items()}
+            for batch in val_dataloader:
+                batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                         for k, v in batch.items()}
 
+                # 更新history_items的最大长度
+                if batch['history_items'].shape[1] > max_history_len:
+                    max_history_len = batch['history_items'].shape[1]
+
+                # 编码序列，更新short/long history的最大长度
+                _, seq_emb, _, short_history, long_history = self.encode_sequence(
+                    batch['history_text_feat'],
+                    batch['history_vision_feat'],
+                    batch['history_len']
+                )
+                if short_history.shape[1] > max_short_len:
+                    max_short_len = short_history.shape[1]
+                if long_history.shape[1] > max_long_len:
+                    max_long_len = long_history.shape[1]
+
+        # ========== 第二步：重新遍历，统一所有张量到最大长度 ==========
+        all_user_repr = []
+        all_user_short_history = []
+        all_user_long_history = []
+        all_target_items = []
+        all_history_ids = []
+        all_seq_lens = []
+
+        print(f"统一序列长度：history={max_history_len}, short={max_short_len}, long={max_long_len}")
+        with torch.no_grad():
+            for batch in val_dataloader:
+                batch = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v
+                         for k, v in batch.items()}
                 batch_size = batch['history_text_feat'].shape[0]
-                target_items = batch['target_item']  # (batch,)
-                all_target_items.append(target_items.cpu())
 
-                # 1. 编码用户序列
-                user_repr, _, _, _, _ = self.encode_sequence(
+                # ========== 修复1：统一history_items长度 ==========
+                curr_history_len = batch['history_items'].shape[1]
+                if curr_history_len < max_history_len:
+                    # 左对齐：在序列维度右侧padding 0（和data_utils一致）
+                    pad_len = max_history_len - curr_history_len
+                    batch['history_items'] = F.pad(
+                        batch['history_items'],
+                        (0, pad_len),  # 仅在序列维度右侧padding
+                        mode='constant',
+                        value=0
+                    )
+
+                # ========== 编码用户序列 ==========
+                user_repr, seq_emb, _, short_history, long_history = self.encode_sequence(
                     batch['history_text_feat'],
                     batch['history_vision_feat'],
                     batch['history_len']
                 )
 
-                # 2. 使用点积计算分数（与 Cross Entropy 训练一致！）
-                # 重要：必须使用与训练时相同的归一化和温度缩放
-                temperature = getattr(self.config, 'logit_temperature', 0.1)
-                user_repr_norm = F.normalize(user_repr, dim=-1)
-                # 注意：all_item_repr 已经在 set_all_item_features 中预先归一化了
-                all_scores = torch.matmul(user_repr_norm, all_item_repr.T) / temperature  # (batch, num_items)
+                # ========== 修复2：统一short_history长度 ==========
+                if short_history.shape[1] < max_short_len:
+                    pad_len = max_short_len - short_history.shape[1]
+                    short_history = F.pad(
+                        short_history,
+                        (0, 0, 0, pad_len),  # (emb_dim_left, emb_dim_right, seq_left, seq_right)
+                        mode='constant',
+                        value=0.0
+                    )
 
-                history_item_ids = batch['history_items']  # (batch, seq_len)
+                # ========== 修复3：统一long_history长度 ==========
+                if long_history.shape[1] < max_long_len:
+                    pad_len = max_long_len - long_history.shape[1]
+                    long_history = F.pad(
+                        long_history,
+                        (0, 0, 0, pad_len),
+                        mode='constant',
+                        value=0.0
+                    )
 
-                # 初始化历史掩码：(batch, num_items)，默认False（非历史物品）
-                history_mask = torch.zeros_like(all_scores, dtype=torch.bool, device=self.device)
+                # ========== 收集所有信息（现在维度完全一致） ==========
+                all_user_repr.append(F.normalize(user_repr, dim=-1))
+                all_user_short_history.append(short_history)
+                all_user_long_history.append(long_history)
+                all_target_items.append(batch['target_item'].cpu())
+                all_history_ids.append(batch['history_items'])
+                all_seq_lens.append(batch['history_len'])
 
-                # 遍历每个用户，标记其历史物品
-                for i in range(batch_size):
-                    # 步骤1：过滤PAD值（右对齐下PAD=0，不是真实物品ID）
-                    user_hist_ids = history_item_ids[i]
-                    valid_hist_ids = user_hist_ids[user_hist_ids != 0]  # 只保留非PAD的历史物品ID
+        # ========== 第三步：合并所有张量（维度完全匹配） ==========
+        all_user_repr = torch.cat(all_user_repr, dim=0)  # (total_users, hidden_dim)
+        all_user_short_history = torch.cat(all_user_short_history, dim=0)  # (total_users, max_short_len, hidden_dim)
+        all_user_long_history = torch.cat(all_user_long_history, dim=0)  # (total_users, max_long_len, hidden_dim)
+        all_target_items = torch.cat(all_target_items, dim=0)  # (total_users,)
+        all_history_ids = torch.cat(all_history_ids, dim=0)  # (total_users, max_history_len)
+        all_seq_lens = torch.cat(all_seq_lens, dim=0)  # (total_users,)
+        total_users = all_user_repr.shape[0]
 
-                    # 步骤2：跳过无历史的用户
-                    if len(valid_hist_ids) == 0:
-                        continue
+        # ========== 第四步：预计算个性化物品表征（核心修改：逐用户编码，保留动态ID） ==========
+        all_item_repr = None
+        if stage_id == 1:
+            print("预计算个性化物品表征（仅1次）...")
+            # 减小chunk size，降低单批次内存占用
+            item_chunk_size = 512 if torch.cuda.is_available() else 128
+            all_item_repr_list = []
 
-                    # 步骤3：标记历史物品（防止索引越界）
-                    # 过滤掉超出物品总数的ID（避免数组越界报错）
-                    valid_hist_ids = valid_hist_ids[valid_hist_ids < num_items]
-                    if len(valid_hist_ids) > 0:
-                        history_mask[i, valid_hist_ids] = True  # 标记历史物品
+            with torch.no_grad():
+                for start_idx in range(0, num_items, item_chunk_size):
+                    end_idx = min(start_idx + item_chunk_size, num_items)
+                    chunk_text = all_text_feat[start_idx:end_idx]
+                    chunk_vision = all_visual_feat[start_idx:end_idx]
+                    chunk_size = end_idx - start_idx
 
-                        # ===== 关键修复：把目标物品从屏蔽列表中移除 =====
-                        target_id = target_items[i]
-                        if target_id < num_items:  # 防止索引越界
-                            history_mask[i, target_id] = False  # 允许模型选中目标物品
+                    # 逐用户编码当前物品chunk（核心：避免全局扩展导致cdist爆炸）
+                    chunk_item_repr_list = []
+                    for u in range(total_users):
+                        # 取单个用户的表征和历史
+                        u_repr = all_user_repr[u:u + 1]  # (1, hidden_dim)
+                        u_short = all_user_short_history[u:u + 1]  # (1, max_short_len, hidden_dim)
+                        u_long = all_user_long_history[u:u + 1]  # (1, max_long_len, hidden_dim)
 
-                # 关键：把历史物品的分数设为-inf，使其不参与排名
-                all_scores = all_scores.masked_fill(history_mask, -float('inf'))
+                        # 扩展当前chunk物品到单个用户维度
+                        u_chunk_text = chunk_text.unsqueeze(0).expand(1, chunk_size, -1).reshape(-1,
+                                                                                                 chunk_text.shape[-1])
+                        u_chunk_vision = chunk_vision.unsqueeze(0).expand(1, chunk_size, -1).reshape(-1,
+                                                                                                     chunk_vision.shape[
+                                                                                                         -1])
+                        u_user_interest = u_repr.unsqueeze(1).expand(1, chunk_size, hidden_dim).reshape(-1, hidden_dim)
 
-                # 3. 计算目标物品的排名
-                target_scores = all_scores[torch.arange(batch_size, device=self.device), target_items]
-                ranks = (all_scores >= target_scores.unsqueeze(1)).sum(dim=1)  # (batch,)
-                all_ranks.append(ranks.cpu())
+                        # 扩展用户历史到当前chunk长度（匹配物品维度）
+                        u_short_expand = u_short.expand(chunk_size, u_short.shape[1], u_short.shape[2])
+                        u_long_expand = u_long.expand(chunk_size, u_long.shape[1], u_long.shape[2])
 
-        # 合并所有batch的结果
-        all_target_items = torch.cat(all_target_items, dim=0)
-        all_ranks = torch.cat(all_ranks, dim=0).float()
+                        # 个性化编码（保留动态ID更新，cdist仅计算单个用户）
+                        item_emb, _, _ = self.item_encoder(
+                            u_chunk_text,
+                            u_chunk_vision,
+                            user_interest=u_user_interest,
+                            short_history=u_short_expand,
+                            long_history=u_long_expand
+                        )
+                        item_repr = self.prediction_layer(item_emb)
+                        item_repr_norm = F.normalize(item_repr, dim=-1)
+                        # 恢复维度：(chunk_size, hidden_dim) → (1, chunk_size, hidden_dim)
+                        chunk_item_repr_list.append(item_repr_norm.unsqueeze(0))
 
-        # 计算指标
+                    # 合并当前chunk所有用户的物品表征
+                    chunk_item_repr = torch.cat(chunk_item_repr_list, dim=0)  # (total_users, chunk_size, hidden_dim)
+                    all_item_repr_list.append(chunk_item_repr)
+
+            # 合并所有chunk的物品表征
+            all_item_repr = torch.cat(all_item_repr_list, dim=1)  # (total_users, num_items, hidden_dim)
+
+        # ========== 第五步：计算全量分数 ==========
+        with torch.no_grad():
+            if stage_id == 1:
+                # Stage2：个性化分数
+                all_scores = torch.bmm(
+                    all_user_repr.unsqueeze(1),
+                    all_item_repr.transpose(1, 2)
+                ).squeeze(1) / temperature
+            else:
+                # Stage1：全局分数
+                if self._all_item_repr is None:
+                    self.set_all_item_features(all_item_features)
+                all_item_repr = self._all_item_repr
+                all_scores = torch.matmul(all_user_repr, all_item_repr.T) / temperature
+
+            # ========== 修复4：向量化历史屏蔽（适配统一长度） ==========
+            history_mask = torch.zeros((total_users, num_items), dtype=torch.bool, device=self.device)
+            # 左对齐：仅保留seq_lens内的有效历史（过滤padding的0）
+            seq_range = torch.arange(max_history_len, device=self.device).unsqueeze(0)
+            valid_seq_mask = seq_range < all_seq_lens.unsqueeze(1)  # (total_users, max_history_len)
+            valid_id_mask = (all_history_ids != 0) & (all_history_ids < num_items) & valid_seq_mask
+
+            # 提取有效索引（向量化，无循环）
+            batch_indices = torch.arange(total_users, device=self.device).unsqueeze(1).expand(-1, max_history_len)[
+                valid_id_mask]
+            item_indices = all_history_ids[valid_id_mask]
+
+            if len(batch_indices) > 0:
+                history_mask[batch_indices, item_indices] = True
+
+            # 释放目标物品
+            history_mask[torch.arange(total_users), all_target_items.to(self.device)] = False
+            all_scores = all_scores.masked_fill(history_mask, -float('inf'))
+
+            # ========== 计算排名 ==========
+            target_scores = all_scores[torch.arange(total_users), all_target_items.to(self.device)].unsqueeze(1)
+            all_ranks = (all_scores >= target_scores).sum(dim=1).float().cpu()
+
+        # ========== 计算最终指标 ==========
         metrics = self._compute_metrics(all_ranks, k_list=[5, 10, 20])
+        print(f"\n===== Stage {stage_id} 验证结果（最终修复版） =====")
+        print(
+            f"HR@10: {metrics['HR@10']:.4f} | NDCG@10: {metrics['NDCG@10']:.4f} | Mean_Rank: {metrics['Mean_Rank']:.4f}")
 
         return metrics
 

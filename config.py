@@ -70,7 +70,7 @@ class BaseConfig:
     # 两阶段训练配置（通用）
     two_stage_training: bool = True  # 是否启用两阶段训练
     stage1_epochs: int = 5  # 阶段1（预训练物品编码器）的epoch数
-    stage2_epochs: int = 10  # 阶段2（训练序列模型）的epoch数
+    stage2_epochs: int = 20  # 阶段2（训练序列模型）的epoch数
     stage1_lr: float = 1e-3  # 阶段1学习率（预训练通常用较大学习率）
     stage2_lr: float = 1e-4  # 阶段2学习率
 
@@ -80,7 +80,7 @@ class BaseConfig:
     pretrain_inter_weight: float = 0.5  # 模态间对比损失权重
 
     # 阶段2：序列模型训练
-    logit_temperature: float = 0.05  # Cross Entropy logits 温度缩放（避免数值不稳定）
+    logit_temperature: float = 0.8  # Cross Entropy logits 温度缩放（避免数值不稳定）
 
     # 联合训练配置
     pmat_loss_weight: float = 1.0  # PMAT损失权重
