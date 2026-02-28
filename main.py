@@ -16,7 +16,8 @@ from collections import defaultdict
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import config
-from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader, get_dgmrec_dataloader
+from data_utils import get_dataloader, get_pctx_dataloader, get_pmat_dataloader, get_dgmrec_dataloader, \
+    get_all_item_pretrain_dataloader
 from baseline_models import DGMRec
 # 注意：PRISM 和 PctxAligned 已从基线中移除
 # PRISM: 实现存在错误（使用随机目标训练）
@@ -594,24 +595,9 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
     # 在 CPU 模式下使用较小的 batch_size
     effective_batch_size = config.batch_size
     if config.device == torch.device('cpu') or str(config.device) == 'cpu':
-        effective_batch_size = min(config.batch_size, 16)
+        effective_batch_size = min(config.batch_size, 256)
         logger.info(f"CPU模式：将batch_size从{config.batch_size}调整为{effective_batch_size}以节省内存")
 
-    # 加载数据
-    logger.info("加载数据...")
-    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
-        cache_dir="./data",
-        category=config.category,
-        batch_size=effective_batch_size,
-        max_history_len=config.max_history_len,
-        num_negative_samples=config.num_negative_samples,
-        shuffle=True,
-        quick_mode=quick_mode,
-        num_workers=NUM_WORKS,
-        logger=logger
-    )
-
-    eval_kwargs = {'all_item_features': all_item_features}
 
     # 创建模型
     logger.info("创建PMAT-SASRec推荐模型...")
@@ -629,6 +615,15 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
         logger.info("===== 阶段1：预训练物品编码器（对比学习） =====")
         logger.info("-"*50)
 
+        pretrain_loader, item_meta = get_all_item_pretrain_dataloader(
+            cache_dir="./data",
+            category="Video_Games",
+            batch_size=effective_batch_size,  # 预训练用大batch
+            quick_mode=quick_mode,
+            logger=logger
+        )
+        config.num_items = item_meta["num_items"]
+
         # 冻结序列编码器，只训练物品编码器
         model.freeze_sequence_encoder()
 
@@ -644,8 +639,8 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
 
         logger.info(f"阶段1配置: epochs={stage1_epochs}, lr={stage1_lr}")
         model.customer_train(
-            train_dataloader=train_loader,
-            val_dataloader=val_loader,
+            train_dataloader=pretrain_loader,
+            val_dataloader=None,
             stage_configs=[stage1_config],
             skip_validation=True  # 预训练阶段跳过验证
         )
@@ -657,6 +652,21 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
         # 解冻序列编码器，冻结物品编码器
         model.unfreeze_sequence_encoder()
         model.unfreeze_item_encoder()
+
+        logger.info("Stage 2 加载数据...")
+        train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
+            cache_dir="./data",
+            category=config.category,
+            batch_size=effective_batch_size,
+            max_history_len=config.max_history_len,
+            num_negative_samples=config.num_negative_samples,
+            shuffle=True,
+            quick_mode=quick_mode,
+            num_workers=NUM_WORKS,
+            logger=logger
+        )
+
+        eval_kwargs = {'all_item_features': all_item_features}
 
         # 预计算所有物品表征（使用训练好的物品编码器）
         logger.info("预计算所有物品表征...")

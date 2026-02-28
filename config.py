@@ -19,7 +19,7 @@ class BaseConfig:
     num_items: int = None
 
     # 训练配置
-    batch_size: int = 64  # 增加batch size以加快训练
+    batch_size: int = 512  # 增加batch size以加快训练
     gradient_accumulation_steps: int = 1  # 不使用梯度累积
     epochs: int = 5  # 减少到5个epoch以节省时间
     lr: float = 1e-3

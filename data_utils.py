@@ -1,9 +1,7 @@
 import logging
 import os
 import pickle
-import re
 import time
-import gc
 import json
 import numpy as np
 import pandas
@@ -12,13 +10,9 @@ import torch
 import requests
 from PIL import Image
 from io import BytesIO
-import datasets
-from datasets import load_dataset
-HAS_DATASETS = True
 
 from transformers import AutoTokenizer, AutoModel, CLIPProcessor, CLIPModel
 
-HAS_TRANSFORMERS = True
 
 from torch.utils.data import Dataset, DataLoader
 
@@ -1596,133 +1590,7 @@ def get_pmat_dataloader(
         with open(cache_file_name, "wb") as f:
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    logger.info("=" * 80)
-    logger.info("========== 物品ID连续性验证 ==========")
-    logger.info("=" * 80)
 
-    # 1. 原始物品ID分析（从item_mapping反推）
-    logger.info("1. 原始物品ID分布验证")
-    original_item_ids = list(data['item_mapping'].keys())
-    logger.info(f"原始物品ID数量: {len(original_item_ids)}")
-
-    # 尝试转换为数字（如果是字符串ID）
-    numeric_item_ids = []
-    for item_id in original_item_ids:
-        try:
-            numeric_item_ids.append(int(item_id))
-        except (ValueError, TypeError):
-            continue
-
-    if numeric_item_ids:
-        logger.info(f"可转换为数字的物品ID范围: min={min(numeric_item_ids)}, max={max(numeric_item_ids)}")
-        logger.info(f"数字ID的跨度: {max(numeric_item_ids) - min(numeric_item_ids)}")
-        logger.info(f"有效物品数/ID跨度比: {len(numeric_item_ids)}/{max(numeric_item_ids) - min(numeric_item_ids):.4f}")
-    else:
-        logger.info("物品ID为非数字格式，无法计算数值范围")
-
-    # 2. 映射后物品ID分析
-    logger.info("\n2. 映射后物品ID验证")
-    mapped_item_ids = list(data['item_mapping'].values())
-    logger.info(f"映射后物品ID数量: {len(mapped_item_ids)}")
-    logger.info(f"映射后物品ID范围: min={min(mapped_item_ids)}, max={max(mapped_item_ids)}")
-    logger.info(f"映射后ID是否连续: {max(mapped_item_ids) == len(mapped_item_ids) - 1}")
-
-    # 检查是否有间隙
-    all_expected_ids = set(range(len(mapped_item_ids)))
-    actual_ids = set(mapped_item_ids)
-    missing_ids = all_expected_ids - actual_ids
-    logger.info(f"映射后ID缺失数量: {len(missing_ids)}")
-    if missing_ids:
-        logger.info(f"缺失的ID示例: {list(missing_ids)[:10]}")
-
-    # 3. 数据集核心信息验证
-    logger.info("\n3. 数据集核心信息验证")
-    logger.info(f"最终物品总数 (num_items): {data['num_items']}")
-    logger.info(
-        f"文本特征覆盖的物品数: {len(data['text_features']) if isinstance(data['text_features'], dict) else data['text_features'].shape[0]}")
-    logger.info(
-        f"图像特征覆盖的物品数: {len(data['image_features']) if isinstance(data['image_features'], dict) else data['image_features'].shape[0]}")
-
-    # 4. 用户序列ID验证
-    logger.info("\n4. 用户序列ID验证")
-    # 抽样检查前5个用户的序列
-    sample_users = list(data['user_sequences'].keys())[:5]
-    for user_id in sample_users:
-        seq = data['user_sequences'][user_id]
-        item_indices = seq.get('item_indices', [])
-        logger.info(f"用户{user_id}的序列: {item_indices[:10]}... (长度: {len(item_indices)})")
-        logger.info(f"用户{user_id}序列中最大item_id: {max(item_indices) if item_indices else 0}")
-        logger.info(f"用户{user_id}序列中最小item_id: {min(item_indices) if item_indices else 0}")
-
-    # 5. 特征张量最终验证
-    logger.info("\n5. 特征张量最终验证")
-    logger.info(f"num_items (原始): {data['num_items']}")
-    logger.info(
-        f"text_features shape: {data['text_features'].shape if isinstance(data['text_features'], torch.Tensor) else 'dict'}")
-    logger.info(
-        f"image_features shape: {data['image_features'].shape if isinstance(data['image_features'], torch.Tensor) else 'dict'}")
-
-    if isinstance(data['text_features'], torch.Tensor):
-        logger.info(f"text_features 维度0 (含padding): {data['text_features'].shape[0]}")
-        logger.info(f"padding预留位置验证: {data['text_features'].shape[0] == data['num_items'] + 1}")
-
-    # 6. 数据范围深度验证
-    logger.info("\n6. 数据范围深度验证")
-    num_items = data['num_items']
-    num_users = data['num_users']
-
-    # 检查所有序列中的item_id
-    all_sequences = {**data['train_sequences'], **data['val_sequences'], **data['test_sequences']}
-    max_item_id = 0
-    max_user_id = 0
-    invalid_items = []
-    total_items = 0
-
-    for user_id, seq in all_sequences.items():
-        max_user_id = max(max_user_id, user_id)
-        item_indices = seq.get('item_indices', [])
-        total_items += len(item_indices)
-
-        for item_id in item_indices:
-            max_item_id = max(max_item_id, item_id)
-            if item_id > num_items:
-                invalid_items.append((user_id, item_id))
-
-    logger.info(f"num_users: {num_users}, max_user_id: {max_user_id}, 是否匹配: {max_user_id == num_users - 1}")
-    logger.info(f"num_items: {num_items}, max_item_id: {max_item_id}, 是否匹配: {max_item_id == num_items - 1}")
-    logger.info(f"总物品交互数: {total_items}")
-    logger.info(f"无效item_id数量: {len(invalid_items)}")
-
-    if invalid_items:
-        logger.warning(f"无效item_id示例: {invalid_items[:10]}")
-        logger.warning(f"无效item_id最大值: {max([x[1] for x in invalid_items]) if invalid_items else 0}")
-
-    # 7. item_id分布统计
-    all_item_ids = []
-    for user_id, seq in all_sequences.items():
-        all_item_ids.extend(seq.get('item_indices', []))
-
-    if all_item_ids:
-        item_id_array = np.array(all_item_ids)
-        logger.info(f"\n7. 所有item_id的统计:")
-        logger.info(f"  均值: {np.mean(item_id_array):.2f}")
-        logger.info(f"  中位数: {np.median(item_id_array):.2f}")
-        logger.info(f"  95分位数: {np.percentile(item_id_array, 95):.2f}")
-        logger.info(f"  空置率 (item_id=0): {np.sum(item_id_array == 0) / len(item_id_array):.4f}")
-
-    # 8. DataLoader配置验证
-    logger.info(f"\n8. DataLoader配置验证")
-    logger.info(f"config.item_vocab_size 赋值: {data['num_items']}")
-    logger.info(f"config.user_vocab_size 赋值: {data['num_users']}")
-    logger.info(f"text_features 最终shape: {data['text_features'].shape}")
-    logger.info(f"image_features 最终shape: {data['image_features'].shape}")
-    logger.info(
-        f"item_vocab_size vs text_features维度: {data['num_items']} vs {data['text_features'].shape[0] - 1} (减1是padding)")
-    logger.info(f"维度匹配验证: {data['num_items'] == data['text_features'].shape[0] - 1}")
-
-    logger.info("=" * 80)
-    logger.info("========== 验证完成 ==========")
-    logger.info("=" * 80)
     # 更新config
     config.item_vocab_size = data['num_items']
     config.user_vocab_size = data['num_users']
@@ -2114,3 +1982,182 @@ def get_dgmrec_dataloader(cache_dir: str,
     logger.info("=" * 60)
 
     return train_loader, val_loader, test_loader, dataset_adapter
+
+
+# ==================== 全商品无监督预训练专用 DataLoader ====================
+class AllItemPretrainDataset(Dataset):
+    """
+    全商品无监督预训练专用数据集（第一阶段）
+    仅包含：商品ID + 文本特征 + 图像特征
+    无用户序列、无负采样、无目标商品，专注于编码所有商品的多模态特征
+    """
+
+    def __init__(
+            self,
+            data: Dict[str, Any],
+            logger: logging.Logger = None
+    ):
+        """
+        Args:
+            data: 包含所有数据的字典（来自 load_dataset_for_experiment）
+            logger: 日志记录器
+        """
+        self.logger = logger or logging.getLogger(__name__)
+
+        # 核心：提取所有唯一商品ID（排除padding item 0）
+        self.all_item_ids = list(range(1, data['num_items'] + 1))  # 1~num_items（0是padding）
+        self.num_items = len(self.all_item_ids)
+
+        # 获取商品多模态特征（已包含padding item 0，直接索引即可）
+        self.text_features = data.get('text_features')  # shape: (num_items+1, 768)
+        self.image_features = data.get('image_features')  # shape: (num_items+1, 512)
+
+        # 验证特征完整性
+        self._validate_features(data)
+
+        self.logger.info(
+            f"AllItemPretrainDataset initialized: "
+            f"{self.num_items} unique items (exclude padding 0) | "
+            f"text_feat shape: {self.text_features.shape} | "
+            f"image_feat shape: {self.image_features.shape}"
+        )
+
+    def _validate_features(self, data):
+        """验证特征完整性，确保每个商品都有对应的特征"""
+        # 检查特征张量维度
+        assert self.text_features.shape[0] == data['num_items'] + 1, \
+            f"text_features维度错误：期望 {data['num_items'] + 1}，实际 {self.text_features.shape[0]}"
+        assert self.image_features.shape[0] == data['num_items'] + 1, \
+            f"image_features维度错误：期望 {data['num_items'] + 1}，实际 {self.image_features.shape[0]}"
+
+        # 检查特征非零率（避免全零特征过多）
+        text_non_zero = (self.text_features[1:] != 0).any(dim=1).sum().item()
+        image_non_zero = (self.image_features[1:] != 0).any(dim=1).sum().item()
+
+        self.logger.info(
+            f"商品特征非零率：文本={text_non_zero / self.num_items:.2%} | 图像={image_non_zero / self.num_items:.2%}")
+
+        if text_non_zero / self.num_items < 0.5:
+            self.logger.warning("⚠️ 超过50%的商品文本特征为全零，可能影响预训练效果")
+        if image_non_zero / self.num_items < 0.3:
+            self.logger.warning("⚠️ 超过70%的商品图像特征为全零，建议检查图像特征提取逻辑")
+
+    def __len__(self):
+        return self.num_items
+
+    def __getitem__(self, idx):
+        """返回单个商品的ID+多模态特征"""
+        item_id = self.all_item_ids[idx]
+
+        # 获取该商品的文本/图像特征（直接从张量索引）
+        text_feat = self.text_features[item_id]
+        vision_feat = self.image_features[item_id]
+
+        return {
+            'item_id': torch.tensor(item_id, dtype=torch.long),  # 商品唯一ID
+            'text_feat': text_feat,  # BERT文本特征 (768,)
+            'vision_feat': vision_feat,  # CLIP图像特征 (512,)
+        }
+
+
+def all_item_pretrain_collate_fn(batch):
+    """
+    全商品预训练专用collate函数
+    仅合并商品ID、文本特征、图像特征，无复杂padding（所有样本长度一致）
+    """
+    item_ids = torch.stack([item['item_id'] for item in batch])
+    text_feats = torch.stack([item['text_feat'] for item in batch])
+    vision_feats = torch.stack([item['vision_feat'] for item in batch])
+
+    return {
+        'item_id': item_ids,  # shape: (batch_size,)
+        'text_feat': text_feats,  # shape: (batch_size, 768)
+        'vision_feat': vision_feats,  # shape: (batch_size, 512)
+    }
+
+
+def get_all_item_pretrain_dataloader(
+        cache_dir: str,
+        category: str = "Video_Games",
+        batch_size: int = 128,  # 预训练可使用更大batch
+        shuffle: bool = True,
+        num_workers: int = 0,
+        quick_mode: bool = False,
+        logger: logging.Logger = None
+) -> Tuple[DataLoader, Dict[str, torch.Tensor]]:
+    """
+    第一阶段全商品无监督预训练专用DataLoader
+    仅返回所有唯一商品的特征，无用户序列、无负采样、无目标商品
+
+    Args:
+        cache_dir: 缓存目录
+        category: 数据集类别
+        batch_size: 批次大小（预训练建议128/256）
+        shuffle: 是否打乱（预训练建议True）
+        num_workers: 工作进程数
+        quick_mode: 快速模式
+        logger: 日志记录器
+
+    Returns:
+        (pretrain_loader, all_item_meta)
+        - pretrain_loader: 全商品预训练DataLoader
+        - all_item_meta: 商品元信息（数量、特征维度等）
+    """
+    if logger is None:
+        logger = logging.getLogger("AllItemPretrain")
+
+    logger.info("=" * 60)
+    logger.info("Creating All-Item Unsupervised Pretrain DataLoader")
+    logger.info("=" * 60)
+
+    # 加载基础数据（复用现有缓存逻辑）
+    data = None
+    cache_suffix = "_quick" if quick_mode else ""
+    cache_file_name = f"{cache_dir}/{category}{cache_suffix}.pkl"
+
+    if os.path.exists(cache_file_name):
+        logger.info(f"Loading cached data from {cache_file_name}")
+        with open(cache_file_name, "rb") as f:
+            data = pickle.load(f)
+    else:
+        processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)
+        data = processor.load_dataset_for_experiment(
+            test_ratio=0.2,
+            val_ratio=0.1,
+            add_padding_item=True
+        )
+        with open(cache_file_name, "wb") as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # 创建全商品预训练数据集
+    pretrain_dataset = AllItemPretrainDataset(data, logger)
+
+    # 创建DataLoader（无复杂collate，仅合并特征）
+    pretrain_loader = DataLoader(
+        pretrain_dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=all_item_pretrain_collate_fn,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True  # 预训练丢弃最后不完整批次，避免维度错误
+    )
+
+    # 整理商品元信息（供模型使用）
+    all_item_meta = {
+        'num_items': pretrain_dataset.num_items,
+        'text_feat_dim': pretrain_dataset.text_features.shape[1],
+        'vision_feat_dim': pretrain_dataset.image_features.shape[1],
+        'text_features': pretrain_dataset.text_features,
+        'image_features': pretrain_dataset.image_features
+    }
+
+    logger.info(f"✅ All-Item Pretrain DataLoader created:")
+    logger.info(f"  - Total items: {pretrain_dataset.num_items}")
+    logger.info(f"  - Batch size: {batch_size}")
+    logger.info(f"  - Total batches: {len(pretrain_loader)}")
+    logger.info(f"  - Text feature dim: {all_item_meta['text_feat_dim']}")
+    logger.info(f"  - Vision feature dim: {all_item_meta['vision_feat_dim']}")
+    logger.info("=" * 60)
+
+    return pretrain_loader, all_item_meta

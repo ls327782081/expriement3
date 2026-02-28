@@ -309,19 +309,37 @@ class SemanticIDQuantizer(nn.Module):
             nn.Embedding(codebook_size, hidden_dim)
             for _ in range(id_length)
         ])
-        
-        # 特征投影
-        self.feature_proj = nn.Linear(hidden_dim, hidden_dim)
-        
-    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            features: (batch, hidden_dim) 输入特征
 
-        Returns:
-            semantic_ids_logits: (batch, id_length, codebook_size) 语义ID的logits
-            quantized_emb: (batch, hidden_dim) 量化后的嵌入
-        """
+        # 特征投影+层归一化（小数据集下稳定训练）
+        self.feature_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU()
+        )
+
+        # RVQ改进：残差缩放（避免后续层残差过小）
+        self.residual_scales = nn.Parameter(torch.ones(id_length))  # 每层残差缩放系数
+
+        # 初始化残差列表（仅保存，不计算损失）
+        self.residuals = []
+
+
+        self.need_retain_graph = False
+
+        # 初始化码本（小数据集下用商品特征初始化）
+        self._init_codebooks_with_small_data()
+
+    def _init_codebooks_with_small_data(self):
+        """小数据集下：用随机商品特征初始化码本（避免空码本）"""
+        for level in range(self.id_length):
+            # 随机采样18个特征（适配18425商品）
+            init_embeds = torch.randn(self.codebook_size, self.hidden_dim)
+            # 前18个码本用随机商品特征初始化
+            n_init = min(18, self.codebook_size)
+            init_embeds[:n_init] = init_embeds[:n_init] * 0.01 + torch.randn(n_init, self.hidden_dim)
+            self.codebooks[level].weight.data = init_embeds
+
+    def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size = features.size(0)
         features = self.feature_proj(features)
 
@@ -329,32 +347,38 @@ class SemanticIDQuantizer(nn.Module):
         residual = features
         quantized_sum = torch.zeros_like(features)
 
-        # 残差量化
+        # 重置残差列表（关键：每次forward都清空）
+        self.residuals = []
+
         for level in range(self.id_length):
             codebook = self.codebooks[level]
+            scale = self.residual_scales[level]
 
-            # 计算与码本的距离（负距离作为logits）
             distances = torch.cdist(
-                residual.unsqueeze(1),
+                residual.unsqueeze(1) * scale,
                 codebook.weight.unsqueeze(0)
-            ).squeeze(1)  # (batch, codebook_size)
-
-            # 负距离作为logits（距离越小，logit越大）
-            logits = -distances  # (batch, codebook_size)
+            ).squeeze(1)
+            logits = -distances / 0.1
             semantic_ids_logits.append(logits)
 
-            # 选择最近的码
-            ids = torch.argmin(distances, dim=-1)  # (batch,)
+            ids = torch.argmin(distances, dim=-1)
+            quantized = codebook(ids)
+            quantized_sum += quantized * scale
+            residual = residual - quantized * scale
 
-            # 获取量化嵌入
-            quantized = codebook(ids)  # (batch, hidden_dim)
-            quantized_sum = quantized_sum + quantized
+            # ===== 核心修复：根据场景选择是否保留计算图 =====
+            if self.training and self.need_retain_graph:
+                # 训练+计算损失时：保留梯度（带计算图）
+                self.residuals.append(residual)
+            else:
+                # 其他场景：切断计算图（避免图累积）
+                self.residuals.append(residual.detach())
 
-            # 计算残差
-            residual = residual - quantized
-
-        # 堆叠logits: (batch, id_length, codebook_size)
         semantic_ids_logits = torch.stack(semantic_ids_logits, dim=1)
+        quantized_sum = F.layer_norm(quantized_sum, normalized_shape=[self.hidden_dim])
+
+        # 重置保留标记（避免跨batch生效）
+        self.need_retain_graph = False
 
         return semantic_ids_logits, quantized_sum
 

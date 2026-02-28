@@ -51,10 +51,11 @@ class PMATItemEncoder(nn.Module):
     6. 残差连接: fused_feat + quantized_emb
     """
 
-    def __init__(self, config):
+    def __init__(self, config, device: torch.device):
         super().__init__()
         self.config = config
         self.hidden_dim = config.hidden_dim
+        self.device = device
 
         # 多模态编码器
         self.multimodal_encoder = MultiModalEncoder(config)
@@ -91,6 +92,208 @@ class PMATItemEncoder(nn.Module):
 
         # 可学习的全局模态权重（当没有用户兴趣时使用）
         self.modal_weight = nn.Parameter(torch.ones(2) / 2)
+
+        self.codebook_size = config.codebook_size  # 码本总数
+        self.id_length = config.id_length  # 语义ID长度
+        # 累计码本使用计数（用于epoch级统计）
+        self.global_code_counts = [
+            torch.zeros(self.codebook_size, device=self.device)
+            for _ in range(self.id_length)
+        ]
+        # 死亡码标记（连续N步未使用）
+        self.dead_code_mask = torch.zeros(self.codebook_size, dtype=torch.bool, device=self.device)
+
+        # ===== 新增：商品ID→语义ID映射存储 =====
+        self.item_semantic_map = {}  # key: 商品原生ID, value: 语义ID序列（list）
+        self.item_semantic_count = {}  # key: 商品原生ID, value: 编码次数（验证一致性）
+        self.semantic_item_map = {}  # key: 语义ID序列（str）, value: 商品原生ID列表（验证唯一性）
+
+        # 监控频率（每多少个batch打印一次）
+        self.monitor_freq = getattr(config, "monitor_freq", 10)
+        self.batch_count = 0  # 批次计数器
+
+        self.fused_feat = None
+
+    def reset_item_map(self):
+        """训练/验证阶段切换时重置映射（避免跨阶段干扰）"""
+        self.item_semantic_map = {}
+        self.item_semantic_count = {}
+        self.semantic_item_map = {}
+
+    def record_item_semantic_map(self, item_ids: torch.Tensor, semantic_logits: torch.Tensor):
+        """
+        记录商品原生ID到语义ID的映射
+        Args:
+            item_ids: (batch,) 商品原生ID（如你的18425个商品ID）
+            semantic_logits: (batch, id_length, codebook_size) 语义ID的logits
+        """
+
+        # 1. 解析语义ID序列（batch, id_length）
+        semantic_ids = torch.argmax(semantic_logits, dim=-1).cpu().numpy()  # (batch, 8)
+        item_ids_np = item_ids.cpu().numpy()  # (batch,)
+
+        # 2. 遍历每个商品，更新映射
+        for idx in range(len(item_ids_np)):
+            item_id = str(item_ids_np[idx])  # 转字符串避免tensor/int类型问题
+            sem_id_seq = semantic_ids[idx].tolist()  # 语义ID序列，如[12, 34, 56, ..., 89]
+            sem_id_key = "_".join(map(str, sem_id_seq))  # 转字符串作为key，如"12_34_56_..._89"
+
+            # ===== 记录商品→语义ID（验证一致性）=====
+            if item_id in self.item_semantic_map:
+                # 检查是否和历史ID一致
+                if self.item_semantic_map[item_id] != sem_id_seq:
+                    print(
+                        f"[警告] 商品{item_id}语义ID不一致！历史：{self.item_semantic_map[item_id]} | 当前：{sem_id_seq}")
+                # 累加编码次数
+                self.item_semantic_count[item_id] += 1
+            else:
+                self.item_semantic_map[item_id] = sem_id_seq
+                self.item_semantic_count[item_id] = 1
+
+            # ===== 记录语义ID→商品（验证唯一性）=====
+            if sem_id_key in self.semantic_item_map:
+                # 检查是否对应多个商品
+                if item_id not in self.semantic_item_map[sem_id_key]:
+                    self.semantic_item_map[sem_id_key].append(item_id)
+                    if len(self.semantic_item_map[sem_id_key]) > 1:
+                        print(f"[警告] 语义ID{sem_id_key}对应多个商品：{self.semantic_item_map[sem_id_key]}")
+            else:
+                self.semantic_item_map[sem_id_key] = [item_id]
+
+    def monitor_item_semantic_map(self):
+        """打印商品ID→语义ID的核心监控指标"""
+        if len(self.item_semantic_map) == 0:
+            print("[映射监控] 暂无商品ID映射数据")
+            return
+
+        # 1. 基础统计
+        total_items = len(self.item_semantic_map)
+        total_sem_ids = len(self.semantic_item_map)
+        duplicate_sem_ids = sum(1 for v in self.semantic_item_map.values() if len(v) > 1)
+
+        # 2. 一致性统计（同一商品多次编码的ID是否一致）
+        # 注：如果是训练阶段，模型参数更新会导致ID变化，属于正常；验证阶段应100%一致
+        consistent_rate = 1.0  # 默认一致（有不一致会在record时打印警告）
+
+        # 3. 唯一性统计
+        unique_rate = (total_sem_ids - duplicate_sem_ids) / total_sem_ids if total_sem_ids > 0 else 0.0
+        duplicate_rate = duplicate_sem_ids / total_sem_ids if total_sem_ids > 0 else 0.0
+
+        # 4. 打印核心指标
+        print(f"\n===== 商品ID ↔ 语义ID 映射监控 =====")
+        print(f"监控商品总数: {total_items} / 总语义ID数: {total_sem_ids}")
+        print(f"语义ID唯一性: {unique_rate:.2%} | 重复语义ID比例: {duplicate_rate:.2%}")
+        print(f"商品ID编码一致性: {consistent_rate:.2%}（训练阶段允许变化，验证阶段需100%）")
+
+        # 5. 打印Top5重复的语义ID（可选，定位问题）
+        if duplicate_sem_ids > 0:
+            print(f"\n===== Top5 重复语义ID =====")
+            sorted_duplicates = sorted(
+                [(k, v) for k, v in self.semantic_item_map.items() if len(v) > 1],
+                key=lambda x: len(x[1]),
+                reverse=True
+            )[:5]
+            for sem_id, items in sorted_duplicates:
+                print(f"语义ID {sem_id} → 对应商品：{items}（共{len(items)}个）")
+
+        # 6. 随机打印5个商品的映射（直观查看）
+        print(f"\n===== 随机5个商品的语义ID映射 =====")
+        import random
+        sample_items = random.sample(list(self.item_semantic_map.keys()), min(5, total_items))
+        for item_id in sample_items:
+            sem_seq = self.item_semantic_map[item_id]
+            encode_times = self.item_semantic_count[item_id]
+            print(f"商品ID {item_id} → 语义ID: {sem_seq}（编码次数：{encode_times}）")
+
+    def monitor_codebook(self, semantic_logits: torch.Tensor):
+        """
+        适配RVQ+小数据集的分层监控（修复溢出问题）
+        semantic_logits: (batch, id_length, codebook_size)
+        """
+        batch_size = semantic_logits.shape[0]
+        id_length = self.id_length  # 8
+        codebook_size = self.codebook_size  # 1024
+
+        # 1. 按层解析语义ID（RVQ每层独立）
+        layer_sem_ids = []
+        layer_code_counts = []
+        for level in range(id_length):
+            # 每层ID: (batch,)
+            sem_ids_level = torch.argmax(semantic_logits[:, level, :], dim=-1)
+            layer_sem_ids.append(sem_ids_level)
+            # 每层码本使用计数
+            count_level = torch.bincount(sem_ids_level, minlength=codebook_size)
+            layer_code_counts.append(count_level)
+
+        # 把每层的使用数，累加到对应层的全局计数里
+        if self.training:
+            for level in range(id_length):
+                self.global_code_counts[level] += layer_code_counts[level]
+
+        # 2. 分层计算监控指标（关键！）
+        print(f"\n===== RVQ码本分层监控 [Batch {self.batch_count}] =====")
+        total_used_codes = 0
+        layer_utilization = []
+        layer_entropy = []
+        for level in range(id_length):
+            count = layer_code_counts[level]
+            # 每层利用率
+            utilization_level = (count > 0).sum().item() / codebook_size
+            layer_utilization.append(utilization_level)
+            # 每层熵
+            probs = count / (count.sum() + 1e-8)  # 避免除零
+            entropy_level = -torch.sum(probs * torch.log(probs + 1e-8)).item()
+            layer_entropy.append(entropy_level)
+            # 累计总使用码本数
+            total_used_codes += (count > 0).sum().item()
+
+            print(f"第{level + 1}层码本：利用率={utilization_level:.2%} | 熵={entropy_level:.3f}")
+
+        # 3. 全局指标（修复溢出问题：用哈希特征计算相似度）
+        # 有效利用率 = 总使用码本数 / 商品数
+        effective_utilization = total_used_codes / self.config.num_items
+        # 完整ID序列：(batch, id_length)
+        full_sem_ids = torch.stack(layer_sem_ids, dim=1)  # (batch, 8)
+
+        # ===== 修复核心：用哈希特征替代超大one-hot =====
+        # 方法：将ID序列映射到低维特征（128维），再计算余弦相似度
+        # 1. 创建每层ID的投影矩阵（将1024维ID映射到16维）
+        if not hasattr(self, 'id_proj'):
+            # 一次性初始化投影矩阵（避免重复创建）
+            self.id_proj = nn.ParameterList([
+                nn.Parameter(torch.randn(codebook_size, 16))  # 每层1024→16维
+                for _ in range(id_length)
+            ])
+            # 冻结投影矩阵（仅用于监控，不参与训练）
+            for p in self.id_proj:
+                p.requires_grad = False
+
+        # 2. 计算ID序列的哈希特征（batch, 8*16=128）
+        id_hash_feat = []
+        for level in range(id_length):
+            # 每层ID的投影特征：(batch, 16)
+            feat_level = F.embedding(full_sem_ids[:, level], self.id_proj[level])
+            id_hash_feat.append(feat_level)
+        id_hash_feat = torch.cat(id_hash_feat, dim=-1)  # (batch, 128)
+        id_hash_feat = F.normalize(id_hash_feat, dim=-1)  # 归一化
+
+        # 3. 计算序列级相似度（无溢出）
+        sem_sim = torch.matmul(id_hash_feat, id_hash_feat.T)  # (batch, batch)
+        sem_sim_mean = sem_sim.fill_diagonal_(0).mean().item()
+
+        # 4. 修正后的日志（适配小数据集）
+        print(f"\n===== 修正后全局监控 =====")
+        print(f"有效码本利用率（相对商品数）: {effective_utilization:.2%}")
+        print(f"完整ID序列相似度: {sem_sim_mean:.4f}")
+        print(f"总使用码本数: {total_used_codes} / 商品数: 18425")
+
+        return {
+            "layer_utilization": layer_utilization,
+            "layer_entropy": layer_entropy,
+            "effective_utilization": effective_utilization,
+            "full_id_sim": sem_sim_mean,
+            "total_used_codes": total_used_codes
+        }
 
     def forward(
         self,
@@ -148,10 +351,14 @@ class PMATItemEncoder(nn.Module):
 
         # 3. 融合多模态特征
         fused_feat = self.personalized_fusion(encoded_features, modal_weights)
+        self.fused_feat = fused_feat
 
         # 4. 语义ID量化
         fused_feat = F.normalize(fused_feat, dim=-1)
         semantic_logits, quantized_emb = self.semantic_quantizer(fused_feat)
+        # ===== 调用监控（关键位置）=====
+        if self.training:  # 仅训练阶段监控
+            self.monitor_codebook(semantic_logits)
         # 新增：重建损失（让quantized_emb尽可能还原fused_feat）
         recon_loss = F.mse_loss(quantized_emb, fused_feat.detach())  # detach避免梯度冲突
         # 新增残差连接：让量化嵌入向多模态特征靠拢
@@ -210,6 +417,7 @@ class PMATItemEncoder(nn.Module):
         return item_emb, None, quantized_emb_out, recon_loss
 
 
+
 class PMAT_SASRec(AbstractTrainableModel):
     """PMAT + SASRec 混合推荐模型
 
@@ -230,7 +438,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         self.max_seq_len = getattr(config, 'max_history_len', 50)
 
         # ===== 物品编码器 (PMAT) =====
-        self.item_encoder = PMATItemEncoder(config)
+        self.item_encoder = PMATItemEncoder(config, self.device)
 
         # ===== 序列编码器 (SASRec) =====
         # 位置嵌入
@@ -349,8 +557,9 @@ class PMAT_SASRec(AbstractTrainableModel):
         优化点：使用batch内真实负采样（4个）替代随机负样本，强化语义ID区分度
         """
         # 获取目标物品（正样本）的多模态特征
-        text_feat = batch['target_text_feat'].to(self.device)  # (batch, text_dim)
-        visual_feat = batch['target_vision_feat'].to(self.device)  # (batch, visual_dim)
+        text_feat = batch['text_feat'].to(self.device)  # (batch, text_dim)
+        visual_feat = batch['vision_feat'].to(self.device)  # (batch, visual_dim)
+        item_ids = batch['item_id'].to(self.device)
         batch_size = text_feat.size(0)
 
         # 编码正样本物品（获取语义ID）
@@ -358,6 +567,9 @@ class PMAT_SASRec(AbstractTrainableModel):
             text_feat, visual_feat, return_semantic_logits=True
         )
         pos_repr = self.prediction_layer(item_emb)  # (batch, hidden_dim)
+
+        self.item_encoder.record_item_semantic_map(item_ids, semantic_logits)
+        self.item_encoder.monitor_item_semantic_map()
 
         temperature = getattr(self.config, 'pretrain_temperature', 0.1)  # 降低温度强化区分度
 
@@ -381,16 +593,39 @@ class PMAT_SASRec(AbstractTrainableModel):
         inter_loss = (F.cross_entropy(sim_matrix_inter, labels_inter) +
                       F.cross_entropy(sim_matrix_inter.T, labels_inter)) / 2
 
+        # RVQ专属损失：每层残差的L2损失（强制每层都有贡献） （带保护）
+        # 从quantizer中获取每层残差（需修改forward返回残差）
+        residual_loss = torch.tensor(0.0, device=self.device, requires_grad=self.training)
+        target_residual_norm = 0.1
+        try:
+            residuals = self.item_encoder.semantic_quantizer.residuals
+            if self.training and len(residuals) == self.item_encoder.semantic_quantizer.id_length:
+                residual_losses = []
+                for level in range(len(residuals)):
+                    res_norm = torch.norm(residuals[level], dim=-1)
+                    level_loss = torch.mean(torch.clamp(target_residual_norm - res_norm, min=0.0))
+                    residual_losses.append(level_loss.item())
+                    residual_loss += level_loss / len(residuals)
+                print(
+                    f"[RVQ] 每层残差损失: {[round(l, 4) for l in residual_losses]} | 总残差损失: {residual_loss.item():.4f}")
+        except Exception as e:
+            print(f"[警告] 残差损失计算失败: {str(e)[:50]}")
 
         # ===== 4. 加权组合所有损失 =====
         intra_weight = getattr(self.config, 'pretrain_intra_weight', 1.0)
         inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.5)
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.8)
+        residual_loss_weight = getattr(self.config, 'residual_loss_weight', 0.5)
 
         total_loss = (intra_weight * intra_loss +
                       inter_weight * inter_loss +
-                      recon_loss_weight * recon_loss)
+                      recon_loss_weight * recon_loss +
+                      residual_loss_weight * residual_loss)
 
+        if self.training:
+            self.item_encoder.monitor_codebook(semantic_logits)
+            print(
+                f"[训练日志] 重建损失: {recon_loss.item():.4f}, 残差损失: {residual_loss.item():.4f}, 总损失: {total_loss.item():.4f}")
     
         return {
             'total_loss': total_loss,
@@ -640,32 +875,6 @@ class PMAT_SASRec(AbstractTrainableModel):
             # 如果没有预计算物品表征，使用占位损失
             losses['ce_loss'] = torch.tensor(0.0, device=target_items.device)
 
-        # ===== 2. 语义ID损失（辅助任务）=====
-        device = target_items.device
-
-        # try:
-        #     target_semantic_ids = item_id_to_semantic_id(
-        #         target_items,
-        #         self.config.id_length,
-        #         self.config.codebook_size
-        #     ).to(device)
-        # except Exception as e:
-        #     import warnings
-        #     warnings.warn(f"语义ID转换失败: {e}")
-        #     batch_size = target_items.size(0)
-        #     target_semantic_ids = torch.randint(
-        #         0, self.config.codebook_size,
-        #         (batch_size, self.config.id_length),
-        #         device=device
-        #     )
-        #
-        # pos_semantic_logits = outputs['pos_semantic_logits']
-        # semantic_loss = F.cross_entropy(
-        #     pos_semantic_logits.reshape(-1, self.config.codebook_size),
-        #     target_semantic_ids.reshape(-1)
-        # )
-        # losses['semantic_loss'] = self.semantic_loss_weight * semantic_loss
-
         # ===== 3. 总损失 =====
         losses['total_loss'] = losses['ce_loss']
 
@@ -736,7 +945,6 @@ class PMAT_SASRec(AbstractTrainableModel):
             return losses['total_loss'], metrics
 
     import torch
-    import torch.nn.functional as F
     from typing import Dict
 
     def _validate_one_epoch(
@@ -956,6 +1164,40 @@ class PMAT_SASRec(AbstractTrainableModel):
             f"HR@10: {metrics['HR@10']:.4f} | NDCG@10: {metrics['NDCG@10']:.4f} | Mean_Rank: {metrics['Mean_Rank']:.4f}")
 
         return metrics
+
+    def on_epoch_start(self, epoch: int, stage_id: int, stage_kwargs: Dict):
+        # 重置全局码本计数
+        for level in range(self.item_encoder.id_length):
+            self.item_encoder.global_code_counts[level].zero_()
+
+    def on_epoch_end(self, epoch: int, stage_id: int, stage_kwargs: Dict,
+                     train_metrics: Dict, val_metrics: Dict):
+        super().on_epoch_end(epoch, stage_id, stage_kwargs, train_metrics, val_metrics)
+        # ===== Epoch级码本监控（核心：全局统计+死亡码判断）=====
+        encoder = self.item_encoder
+        print(f"\n===== Epoch 码本全局监控 ======")
+        total_used = 0  # 所有层总共用了多少码本
+        total_codebooks = encoder.codebook_size * encoder.id_length  # 8*1024=8192
+        for level in range(encoder.id_length):
+            # 算当前层用了多少码本
+            used_in_level = (encoder.global_code_counts[level] > 0).sum().item()
+            total_used += used_in_level
+            # 可选：打印每层的全局统计
+            print(f"第{level + 1}层全局：用了{used_in_level}个码本（利用率{used_in_level / encoder.codebook_size:.2%}）")
+
+        # 最终全局统计（正确版）
+        global_utilization = total_used / total_codebooks
+        dead_ratio = 1 - global_utilization
+        print(f"全局码本利用率: {global_utilization:.2%}")
+        print(f"全局死亡码比例: {dead_ratio:.2%}")
+        print(f"总共用了{total_used}个码本 / 总码本数{total_codebooks}")
+
+    def on_batch_start(self, batch: Any, batch_idx: int, stage_id: int, stage_kwargs: Dict):
+        """batch开始钩子"""
+        # 每次迭代前重置量化器的残差和计算图标记
+        self.item_encoder.semantic_quantizer.residuals = []
+        self.item_encoder.semantic_quantizer.need_retain_graph = False
+
 
     def _compute_metrics(self, ranks: torch.Tensor, k_list: List[int] = [5, 10, 20]) -> Dict[str, float]:
         metrics = {}
