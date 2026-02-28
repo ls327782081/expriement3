@@ -103,196 +103,66 @@ class PMATItemEncoder(nn.Module):
         # 死亡码标记（连续N步未使用）
         self.dead_code_mask = torch.zeros(self.codebook_size, dtype=torch.bool, device=self.device)
 
-        # ===== 新增：商品ID→语义ID映射存储 =====
-        self.item_semantic_map = {}  # key: 商品原生ID, value: 语义ID序列（list）
-        self.item_semantic_count = {}  # key: 商品原生ID, value: 编码次数（验证一致性）
-        self.semantic_item_map = {}  # key: 语义ID序列（str）, value: 商品原生ID列表（验证唯一性）
-
         # 监控频率（每多少个batch打印一次）
         self.monitor_freq = getattr(config, "monitor_freq", 10)
         self.batch_count = 0  # 批次计数器
 
         self.fused_feat = None
 
-    def reset_item_map(self):
-        """训练/验证阶段切换时重置映射（避免跨阶段干扰）"""
-        self.item_semantic_map = {}
-        self.item_semantic_count = {}
-        self.semantic_item_map = {}
-
-    def record_item_semantic_map(self, item_ids: torch.Tensor, semantic_logits: torch.Tensor):
+    def monitor_codebook(quantizer, epoch=None, stage=None, verbose=False):
         """
-        记录商品原生ID到语义ID的映射
+        优化后的码本监控方法：只关注物理码本向量的利用率，不重复计算语义ID重复率
         Args:
-            item_ids: (batch,) 商品原生ID（如你的18425个商品ID）
-            semantic_logits: (batch, id_length, codebook_size) 语义ID的logits
+            quantizer: RVQ量化器实例
+            epoch/stage: 训练阶段标识（可选）
+            verbose: 是否打印详细信息（False=只打印核心指标）
+        Returns:
+            码本监控核心指标
         """
+        # 1. 核心：统计每层物理码本的利用率（这是原方法里最有价值的部分）
+        codebook_usage = {}
+        total_used_codebooks = 0
+        total_codebooks = 0
 
-        # 1. 解析语义ID序列（batch, id_length）
-        semantic_ids = torch.argmax(semantic_logits, dim=-1).cpu().numpy()  # (batch, 8)
-        item_ids_np = item_ids.cpu().numpy()  # (batch,)
+        for layer_idx in range(quantizer.n_codebooks):
+            # 获取该层码本的使用标记（假设你有记录码本是否被使用的变量）
+            # 替换成你实际的「码本使用计数」逻辑
+            used = quantizer.codebook_usage[layer_idx]  # [1024,] 的bool/计数数组
+            used_count = torch.sum(used).item()
+            total_count = len(used)
+            usage_ratio = used_count / total_count
 
-        # 2. 遍历每个商品，更新映射
-        for idx in range(len(item_ids_np)):
-            item_id = str(item_ids_np[idx])  # 转字符串避免tensor/int类型问题
-            sem_id_seq = semantic_ids[idx].tolist()  # 语义ID序列，如[12, 34, 56, ..., 89]
-            sem_id_key = "_".join(map(str, sem_id_seq))  # 转字符串作为key，如"12_34_56_..._89"
+            codebook_usage[f"layer_{layer_idx + 1}"] = {
+                "used": used_count,
+                "total": total_count,
+                "usage_ratio": usage_ratio
+            }
+            total_used_codebooks += used_count
+            total_codebooks += total_count
 
-            # ===== 记录商品→语义ID（验证一致性）=====
-            if item_id in self.item_semantic_map:
-                # 检查是否和历史ID一致
-                if self.item_semantic_map[item_id] != sem_id_seq:
-                    print(
-                        f"[警告] 商品{item_id}语义ID不一致！历史：{self.item_semantic_map[item_id]} | 当前：{sem_id_seq}")
-                # 累加编码次数
-                self.item_semantic_count[item_id] += 1
-            else:
-                self.item_semantic_map[item_id] = sem_id_seq
-                self.item_semantic_count[item_id] = 1
+        # 2. 全局物理码本指标
+        global_usage_ratio = total_used_codebooks / total_codebooks if total_codebooks > 0 else 0
+        dead_codebook_ratio = 1 - global_usage_ratio
 
-            # ===== 记录语义ID→商品（验证唯一性）=====
-            if sem_id_key in self.semantic_item_map:
-                # 检查是否对应多个商品
-                if item_id not in self.semantic_item_map[sem_id_key]:
-                    self.semantic_item_map[sem_id_key].append(item_id)
-                    if len(self.semantic_item_map[sem_id_key]) > 1:
-                        print(f"[警告] 语义ID{sem_id_key}对应多个商品：{self.semantic_item_map[sem_id_key]}")
-            else:
-                self.semantic_item_map[sem_id_key] = [item_id]
+        # 3. 打印（极简版，只保留核心）
+        if verbose:
+            print(f"\n===== 码本向量监控 [{stage if stage else 'Stage'} | Epoch {epoch if epoch else 'N/A'}] =====")
+            print(f"全局物理码本利用率: {global_usage_ratio:.4f} ({global_usage_ratio * 100:.2f}%)")
+            print(f"全局死亡码比例: {dead_codebook_ratio:.4f} ({dead_codebook_ratio * 100:.2f}%)")
+            print(f"总使用物理码本数: {total_used_codebooks} / {total_codebooks}")
 
-    def monitor_item_semantic_map(self):
-        """打印商品ID→语义ID的核心监控指标"""
-        if len(self.item_semantic_map) == 0:
-            print("[映射监控] 暂无商品ID映射数据")
-            return
+            # 可选：打印每层利用率（精简版）
+            print("\n各层码本利用率:")
+            for layer, stats in codebook_usage.items():
+                print(f"  {layer}: {stats['used']}/{stats['total']} ({stats['usage_ratio'] * 100:.2f}%)")
 
-        # 1. 基础统计
-        total_items = len(self.item_semantic_map)
-        total_sem_ids = len(self.semantic_item_map)
-        duplicate_sem_ids = sum(1 for v in self.semantic_item_map.values() if len(v) > 1)
-
-        # 2. 一致性统计（同一商品多次编码的ID是否一致）
-        # 注：如果是训练阶段，模型参数更新会导致ID变化，属于正常；验证阶段应100%一致
-        consistent_rate = 1.0  # 默认一致（有不一致会在record时打印警告）
-
-        # 3. 唯一性统计
-        unique_rate = (total_sem_ids - duplicate_sem_ids) / total_sem_ids if total_sem_ids > 0 else 0.0
-        duplicate_rate = duplicate_sem_ids / total_sem_ids if total_sem_ids > 0 else 0.0
-
-        # 4. 打印核心指标
-        print(f"\n===== 商品ID ↔ 语义ID 映射监控 =====")
-        print(f"监控商品总数: {total_items} / 总语义ID数: {total_sem_ids}")
-        print(f"语义ID唯一性: {unique_rate:.2%} | 重复语义ID比例: {duplicate_rate:.2%}")
-        print(f"商品ID编码一致性: {consistent_rate:.2%}（训练阶段允许变化，验证阶段需100%）")
-
-        # 5. 打印Top5重复的语义ID（可选，定位问题）
-        if duplicate_sem_ids > 0:
-            print(f"\n===== Top5 重复语义ID =====")
-            sorted_duplicates = sorted(
-                [(k, v) for k, v in self.semantic_item_map.items() if len(v) > 1],
-                key=lambda x: len(x[1]),
-                reverse=True
-            )[:5]
-            for sem_id, items in sorted_duplicates:
-                print(f"语义ID {sem_id} → 对应商品：{items}（共{len(items)}个）")
-
-        # 6. 随机打印5个商品的映射（直观查看）
-        print(f"\n===== 随机5个商品的语义ID映射 =====")
-        import random
-        sample_items = random.sample(list(self.item_semantic_map.keys()), min(5, total_items))
-        for item_id in sample_items:
-            sem_seq = self.item_semantic_map[item_id]
-            encode_times = self.item_semantic_count[item_id]
-            print(f"商品ID {item_id} → 语义ID: {sem_seq}（编码次数：{encode_times}）")
-
-    def monitor_codebook(self, semantic_logits: torch.Tensor):
-        """
-        适配RVQ+小数据集的分层监控（修复溢出问题）
-        semantic_logits: (batch, id_length, codebook_size)
-        """
-        batch_size = semantic_logits.shape[0]
-        id_length = self.id_length  # 8
-        codebook_size = self.codebook_size  # 1024
-
-        # 1. 按层解析语义ID（RVQ每层独立）
-        layer_sem_ids = []
-        layer_code_counts = []
-        for level in range(id_length):
-            # 每层ID: (batch,)
-            sem_ids_level = torch.argmax(semantic_logits[:, level, :], dim=-1)
-            layer_sem_ids.append(sem_ids_level)
-            # 每层码本使用计数
-            count_level = torch.bincount(sem_ids_level, minlength=codebook_size)
-            layer_code_counts.append(count_level)
-
-        # 把每层的使用数，累加到对应层的全局计数里
-        if self.training:
-            for level in range(id_length):
-                self.global_code_counts[level] += layer_code_counts[level]
-
-        # 2. 分层计算监控指标（关键！）
-        print(f"\n===== RVQ码本分层监控 [Batch {self.batch_count}] =====")
-        total_used_codes = 0
-        layer_utilization = []
-        layer_entropy = []
-        for level in range(id_length):
-            count = layer_code_counts[level]
-            # 每层利用率
-            utilization_level = (count > 0).sum().item() / codebook_size
-            layer_utilization.append(utilization_level)
-            # 每层熵
-            probs = count / (count.sum() + 1e-8)  # 避免除零
-            entropy_level = -torch.sum(probs * torch.log(probs + 1e-8)).item()
-            layer_entropy.append(entropy_level)
-            # 累计总使用码本数
-            total_used_codes += (count > 0).sum().item()
-
-            print(f"第{level + 1}层码本：利用率={utilization_level:.2%} | 熵={entropy_level:.3f}")
-
-        # 3. 全局指标（修复溢出问题：用哈希特征计算相似度）
-        # 有效利用率 = 总使用码本数 / 商品数
-        effective_utilization = total_used_codes / self.config.num_items
-        # 完整ID序列：(batch, id_length)
-        full_sem_ids = torch.stack(layer_sem_ids, dim=1)  # (batch, 8)
-
-        # ===== 修复核心：用哈希特征替代超大one-hot =====
-        # 方法：将ID序列映射到低维特征（128维），再计算余弦相似度
-        # 1. 创建每层ID的投影矩阵（将1024维ID映射到16维）
-        if not hasattr(self, 'id_proj'):
-            # 一次性初始化投影矩阵（避免重复创建）
-            self.id_proj = nn.ParameterList([
-                nn.Parameter(torch.randn(codebook_size, 16))  # 每层1024→16维
-                for _ in range(id_length)
-            ])
-            # 冻结投影矩阵（仅用于监控，不参与训练）
-            for p in self.id_proj:
-                p.requires_grad = False
-
-        # 2. 计算ID序列的哈希特征（batch, 8*16=128）
-        id_hash_feat = []
-        for level in range(id_length):
-            # 每层ID的投影特征：(batch, 16)
-            feat_level = F.embedding(full_sem_ids[:, level], self.id_proj[level])
-            id_hash_feat.append(feat_level)
-        id_hash_feat = torch.cat(id_hash_feat, dim=-1)  # (batch, 128)
-        id_hash_feat = F.normalize(id_hash_feat, dim=-1)  # 归一化
-
-        # 3. 计算序列级相似度（无溢出）
-        sem_sim = torch.matmul(id_hash_feat, id_hash_feat.T)  # (batch, batch)
-        sem_sim_mean = sem_sim.fill_diagonal_(0).mean().item()
-
-        # 4. 修正后的日志（适配小数据集）
-        print(f"\n===== 修正后全局监控 =====")
-        print(f"有效码本利用率（相对商品数）: {effective_utilization:.2%}")
-        print(f"完整ID序列相似度: {sem_sim_mean:.4f}")
-        print(f"总使用码本数: {total_used_codes} / 商品数: 18425")
-
+        # 4. 返回核心指标，方便后续分析
         return {
-            "layer_utilization": layer_utilization,
-            "layer_entropy": layer_entropy,
-            "effective_utilization": effective_utilization,
-            "full_id_sim": sem_sim_mean,
-            "total_used_codes": total_used_codes
+            "total_used_codebooks": total_used_codebooks,  # 物理码本使用数
+            "total_codebooks": total_codebooks,  # 总物理码本数（8192）
+            "global_usage_ratio": global_usage_ratio,  # 全局物理码本利用率
+            "dead_codebook_ratio": dead_codebook_ratio,  # 死亡码比例
+            "layer_usage": codebook_usage  # 每层详细数据
         }
 
     def forward(
@@ -568,8 +438,6 @@ class PMAT_SASRec(AbstractTrainableModel):
         )
         pos_repr = self.prediction_layer(item_emb)  # (batch, hidden_dim)
 
-        self.item_encoder.record_item_semantic_map(item_ids, semantic_logits)
-        self.item_encoder.monitor_item_semantic_map()
 
         temperature = getattr(self.config, 'pretrain_temperature', 0.1)  # 降低温度强化区分度
 
