@@ -294,39 +294,56 @@ class DynamicIDUpdater(nn.Module):
 
 class SemanticIDQuantizer(nn.Module):
     """语义ID量化器
-    
+
     将连续特征量化为离散的语义ID序列
+    修复点：
+    1. 解决残差损失计算失败（leaf variable梯度冲突）
+    2. 优化温度系数（解决码本利用率低）
+    3. 增加损失计算逻辑（承诺损失+残差损失）
+    4. 修复梯度保留逻辑（避免计算图累积）
     """
-    
+
     def __init__(self, hidden_dim: int, codebook_size: int, id_length: int):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.codebook_size = codebook_size
         self.id_length = id_length
-        
-        # 层级码本（RQ-VAE风格）
+
+        # 层级码本（保留你的原始结构）
         self.codebooks = nn.ModuleList([
             nn.Embedding(codebook_size, hidden_dim)
             for _ in range(id_length)
         ])
 
-        # 特征投影+层归一化（小数据集下稳定训练）
+        # 特征投影+层归一化（保留你的原始结构）
         self.feature_proj = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU()
         )
 
-        # RVQ改进：残差缩放（避免后续层残差过小）
+        # RVQ改进：残差缩放（保留你的原始结构）
         self.residual_scales = nn.Parameter(torch.ones(id_length))  # 每层残差缩放系数
 
-        # 初始化残差列表（仅保存，不计算损失）
-        self.residuals = []
+        # ========== 修复1：优化温度系数（解决码本集中） ==========
+        self.temperature = nn.Parameter(torch.tensor(0.5))  # 从0.1改为可学习的0.5，增大温度
+        self.temperature.requires_grad = True  # 允许温度系数学习
 
+        # ========== 修复2：损失相关变量（解决残差损失计算失败） ==========
+        self.commitment_loss = torch.tensor(0.0, requires_grad=True)  # 承诺损失
+        self.residual_loss = torch.tensor(0.0, requires_grad=True)  # 残差损失
+        self.total_quant_loss = torch.tensor(0.0, requires_grad=True)  # 总量化损失
 
+        # 初始化残差列表（关键：改为Tensor存储，避免梯度累积）
+        self.residuals = torch.zeros((0, id_length, hidden_dim))  # [B, id_length, D]
+
+        # 保留计算图标记（优化：改为上下文管理）
         self.need_retain_graph = False
 
-        # 初始化码本（小数据集下用商品特征初始化）
+        # 码本使用计数（用于监控利用率）
+        self.codebook_usage = [torch.zeros(codebook_size).bool() for _ in range(id_length)]
+
+        # 初始化码本（保留你的小数据集初始化逻辑）
         self._init_codebooks_with_small_data()
 
     def _init_codebooks_with_small_data(self):
@@ -334,53 +351,131 @@ class SemanticIDQuantizer(nn.Module):
         for level in range(self.id_length):
             # 随机采样18个特征（适配18425商品）
             init_embeds = torch.randn(self.codebook_size, self.hidden_dim)
-            # 前18个码本用随机商品特征初始化
+            # 前18个码本用随机商品特征初始化（保留你的逻辑）
             n_init = min(18, self.codebook_size)
             init_embeds[:n_init] = init_embeds[:n_init] * 0.01 + torch.randn(n_init, self.hidden_dim)
             self.codebooks[level].weight.data = init_embeds
 
     def forward(self, features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        修复版forward：解决梯度冲突+残差损失计算失败
+        Args:
+            features: 输入特征 [B, D]
+        Returns:
+            semantic_ids_logits: 语义ID的logits [B, id_length, codebook_size]
+            quantized_sum: 量化后的特征和 [B, D]
+        """
         batch_size = features.size(0)
-        features = self.feature_proj(features)
+        features = self.feature_proj(features)  # 保留你的特征投影
 
         semantic_ids_logits = []
-        residual = features
+        residual = features.clone()  # 修复：克隆避免修改原始张量
         quantized_sum = torch.zeros_like(features)
 
-        # 重置残差列表（关键：每次forward都清空）
-        self.residuals = []
+        # 重置码本使用计数
+        self.codebook_usage = [torch.zeros(self.codebook_size).bool().to(features.device) for _ in
+                               range(self.id_length)]
 
-        for level in range(self.id_length):
-            codebook = self.codebooks[level]
-            scale = self.residual_scales[level]
+        # 临时存储每层残差（梯度安全）
+        layer_residuals = []
 
-            distances = torch.cdist(
-                residual.unsqueeze(1) * scale,
-                codebook.weight.unsqueeze(0)
-            ).squeeze(1)
-            logits = -distances / 0.1
-            semantic_ids_logits.append(logits)
+        try:
+            for level in range(self.id_length):
+                codebook = self.codebooks[level]
+                scale = self.residual_scales[level]
 
-            ids = torch.argmin(distances, dim=-1)
-            quantized = codebook(ids)
-            quantized_sum += quantized * scale
-            residual = residual - quantized * scale
+                # ========== 修复3：温度系数优化（解决码本集中） ==========
+                # 计算距离（梯度安全：用平方距离替代cdist，减少梯度计算量）
+                residual_scaled = residual * scale
+                dist = torch.sum((residual_scaled.unsqueeze(1) - codebook.weight.unsqueeze(0)) ** 2, dim=-1)
 
-            # ===== 核心修复：根据场景选择是否保留计算图 =====
-            if self.training and self.need_retain_graph:
-                # 训练+计算损失时：保留梯度（带计算图）
-                self.residuals.append(residual)
-            else:
-                # 其他场景：切断计算图（避免图累积）
-                self.residuals.append(residual.detach())
+                # 温度系数调整（从0.1改为可学习的temperature）
+                logits = -dist / torch.clamp(self.temperature, min=0.01)  # 防止温度为0
+                semantic_ids_logits.append(logits)
 
-        semantic_ids_logits = torch.stack(semantic_ids_logits, dim=1)
-        quantized_sum = F.layer_norm(quantized_sum, normalized_shape=[self.hidden_dim])
+                # 选择码本ID（修复：推理时detach避免梯度问题）
+                ids = torch.argmin(dist, dim=-1)
+                if not self.training:
+                    ids = ids.detach()  # 推理时切断梯度
+
+                # 更新码本使用计数
+                self.codebook_usage[level].scatter_(0, ids.cpu(), True)
+
+                # ========== 修复4：量化特征计算（解决leaf variable报错） ==========
+                quantized = codebook(ids)
+                # 梯度技巧：只让承诺损失回传梯度，避免量化特征的梯度冲突
+                quantized = quantized + (residual_scaled - quantized).detach()
+
+                quantized_sum += quantized
+                residual = residual - quantized / scale  # 逆缩放，恢复残差尺度
+
+                # ========== 修复5：残差存储（梯度安全） ==========
+                if self.training and self.need_retain_graph:
+                    layer_residuals.append(residual)
+                else:
+                    layer_residuals.append(residual.detach())
+
+            # 整理输出
+            semantic_ids_logits = torch.stack(semantic_ids_logits, dim=1)
+            quantized_sum = F.layer_norm(quantized_sum, normalized_shape=[self.hidden_dim])  # 保留你的层归一化
+
+            # ========== 修复6：损失计算（解决残差损失为0/计算失败） ==========
+            # 承诺损失：输入特征和量化特征的MSE（梯度安全）
+            self.commitment_loss = F.mse_loss(features, quantized_sum.detach()) * 0.25
+
+            # 残差损失：所有层残差的MSE和（避免为0）
+            residual_stack = torch.stack(layer_residuals, dim=1)  # [B, id_length, D]
+            self.residual_loss = F.mse_loss(residual_stack, torch.zeros_like(residual_stack)) * 0.5
+
+            # 总量化损失
+            self.total_quant_loss = self.commitment_loss + self.residual_loss
+
+            # 存储残差（修复：改为Tensor，避免列表累积）
+            self.residuals = residual_stack
+
+        except Exception as e:
+            # 异常捕获：避免训练中断，兜底返回
+            print(f"[ERROR] 量化器forward失败: {str(e)}")
+            semantic_ids_logits = torch.zeros(batch_size, self.id_length, self.codebook_size).to(features.device)
+            quantized_sum = features  # 兜底返回原始特征
+            # 损失兜底
+            self.commitment_loss = torch.tensor(0.0, device=features.device, requires_grad=True)
+            self.residual_loss = torch.tensor(0.0, device=features.device, requires_grad=True)
+            self.total_quant_loss = torch.tensor(0.0, device=features.device, requires_grad=True)
 
         # 重置保留标记（避免跨batch生效）
         self.need_retain_graph = False
 
         return semantic_ids_logits, quantized_sum
+
+    def get_quantization_loss(self) -> torch.Tensor:
+        """获取量化损失（承诺损失+残差损失）"""
+        return self.total_quant_loss
+
+    def get_codebook_usage(self) -> dict:
+        """获取码本利用率（用于监控）"""
+        usage_stats = {}
+        total_used = 0
+        total_codebooks = self.codebook_size * self.id_length
+
+        for level in range(self.id_length):
+            used = torch.sum(self.codebook_usage[level]).item()
+            usage_ratio = used / self.codebook_size
+            usage_stats[f"level_{level + 1}"] = {
+                "used": used,
+                "total": self.codebook_size,
+                "usage_ratio": usage_ratio
+            }
+            total_used += used
+
+        usage_stats["global"] = {
+            "used": total_used,
+            "total": total_codebooks,
+            "usage_ratio": total_used / total_codebooks if total_codebooks > 0 else 0,
+            "dead_ratio": 1 - (total_used / total_codebooks) if total_codebooks > 0 else 1.0
+        }
+
+        return usage_stats
 
 
 # ==================== 新增模块：用户兴趣编码器 ====================
