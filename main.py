@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from collections import defaultdict
 
+from utils.utils import validate_semantic_id_uniqueness
+
 # 添加项目根目录到路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -644,6 +646,8 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
             stage_configs=[stage1_config],
             skip_validation=True  # 预训练阶段跳过验证
         )
+
+        validate_semantic_id_uniqueness(model, pretrain_loader, config.device)
 
         logger.info("\n" + "-"*50)
         logger.info("===== 阶段2：训练序列模型（Cross Entropy） =====")

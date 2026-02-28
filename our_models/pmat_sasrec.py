@@ -490,16 +490,12 @@ class PMAT_SASRec(AbstractTrainableModel):
                       recon_loss_weight * recon_loss +
                       residual_loss_weight * residual_loss)
 
-        if self.training:
-            self.item_encoder.monitor_codebook(semantic_logits)
-            print(
-                f"[训练日志] 重建损失: {recon_loss.item():.4f}, 残差损失: {residual_loss.item():.4f}, 总损失: {total_loss.item():.4f}")
-    
         return {
             'total_loss': total_loss,
             'intra_loss': intra_loss,
             'inter_loss': inter_loss,
             'recon_loss': recon_loss,
+            'residual_loss': residual_loss,
         }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
@@ -799,6 +795,8 @@ class PMAT_SASRec(AbstractTrainableModel):
             metrics = {
                 'intra_loss': losses['intra_loss'].item(),
                 'inter_loss': losses['inter_loss'].item(),
+                'recon_loss': losses['recon_loss'].item(),
+                'residual_loss': losses['residual_loss'].item(),
             }
             return losses['total_loss'], metrics
         else:
