@@ -244,15 +244,18 @@ class PMATItemEncoder(nn.Module):
         loss = 0.0
         num_layers = len(layer_indices)
 
-        for indices in layer_indices:
+        for idx, indices in enumerate(layer_indices):
+
             # indices: [B]
             freq = torch.bincount(indices, minlength=codebook_size).float()
             freq = freq / (freq.sum() + 1e-8)
             entropy = -torch.sum(freq * torch.log(freq + 1e-8))
             max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
-            loss += (1.0 - entropy / max_entropy)
+            layer_loss = (1.0 - entropy / max_entropy)
 
-        return loss / num_layers
+            loss += layer_loss
+        avg_loss = loss / num_layers
+        return avg_loss
 
 
 class PMAT_SASRec(AbstractTrainableModel):
