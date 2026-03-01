@@ -363,7 +363,7 @@ class SemanticIDQuantizer(nn.Module):
         # 多层量化逻辑
         for i in range(self.id_length):
             # 1. 计算相似度（原有逻辑）
-            similarity = torch.matmul(residual, self.codebooks[i].T) / torch.clamp(self.temperature, min=0.05)
+            similarity = torch.matmul(residual, self.codebooks[i].T) / torch.clamp(self.temperature, min=0.04)
 
             # 训练时加入Gumbel噪声（推理时仍用硬argmax）
             if self.training:

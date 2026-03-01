@@ -238,22 +238,28 @@ class PMATItemEncoder(nn.Module):
 
     def compute_usage_balance_loss(self, layer_indices, codebook_size):
         """
-        ICML 2022 / NeurIPS 2023 标准：码本使用均衡损失
-        让每个码本被尽量均匀使用，不会扎堆
+        升级版本：熵损失 + 重复惩罚，针对长尾重复ID
         """
         loss = 0.0
         num_layers = len(layer_indices)
 
         for idx, indices in enumerate(layer_indices):
-
-            # indices: [B]
+            # 1. 原有熵损失（保证码本均匀使用）
             freq = torch.bincount(indices, minlength=codebook_size).float()
             freq = freq / (freq.sum() + 1e-8)
             entropy = -torch.sum(freq * torch.log(freq + 1e-8))
             max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
-            layer_loss = (1.0 - entropy / max_entropy)
+            entropy_loss = (1.0 - entropy / max_entropy)
 
+            # 2. 新增：重复次数惩罚（打击高频重复的索引）
+            count = torch.bincount(indices, minlength=codebook_size).float()
+            # 对重复次数>10的索引，做平方惩罚（放大高频索引的损失）
+            repeat_penalty = torch.sum(torch.clamp(count - 10, min=0.0) ** 2) / indices.shape[0]
+
+            # 组合损失（熵损失为主，重复惩罚为辅）
+            layer_loss = entropy_loss + 0.1 * repeat_penalty
             loss += layer_loss
+
         avg_loss = loss / num_layers
         return avg_loss
 
@@ -434,7 +440,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.01)
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 1.0)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
-        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 1.0)
+        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 1.2)
 
         # if self.current_stage_epoch > 15:
         #     balance_loss_weight = 0.3
