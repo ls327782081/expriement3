@@ -2118,7 +2118,7 @@ def get_all_item_pretrain_dataloader(
     if os.path.exists(cache_file_name):
         logger.info(f"Loading cached data from {cache_file_name}")
         with open(cache_file_name, "rb") as f:
-            data = pickle.load(f)
+            data = pandas.read_pickle(f)
     else:
         processor = AmazonBooksProcessor(category=category, quick_mode=quick_mode, logger=logger)
         data = processor.load_dataset_for_experiment(

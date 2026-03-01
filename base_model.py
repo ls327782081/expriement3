@@ -307,7 +307,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
                 total_metrics[k] = total_metrics.get(k, 0.0) + (v.item() if isinstance(v, torch.Tensor) else v)
 
             self.on_batch_end(batch, batch_idx, stage_id, stage_kwargs, loss, metrics)
-            pbar.set_postfix({"loss": loss.item()})
+            pbar.set_postfix({"loss": loss.item(), "metrics": metrics})
 
         pbar.close()
         # 计算平均指标

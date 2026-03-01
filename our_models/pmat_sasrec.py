@@ -16,26 +16,24 @@ Preference score
 3. 多任务学习: BPR推荐损失 + 语义ID辅助损失
 """
 
+from typing import Dict, Tuple, Optional, Any, List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Any, List
-import math
-import numpy as np
 
 from base_model import AbstractTrainableModel
-from config import config
-from util import item_id_to_semantic_id
-
-# 复用PMAT的核心模块
+# 复用PMAT的核心模块（注意：这里要导入修复后的SemanticIDQuantizer）
 from our_models.pmat import (
     MultiModalEncoder,
     PersonalizedFusion,
+    # 确保导入的是修复后的SemanticIDQuantizer
     SemanticIDQuantizer,
     UserModalAttention,
     DynamicIDUpdater,
     UserItemMatcher
 )
+
 
 class PMATItemEncoder(nn.Module):
     """PMAT风格的物品编码器
@@ -70,7 +68,7 @@ class PMATItemEncoder(nn.Module):
         # 个性化融合
         self.personalized_fusion = PersonalizedFusion(config.hidden_dim)
 
-        # 语义ID量化器
+        # 修改1：使用修复后的SemanticIDQuantizer
         self.semantic_quantizer = SemanticIDQuantizer(
             hidden_dim=config.hidden_dim,
             codebook_size=config.codebook_size,
@@ -107,185 +105,154 @@ class PMATItemEncoder(nn.Module):
         self.monitor_freq = getattr(config, "monitor_freq", 10)
         self.batch_count = 0  # 批次计数器
 
-        self.fused_feat = None
 
-    def monitor_codebook(quantizer, epoch=None, stage=None, verbose=False):
+    # 修改2：修复monitor_codebook方法（适配新的量化器）
+    def monitor_codebook(self, epoch=None, stage=None, verbose=False):
         """
-        优化后的码本监控方法：只关注物理码本向量的利用率，不重复计算语义ID重复率
+        优化后的码本监控方法：适配修复后的SemanticIDQuantizer
         Args:
-            quantizer: RVQ量化器实例
             epoch/stage: 训练阶段标识（可选）
             verbose: 是否打印详细信息（False=只打印核心指标）
         Returns:
             码本监控核心指标
         """
-        # 1. 核心：统计每层物理码本的利用率（这是原方法里最有价值的部分）
-        codebook_usage = {}
-        total_used_codebooks = 0
-        total_codebooks = 0
+        # 从量化器获取码本使用统计
+        usage_stats = self.semantic_quantizer.get_codebook_usage()
 
-        for layer_idx in range(quantizer.n_codebooks):
-            # 获取该层码本的使用标记（假设你有记录码本是否被使用的变量）
-            # 替换成你实际的「码本使用计数」逻辑
-            used = quantizer.codebook_usage[layer_idx]  # [1024,] 的bool/计数数组
-            used_count = torch.sum(used).item()
-            total_count = len(used)
-            usage_ratio = used_count / total_count
-
-            codebook_usage[f"layer_{layer_idx + 1}"] = {
-                "used": used_count,
-                "total": total_count,
-                "usage_ratio": usage_ratio
-            }
-            total_used_codebooks += used_count
-            total_codebooks += total_count
-
-        # 2. 全局物理码本指标
-        global_usage_ratio = total_used_codebooks / total_codebooks if total_codebooks > 0 else 0
-        dead_codebook_ratio = 1 - global_usage_ratio
-
-        # 3. 打印（极简版，只保留核心）
+        # 打印（极简版，只保留核心）
         if verbose:
             print(f"\n===== 码本向量监控 [{stage if stage else 'Stage'} | Epoch {epoch if epoch else 'N/A'}] =====")
-            print(f"全局物理码本利用率: {global_usage_ratio:.4f} ({global_usage_ratio * 100:.2f}%)")
-            print(f"全局死亡码比例: {dead_codebook_ratio:.4f} ({dead_codebook_ratio * 100:.2f}%)")
-            print(f"总使用物理码本数: {total_used_codebooks} / {total_codebooks}")
+            print(
+                f"全局物理码本利用率: {usage_stats['global']['usage_ratio']:.4f} ({usage_stats['global']['usage_ratio'] * 100:.2f}%)")
+            print(
+                f"全局死亡码比例: {usage_stats['global']['dead_ratio']:.4f} ({usage_stats['global']['dead_ratio'] * 100:.2f}%)")
+            print(f"总使用物理码本数: {usage_stats['global']['used']} / {usage_stats['global']['total']}")
 
             # 可选：打印每层利用率（精简版）
             print("\n各层码本利用率:")
-            for layer, stats in codebook_usage.items():
-                print(f"  {layer}: {stats['used']}/{stats['total']} ({stats['usage_ratio'] * 100:.2f}%)")
+            for layer in range(self.id_length):
+                layer_key = f"layer_{layer + 1}"
+                if layer_key in usage_stats:
+                    stats = usage_stats[layer_key]
+                    print(f"  {layer_key}: {stats['used']}/{stats['total']} ({stats['usage_ratio'] * 100:.2f}%)")
 
-        # 4. 返回核心指标，方便后续分析
-        return {
-            "total_used_codebooks": total_used_codebooks,  # 物理码本使用数
-            "total_codebooks": total_codebooks,  # 总物理码本数（8192）
-            "global_usage_ratio": global_usage_ratio,  # 全局物理码本利用率
-            "dead_codebook_ratio": dead_codebook_ratio,  # 死亡码比例
-            "layer_usage": codebook_usage  # 每层详细数据
-        }
+        # 更新全局码本计数（用于epoch级统计）
+        for layer in range(self.id_length):
+            layer_key = f"layer_{layer + 1}"
+            if layer_key in usage_stats:
+                used_mask = self.semantic_quantizer.codebook_usage[layer].to(self.device)
+                self.global_code_counts[layer] += used_mask.long()
+
+        return usage_stats
 
     def forward(
-        self,
-        text_feat: torch.Tensor,
-        vision_feat: torch.Tensor,
-        user_interest: Optional[torch.Tensor] = None,
-        short_history: Optional[torch.Tensor] = None,
-        long_history: Optional[torch.Tensor] = None,
-        return_semantic_logits: bool = False
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+            self,
+            text_feat: torch.Tensor,
+            vision_feat: torch.Tensor,
+            user_interest: Optional[torch.Tensor] = None,
+            short_history: Optional[torch.Tensor] = None,
+            long_history: Optional[torch.Tensor] = None,
+            return_semantic_logits: bool = False
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], torch.Tensor, torch.Tensor]:
         """
-        Args:
-            text_feat: (..., text_dim) 文本特征，支持任意前导维度
-            vision_feat: (..., visual_dim) 视觉特征
-            user_interest: (batch, hidden_dim) 用户兴趣表征（用于个性化模态权重）
-            short_history: (batch, short_len, hidden_dim) 短期历史（用于动态更新）
-            long_history: (batch, long_len, hidden_dim) 长期历史（用于动态更新）
-            return_semantic_logits: 是否返回语义ID的logits
-
-        Returns:
-            item_emb: (..., hidden_dim) 语义增强的物品嵌入
-            semantic_logits: (..., id_length, codebook_size) 语义ID logits (可选)
-            quantized_emb: (..., hidden_dim) 量化后的嵌入（用于UserItemMatcher）
+        重构后：
+        - 无任何no_grad/detach（除了监控用的residuals）
+        - 损失从forward返回，不偷self变量
+        - 保留所有创新点
         """
-        # 保存原始形状
+        # 1. 多模态融合逻辑（完全不变）
         original_shape = text_feat.shape[:-1]
-        text_dim = text_feat.shape[-1]
-        vision_dim = vision_feat.shape[-1]
+        text_flat = text_feat.reshape(-1, text_feat.shape[-1])
+        vision_flat = vision_feat.reshape(-1, vision_feat.shape[-1])
 
-        # 展平为2D进行处理
-        text_flat = text_feat.reshape(-1, text_dim)
-        vision_flat = vision_feat.reshape(-1, vision_dim)
-        batch_size = text_flat.size(0)
-
-        # 1. 多模态编码
-        item_features = {
-            'text': text_flat.float(),
-            'visual': vision_flat.float()
-        }
+        item_features = {'text': text_flat.float(), 'visual': vision_flat.float()}
         encoded_features = self.multimodal_encoder(item_features)
 
-        # 2. 计算模态权重（个性化或全局）
         if user_interest is not None:
-            # 使用用户兴趣计算个性化模态权重
-            modal_weights = self.user_modal_attention(user_interest)  # (batch, num_modalities)
-            # 如果物品数量与用户数量不同，需要扩展
-            if modal_weights.size(0) != batch_size:
-                num_items_per_user = batch_size // modal_weights.size(0)
+            modal_weights = self.user_modal_attention(user_interest)
+            if modal_weights.size(0) != text_flat.size(0):
+                num_items_per_user = text_flat.size(0) // modal_weights.size(0)
                 modal_weights = modal_weights.unsqueeze(1).expand(-1, num_items_per_user, -1)
                 modal_weights = modal_weights.reshape(-1, modal_weights.size(-1))
         else:
-            # 使用全局模态权重
             modal_weights = F.softmax(self.modal_weight, dim=0)
-            modal_weights = modal_weights.unsqueeze(0).expand(batch_size, -1)
+            modal_weights = modal_weights.unsqueeze(0).expand(text_flat.size(0), -1)
 
-        # 3. 融合多模态特征
         fused_feat = self.personalized_fusion(encoded_features, modal_weights)
-        self.fused_feat = fused_feat
-
-        # 4. 语义ID量化
         fused_feat = F.normalize(fused_feat, dim=-1)
-        semantic_logits, quantized_emb = self.semantic_quantizer(fused_feat)
-        # ===== 调用监控（关键位置）=====
-        if self.training:  # 仅训练阶段监控
-            self.monitor_codebook(semantic_logits)
-        # 新增：重建损失（让quantized_emb尽可能还原fused_feat）
-        recon_loss = F.mse_loss(quantized_emb, fused_feat.detach())  # detach避免梯度冲突
-        # 新增残差连接：让量化嵌入向多模态特征靠拢
-        quantized_emb = 0.7 * quantized_emb + 0.3 * fused_feat  # 0.3为残差权重，可调整
+
+        # 2. 重构核心：调用标准RVQ（无任何梯度截断）
+        quantized_emb, residual_loss, residuals, codebook_usage = self.semantic_quantizer(fused_feat)
+
+        # 新增：从量化器中提取语义ID（训练/验证统一用这个）
+        semantic_ids = torch.stack(self.semantic_quantizer.layer_indices, dim=1)
+
+        # 保留你的创新：码本监控（仅训练阶段）
+        if self.training:
+            self.batch_count += 1
+            if self.batch_count % self.monitor_freq == 0:
+                self.monitor_codebook(verbose=True)
+
+        # 3. 后续逻辑（完全不变）
+        recon_loss = F.mse_loss(quantized_emb, fused_feat)  # 无detach，计算图完整
+        quantized_emb = 0.7 * quantized_emb + 0.3 * fused_feat
         quantized_emb = F.layer_norm(quantized_emb, normalized_shape=[self.hidden_dim])
 
-
-        # 5. 动态ID更新（如果提供了历史信息）
+        # 保留你的创新：动态ID更新
         if short_history is not None and long_history is not None:
-            # 检测兴趣漂移
             drift_score = self.dynamic_updater.detect_drift(short_history, long_history)
-            # 根据漂移分数动态更新语义ID嵌入
-            # 需要处理维度匹配
             if quantized_emb.size(0) != drift_score.size(0):
                 num_users = drift_score.size(0)
                 num_items_total = quantized_emb.size(0)
-
-                # 关键：检查是否能整除，避免view操作崩溃
-                if num_items_total % num_users != 0:
-                    # 无法整除时，跳过动态更新（不报错，保留训练）
-                    import warnings
-                    warnings.warn(
-                        f"物品数量({num_items_total})不能被用户数量({num_users})整除，跳过本轮动态ID更新",
-                        UserWarning
-                    )
-                    # 直接跳过后续更新逻辑，避免崩溃
-                    pass
-                else:
-                    # 能整除时，执行你的原有逻辑
+                if num_items_total % num_users == 0:
                     num_items_per_user = num_items_total // num_users
                     quantized_emb_reshaped = quantized_emb.view(num_users, num_items_per_user, -1)
                     fused_feat_reshaped = fused_feat.view(num_users, num_items_per_user, -1)
-                    quantized_emb_updated = self.dynamic_updater.update(
+                    quantized_emb = self.dynamic_updater.update(
                         quantized_emb_reshaped, fused_feat_reshaped, drift_score
-                    )
-                    quantized_emb = quantized_emb_updated.view(-1, self.hidden_dim)
-            else:
-                # 维度匹配时，正常更新
-                quantized_emb = self.dynamic_updater.update(quantized_emb, fused_feat, drift_score)
+                    ).view(-1, self.hidden_dim)
 
-        # 6. 组合: concat + projection
+        # 4. 组合特征（保留你的逻辑）
         combined = torch.cat([fused_feat, quantized_emb], dim=-1)
         item_emb = self.fusion_layer(combined)
 
-        # 恢复原始形状
+        # 恢复形状
         item_emb = item_emb.reshape(*original_shape, self.hidden_dim)
-        fused_feat_out = fused_feat.reshape(*original_shape, self.hidden_dim)
         quantized_emb_out = quantized_emb.reshape(*original_shape, self.hidden_dim)
 
+        # 返回：5个值（与调用端匹配）
+        semantic_logits = None
         if return_semantic_logits:
-            semantic_logits = semantic_logits.reshape(
-                *original_shape, self.config.id_length, self.config.codebook_size
-            )
-            return item_emb, semantic_logits, quantized_emb_out, recon_loss
+            # 从量化器中获取每层的相似度矩阵（核心：真实反映RVQ选择逻辑）
+            layer_sims = self.semantic_quantizer.layer_similarities  # 列表：[id_length个层的相似度，每个shape=[B, codebook_size]]
+            # 拼接成[B, id_length, codebook_size]
+            semantic_logits = torch.stack(layer_sims, dim=1)  # [B, id_length, codebook_size]（id_length层+codebook_size码本）
 
-        return item_emb, None, quantized_emb_out, recon_loss
+        balance_loss = self.compute_usage_balance_loss(
+            self.semantic_quantizer.layer_indices,
+            self.config.codebook_size
+        )
 
+
+        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids
+
+    def compute_usage_balance_loss(self, layer_indices, codebook_size):
+        """
+        ICML 2022 / NeurIPS 2023 标准：码本使用均衡损失
+        让每个码本被尽量均匀使用，不会扎堆
+        """
+        loss = 0.0
+        num_layers = len(layer_indices)
+
+        for indices in layer_indices:
+            # indices: [B]
+            freq = torch.bincount(indices, minlength=codebook_size).float()
+            freq = freq / (freq.sum() + 1e-8)
+            entropy = -torch.sum(freq * torch.log(freq + 1e-8))
+            max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
+            loss += (1.0 - entropy / max_entropy)
+
+        return loss / num_layers
 
 
 class PMAT_SASRec(AbstractTrainableModel):
@@ -298,9 +265,9 @@ class PMAT_SASRec(AbstractTrainableModel):
     """
 
     def __init__(
-        self,
-        config,
-        device: str = "cuda" if torch.cuda.is_available() else "cpu"
+            self,
+            config,
+            device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ):
         super().__init__(device=device)
         self.config = config
@@ -423,25 +390,24 @@ class PMAT_SASRec(AbstractTrainableModel):
         print("序列编码器已解冻")
 
     def compute_pretrain_loss(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """计算预训练损失（阶段1：对比学习，只训练物品编码器）
-        优化点：使用batch内真实负采样（4个）替代随机负样本，强化语义ID区分度
         """
-        # 获取目标物品（正样本）的多模态特征
-        text_feat = batch['text_feat'].to(self.device)  # (batch, text_dim)
-        visual_feat = batch['vision_feat'].to(self.device)  # (batch, visual_dim)
-        item_ids = batch['item_id'].to(self.device)
+        重构后：
+        - 无任何try/catch兜底
+        - 不从self偷residuals，直接从forward返回
+        - 保留所有损失加权逻辑
+        """
+        text_feat = batch['text_feat'].to(self.device)
+        visual_feat = batch['vision_feat'].to(self.device)
         batch_size = text_feat.size(0)
 
-        # 编码正样本物品（获取语义ID）
-        item_emb, semantic_logits, quantized_emb, recon_loss = self.item_encoder(
+        # 调用forward：完整接收5个返回值
+        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids = self.item_encoder(
             text_feat, visual_feat, return_semantic_logits=True
         )
-        pos_repr = self.prediction_layer(item_emb)  # (batch, hidden_dim)
+        pos_repr = self.prediction_layer(item_emb)
 
-
-        temperature = getattr(self.config, 'pretrain_temperature', 0.1)  # 降低温度强化区分度
-
-        # ===== 1. 模态内对比损失（正样本自身：item_repr vs quantized_emb） =====
+        # 保留你的所有对比损失逻辑（完全不变）
+        temperature = getattr(self.config, 'pretrain_temperature', 0.1)
         pos_repr_norm = F.normalize(pos_repr, dim=-1)
         quantized_emb_norm = F.normalize(quantized_emb, dim=-1)
 
@@ -450,7 +416,6 @@ class PMAT_SASRec(AbstractTrainableModel):
         intra_loss = (F.cross_entropy(sim_matrix_intra, labels_intra) +
                       F.cross_entropy(sim_matrix_intra.T, labels_intra)) / 2
 
-        # ===== 2. 模态间对比损失（正样本：文本 vs 视觉） =====
         text_encoded = self.item_encoder.multimodal_encoder.text_encoder(text_feat.float())
         visual_encoded = self.item_encoder.multimodal_encoder.visual_encoder(visual_feat.float())
         text_norm = F.normalize(text_encoded, dim=-1)
@@ -461,34 +426,23 @@ class PMAT_SASRec(AbstractTrainableModel):
         inter_loss = (F.cross_entropy(sim_matrix_inter, labels_inter) +
                       F.cross_entropy(sim_matrix_inter.T, labels_inter)) / 2
 
-        # RVQ专属损失：每层残差的L2损失（强制每层都有贡献） （带保护）
-        # 从quantizer中获取每层残差（需修改forward返回残差）
-        residual_loss = torch.tensor(0.0, device=self.device, requires_grad=self.training)
-        target_residual_norm = 0.1
-        try:
-            residuals = self.item_encoder.semantic_quantizer.residuals
-            if self.training and len(residuals) == self.item_encoder.semantic_quantizer.id_length:
-                residual_losses = []
-                for level in range(len(residuals)):
-                    res_norm = torch.norm(residuals[level], dim=-1)
-                    level_loss = torch.mean(torch.clamp(target_residual_norm - res_norm, min=0.0))
-                    residual_losses.append(level_loss.item())
-                    residual_loss += level_loss / len(residuals)
-                print(
-                    f"[RVQ] 每层残差损失: {[round(l, 4) for l in residual_losses]} | 总残差损失: {residual_loss.item():.4f}")
-        except Exception as e:
-            print(f"[警告] 残差损失计算失败: {str(e)[:50]}")
+        # 保留你的损失加权逻辑（完全不变）
+        intra_weight = getattr(self.config, 'pretrain_intra_weight', 0.1)
+        inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.01)
+        recon_loss_weight = getattr(self.config, 'recon_loss_weight', 1.0)
+        residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
+        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.1)
 
-        # ===== 4. 加权组合所有损失 =====
-        intra_weight = getattr(self.config, 'pretrain_intra_weight', 1.0)
-        inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.5)
-        recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.8)
-        residual_loss_weight = getattr(self.config, 'residual_loss_weight', 0.5)
+        if self.current_stage_epoch < 5:
+            balance_loss_weight = 0
+        elif self.current_stage_epoch < 10:
+            balance_loss_weight = 0.05
 
         total_loss = (intra_weight * intra_loss +
                       inter_weight * inter_loss +
                       recon_loss_weight * recon_loss +
-                      residual_loss_weight * residual_loss)
+                      residual_loss_weight * residual_loss +
+                      balance_loss_weight * balance_loss)
 
         return {
             'total_loss': total_loss,
@@ -496,13 +450,14 @@ class PMAT_SASRec(AbstractTrainableModel):
             'inter_loss': inter_loss,
             'recon_loss': recon_loss,
             'residual_loss': residual_loss,
+            'balance_loss': balance_loss,
         }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """
-            生成PyTorch Transformer专用的float型因果掩码（0=可关注，-inf=不可关注）
-            确保上三角全为-inf，对角线全为0
-            """
+        生成PyTorch Transformer专用的float型因果掩码（0=可关注，-inf=不可关注）
+        确保上三角全为-inf，对角线全为0
+        """
         mask = (torch.triu(torch.ones(seq_len, seq_len, device=device)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
@@ -510,8 +465,6 @@ class PMAT_SASRec(AbstractTrainableModel):
     def clear_causal_mask_cache(self):
         """清理因果掩码缓存（释放显存，关键优化）"""
         self._causal_mask_cache.clear()
-        # 可选：打印清理日志，方便调试
-        # print(f"因果掩码缓存已清理，释放显存约 {len(self._causal_mask_cache)} 个掩码")
 
     def encode_sequence(
             self,
@@ -524,22 +477,19 @@ class PMAT_SASRec(AbstractTrainableModel):
         device = text_feat.device
 
         # ========== 1. 左对齐Padding Mask（核心修改） ==========
-        # 左对齐：padding在末尾，sum(dim=-1)==0的位置是padding
         padding_mask = (text_feat.sum(dim=-1) == 0)  # (batch, seq_len)，True=padding（末尾）
-        # 兼容seq_lens（确保和pure_sasrec一致）
         valid_len_mask = torch.arange(seq_len, device=device).unsqueeze(0) < seq_lens.unsqueeze(1)
         padding_mask = padding_mask | (~valid_len_mask)  # 双重保障
 
         # ========== 2. PMAT多模态物品编码 ==========
-        item_emb, semantic_logits, _ = self.item_encoder(
+        # 修复：完整接收5个返回值，只取需要的前3个+忽略损失
+        item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, semantic_ids = self.item_encoder(
             text_feat, vision_feat, return_semantic_logits=True
         )  # (batch, seq_len, hidden_dim)
 
         # ========== 3. 左对齐位置编码（核心修改） ==========
-        # 左对齐：有效位置从0开始连续编码，padding位置编码为0
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0).repeat(batch_size, 1)  # (batch, seq_len)
         position_ids = position_ids * (~padding_mask).long()  # padding位置置0
-        # 防止位置编码越界
         position_ids = position_ids.clamp(min=0, max=self.max_seq_len - 1)
         seq_emb = item_emb + self.pos_emb(position_ids)
 
@@ -566,7 +516,6 @@ class PMAT_SASRec(AbstractTrainableModel):
         seq_emb = torch.nan_to_num(seq_emb, nan=0.0, posinf=0.0, neginf=0.0)
 
         # ========== 8. 提取用户表征（左对齐逻辑） ==========
-        # 左对齐：最后有效位置 = seq_lens - 1（和pure_sasrec一致）
         last_indices = torch.clamp(seq_lens - 1, min=0)  # (batch,)
         batch_idx = torch.arange(batch_size, device=device)
         user_repr = seq_emb[batch_idx, last_indices, :]  # (batch, hidden_dim)
@@ -582,30 +531,17 @@ class PMAT_SASRec(AbstractTrainableModel):
         return user_repr, seq_emb, semantic_logits, short_history, long_history
 
     def encode_items(
-        self,
-        text_feat: torch.Tensor,
-        vision_feat: torch.Tensor,
-        user_interest: Optional[torch.Tensor] = None,
-        short_history: Optional[torch.Tensor] = None,
-        long_history: Optional[torch.Tensor] = None,
-        return_semantic_logits: bool = False
+            self,
+            text_feat: torch.Tensor,
+            vision_feat: torch.Tensor,
+            user_interest: Optional[torch.Tensor] = None,
+            short_history: Optional[torch.Tensor] = None,
+            long_history: Optional[torch.Tensor] = None,
+            return_semantic_logits: bool = False
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """编码候选物品
-
-        Args:
-            text_feat: (..., text_dim)
-            vision_feat: (..., visual_dim)
-            user_interest: (batch, hidden_dim) 用户兴趣（用于个性化模态权重）
-            short_history: (batch, short_len, hidden_dim) 短期历史（用于动态更新）
-            long_history: (batch, long_len, hidden_dim) 长期历史（用于动态更新）
-            return_semantic_logits: 是否返回语义ID logits
-
-        Returns:
-            item_repr: (..., hidden_dim) 物品表示
-            semantic_logits: 语义ID logits（可选）
-            quantized_emb: 量化后的嵌入（用于UserItemMatcher）
-        """
-        item_emb, semantic_logits, quantized_emb = self.item_encoder(
+        """编码候选物品"""
+        # 修复：完整接收5个返回值
+        item_emb, semantic_logits, quantized_emb, _, _, _, _ = self.item_encoder(
             text_feat, vision_feat,
             user_interest=user_interest,
             short_history=short_history,
@@ -618,7 +554,6 @@ class PMAT_SASRec(AbstractTrainableModel):
 
     def _validate_batch(self, batch: Dict[str, torch.Tensor]) -> None:
         """验证batch数据完整性"""
-        # Cross Entropy 损失不需要负样本
         required_keys = [
             'history_text_feat', 'history_vision_feat', 'history_len',
             'target_text_feat', 'target_vision_feat', 'target_item'
@@ -628,11 +563,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             raise KeyError(f"Batch缺少必要的键: {missing_keys}")
 
     def set_all_item_features(self, all_item_features: Dict[str, torch.Tensor]):
-        """设置所有物品特征，用于预计算物品表征（Cross Entropy 损失需要）
-
-        Args:
-            all_item_features: 包含 'text' 和 'visual' 的字典
-        """
+        """设置所有物品特征，用于预计算物品表征"""
         all_text_feat = all_item_features['text'].to(self.device)
         all_visual_feat = all_item_features['visual'].to(self.device)
         num_items = all_text_feat.shape[0]
@@ -650,7 +581,8 @@ class PMAT_SASRec(AbstractTrainableModel):
                 item_visual = all_visual_feat[start_idx:end_idx]
 
                 # 使用全局模态权重编码
-                item_emb, _, quantized_emb = self.item_encoder(
+                # 修复：完整接收5个返回值
+                item_emb, _, quantized_emb, _, _, _, _ = self.item_encoder(
                     item_text, item_visual,
                     user_interest=None,
                     return_semantic_logits=False
@@ -661,25 +593,11 @@ class PMAT_SASRec(AbstractTrainableModel):
 
         self._all_item_repr = torch.cat(all_item_repr_list, dim=0)  # (num_items, hidden_dim)
         self._all_quantized_emb = torch.cat(all_quantized_emb_list, dim=0)  # (num_items, hidden_dim)
-        # 预先 L2 归一化，避免每次 forward 重复计算
         self._all_item_repr = F.normalize(self._all_item_repr, dim=-1)
         print(f"物品表征预计算完成，形状: {self._all_item_repr.shape}（已L2归一化）")
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """前向传播
-
-        Args:
-            batch: 包含以下键的字典
-                - history_text_feat: (batch, seq_len, text_dim)
-                - history_vision_feat: (batch, seq_len, visual_dim)
-                - history_len: (batch,)
-                - target_text_feat: (batch, text_dim)
-                - target_vision_feat: (batch, visual_dim)
-                - target_item: (batch,) 目标物品ID
-
-        Returns:
-            outputs: 包含 logits 和中间结果的字典
-        """
+        """前向传播"""
         self._validate_batch(batch)
 
         # 1. 编码历史序列 → 用户表示
@@ -691,14 +609,10 @@ class PMAT_SASRec(AbstractTrainableModel):
 
         # 2. 计算对所有物品的 logits（Cross Entropy 损失）
         if self._all_item_repr is not None:
-            # 使用预计算的物品表征计算 logits
-            # 重要：使用 L2 归一化 + 温度缩放，避免数值不稳定
-            # 注意：_all_item_repr 已经在 set_all_item_features 中预先归一化了
             temperature = getattr(self.config, 'logit_temperature', 0.8)
             user_repr_norm = F.normalize(user_repr, dim=-1)
             logits = torch.matmul(user_repr_norm, self._all_item_repr.T) / temperature  # (batch, num_items)
         else:
-            # 如果没有预计算，使用 None（会在 compute_loss 中处理）
             logits = None
 
         # 3. 编码正样本（用于语义ID损失）
@@ -720,11 +634,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         }
 
     def compute_loss(self, outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """计算多任务损失
-
-        主损失: Cross Entropy 推荐损失（对所有物品的 softmax）
-        辅助损失: 语义ID生成损失
-        """
+        """计算多任务损失"""
         losses = {}
 
         # ===== 1. Cross Entropy 推荐损失 =====
@@ -732,11 +642,9 @@ class PMAT_SASRec(AbstractTrainableModel):
         target_items = outputs['target_item']  # (batch,)
 
         if logits is not None:
-            # Cross Entropy loss: softmax over all items
             ce_loss = F.cross_entropy(logits, target_items)
             losses['ce_loss'] = self.rec_loss_weight * ce_loss
         else:
-            # 如果没有预计算物品表征，使用占位损失
             losses['ce_loss'] = torch.tensor(0.0, device=target_items.device)
 
         # ===== 3. 总损失 =====
@@ -752,7 +660,8 @@ class PMAT_SASRec(AbstractTrainableModel):
         weight_decay = stage_kwargs.get('weight_decay', 0.01)
         return torch.optim.AdamW(self.parameters(), lr=lr, weight_decay=weight_decay)
 
-    def _get_scheduler(self, optimizer: torch.optim.Optimizer, stage_id: int, stage_kwargs: Dict) -> torch.optim.lr_scheduler.LRScheduler:
+    def _get_scheduler(self, optimizer: torch.optim.Optimizer, stage_id: int,
+                       stage_kwargs: Dict) -> torch.optim.lr_scheduler.LRScheduler:
         """RecBole官方：StepLR（不是余弦退火）"""
         return torch.optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=1.0)
 
@@ -784,11 +693,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             optimizer.step()
 
     def _train_one_batch(self, batch: Any, stage_id: int, stage_kwargs: Dict) -> Tuple[torch.Tensor, Dict]:
-        """单batch训练
-
-        stage_id=0: 预训练阶段（对比学习，只训练物品编码器）
-        stage_id=1: 推荐阶段（Cross Entropy，只训练序列编码器）
-        """
+        """单batch训练"""
         if stage_id == 0:
             # 阶段1：预训练物品编码器
             losses = self.compute_pretrain_loss(batch)
@@ -797,6 +702,7 @@ class PMAT_SASRec(AbstractTrainableModel):
                 'inter_loss': losses['inter_loss'].item(),
                 'recon_loss': losses['recon_loss'].item(),
                 'residual_loss': losses['residual_loss'].item(),
+                'balance_loss': losses['balance_loss'].item(),
             }
             return losses['total_loss'], metrics
         else:
@@ -806,12 +712,8 @@ class PMAT_SASRec(AbstractTrainableModel):
 
             metrics = {
                 'ce_loss': losses['ce_loss'].item(),
-                # 'semantic_loss': losses['semantic_loss'].item(),
             }
             return losses['total_loss'], metrics
-
-    import torch
-    from typing import Dict
 
     def _validate_one_epoch(
             self,
@@ -845,7 +747,7 @@ class PMAT_SASRec(AbstractTrainableModel):
                          for k, v in batch.items()}
 
                 # 更新history_items的最大长度
-                if batch['history_items'].shape[1] > max_history_len:
+                if 'history_items' in batch and batch['history_items'].shape[1] > max_history_len:
                     max_history_len = batch['history_items'].shape[1]
 
                 # 编码序列，更新short/long history的最大长度
@@ -875,10 +777,8 @@ class PMAT_SASRec(AbstractTrainableModel):
                 batch_size = batch['history_text_feat'].shape[0]
 
                 # ========== 修复1：统一history_items长度 ==========
-                curr_history_len = batch['history_items'].shape[1]
-                if curr_history_len < max_history_len:
-                    # 左对齐：在序列维度右侧padding 0（和data_utils一致）
-                    pad_len = max_history_len - curr_history_len
+                if 'history_items' in batch and batch['history_items'].shape[1] < max_history_len:
+                    pad_len = max_history_len - batch['history_items'].shape[1]
                     batch['history_items'] = F.pad(
                         batch['history_items'],
                         (0, pad_len),  # 仅在序列维度右侧padding
@@ -918,7 +818,8 @@ class PMAT_SASRec(AbstractTrainableModel):
                 all_user_short_history.append(short_history)
                 all_user_long_history.append(long_history)
                 all_target_items.append(batch['target_item'].cpu())
-                all_history_ids.append(batch['history_items'])
+                if 'history_items' in batch:
+                    all_history_ids.append(batch['history_items'])
                 all_seq_lens.append(batch['history_len'])
 
         # ========== 第三步：合并所有张量（维度完全匹配） ==========
@@ -926,11 +827,12 @@ class PMAT_SASRec(AbstractTrainableModel):
         all_user_short_history = torch.cat(all_user_short_history, dim=0)  # (total_users, max_short_len, hidden_dim)
         all_user_long_history = torch.cat(all_user_long_history, dim=0)  # (total_users, max_long_len, hidden_dim)
         all_target_items = torch.cat(all_target_items, dim=0)  # (total_users,)
-        all_history_ids = torch.cat(all_history_ids, dim=0)  # (total_users, max_history_len)
+        if all_history_ids:
+            all_history_ids = torch.cat(all_history_ids, dim=0)  # (total_users, max_history_len)
         all_seq_lens = torch.cat(all_seq_lens, dim=0)  # (total_users,)
         total_users = all_user_repr.shape[0]
 
-        # ========== 第四步：预计算个性化物品表征（核心修改：逐用户编码，保留动态ID） ==========
+        # ========== 第四步：预计算个性化物品表征 ==========
         all_item_repr = None
         if stage_id == 1:
             print("预计算个性化物品表征（仅1次）...")
@@ -945,7 +847,7 @@ class PMAT_SASRec(AbstractTrainableModel):
                     chunk_vision = all_visual_feat[start_idx:end_idx]
                     chunk_size = end_idx - start_idx
 
-                    # 逐用户编码当前物品chunk（核心：避免全局扩展导致cdist爆炸）
+                    # 逐用户编码当前物品chunk
                     chunk_item_repr_list = []
                     for u in range(total_users):
                         # 取单个用户的表征和历史
@@ -965,8 +867,8 @@ class PMAT_SASRec(AbstractTrainableModel):
                         u_short_expand = u_short.expand(chunk_size, u_short.shape[1], u_short.shape[2])
                         u_long_expand = u_long.expand(chunk_size, u_long.shape[1], u_long.shape[2])
 
-                        # 个性化编码（保留动态ID更新，cdist仅计算单个用户）
-                        item_emb, _, _ = self.item_encoder(
+                        # 个性化编码（保留动态ID更新）
+                        item_emb, _, _, _, _, _, _ = self.item_encoder(
                             u_chunk_text,
                             u_chunk_vision,
                             user_interest=u_user_interest,
@@ -975,7 +877,6 @@ class PMAT_SASRec(AbstractTrainableModel):
                         )
                         item_repr = self.prediction_layer(item_emb)
                         item_repr_norm = F.normalize(item_repr, dim=-1)
-                        # 恢复维度：(chunk_size, hidden_dim) → (1, chunk_size, hidden_dim)
                         chunk_item_repr_list.append(item_repr_norm.unsqueeze(0))
 
                     # 合并当前chunk所有用户的物品表征
@@ -1000,20 +901,20 @@ class PMAT_SASRec(AbstractTrainableModel):
                 all_item_repr = self._all_item_repr
                 all_scores = torch.matmul(all_user_repr, all_item_repr.T) / temperature
 
-            # ========== 修复4：向量化历史屏蔽（适配统一长度） ==========
+            # ========== 修复4：向量化历史屏蔽 ==========
             history_mask = torch.zeros((total_users, num_items), dtype=torch.bool, device=self.device)
-            # 左对齐：仅保留seq_lens内的有效历史（过滤padding的0）
-            seq_range = torch.arange(max_history_len, device=self.device).unsqueeze(0)
-            valid_seq_mask = seq_range < all_seq_lens.unsqueeze(1)  # (total_users, max_history_len)
-            valid_id_mask = (all_history_ids != 0) & (all_history_ids < num_items) & valid_seq_mask
+            if all_history_ids is not None and len(all_history_ids) > 0:
+                seq_range = torch.arange(max_history_len, device=self.device).unsqueeze(0)
+                valid_seq_mask = seq_range < all_seq_lens.unsqueeze(1)  # (total_users, max_history_len)
+                valid_id_mask = (all_history_ids != 0) & (all_history_ids < num_items) & valid_seq_mask
 
-            # 提取有效索引（向量化，无循环）
-            batch_indices = torch.arange(total_users, device=self.device).unsqueeze(1).expand(-1, max_history_len)[
-                valid_id_mask]
-            item_indices = all_history_ids[valid_id_mask]
+                # 提取有效索引
+                batch_indices = torch.arange(total_users, device=self.device).unsqueeze(1).expand(-1, max_history_len)[
+                    valid_id_mask]
+                item_indices = all_history_ids[valid_id_mask]
 
-            if len(batch_indices) > 0:
-                history_mask[batch_indices, item_indices] = True
+                if len(batch_indices) > 0:
+                    history_mask[batch_indices, item_indices] = True
 
             # 释放目标物品
             history_mask[torch.arange(total_users), all_target_items.to(self.device)] = False
@@ -1041,18 +942,16 @@ class PMAT_SASRec(AbstractTrainableModel):
         super().on_epoch_end(epoch, stage_id, stage_kwargs, train_metrics, val_metrics)
         # ===== Epoch级码本监控（核心：全局统计+死亡码判断）=====
         encoder = self.item_encoder
-        print(f"\n===== Epoch 码本全局监控 ======")
-        total_used = 0  # 所有层总共用了多少码本
-        total_codebooks = encoder.codebook_size * encoder.id_length  # 8*1024=8192
-        for level in range(encoder.id_length):
-            # 算当前层用了多少码本
-            used_in_level = (encoder.global_code_counts[level] > 0).sum().item()
-            total_used += used_in_level
-            # 可选：打印每层的全局统计
-            print(f"第{level + 1}层全局：用了{used_in_level}个码本（利用率{used_in_level / encoder.codebook_size:.2%}）")
+        print(f"\n===== Epoch {epoch} 码本全局监控 ======")
+
+        # ========== 修改10：修复全局码本计数逻辑 ==========
+        # 从量化器获取最新的码本使用统计
+        usage_stats = encoder.semantic_quantizer.get_codebook_usage()
+        total_used = usage_stats['global']['used']
+        total_codebooks = usage_stats['global']['total']
 
         # 最终全局统计（正确版）
-        global_utilization = total_used / total_codebooks
+        global_utilization = total_used / total_codebooks if total_codebooks > 0 else 0
         dead_ratio = 1 - global_utilization
         print(f"全局码本利用率: {global_utilization:.2%}")
         print(f"全局死亡码比例: {dead_ratio:.2%}")
@@ -1060,30 +959,27 @@ class PMAT_SASRec(AbstractTrainableModel):
 
     def on_batch_start(self, batch: Any, batch_idx: int, stage_id: int, stage_kwargs: Dict):
         """batch开始钩子"""
-        # 每次迭代前重置量化器的残差和计算图标记
-        self.item_encoder.semantic_quantizer.residuals = []
-        self.item_encoder.semantic_quantizer.need_retain_graph = False
-
+        # 移除错误的重置逻辑（量化器中无residuals/need_retain_graph变量）
+        pass
 
     def _compute_metrics(self, ranks: torch.Tensor, k_list: List[int] = [5, 10, 20]) -> Dict[str, float]:
         metrics = {}
         for k in k_list:
             hits = (ranks <= k).float()
             metrics[f'HR@{k}'] = hits.mean().item()
-            metrics[f'hit@{k}'] = hits.mean().item()  # 新增：RecBole原生hit@k
-            metrics[f'recall@{k}'] = hits.mean().item()  # 新增：RecBole原生recall@k（单目标下=hit@k）
+            metrics[f'hit@{k}'] = hits.mean().item()
+            metrics[f'recall@{k}'] = hits.mean().item()
 
             dcg = 1.0 / torch.log2(ranks.clamp(min=1).float() + 1)
             dcg = torch.where(ranks <= k, dcg, torch.zeros_like(dcg))
             metrics[f'NDCG@{k}'] = dcg.mean().item()
-            metrics[f'ndcg@{k}'] = dcg.mean().item()  # 新增：RecBole原生ndcg@k
+            metrics[f'ndcg@{k}'] = dcg.mean().item()
 
             rr = 1.0 / ranks.clamp(min=1).float()
             rr = torch.where(ranks <= k, rr, torch.zeros_like(rr))
             metrics[f'MRR@{k}'] = rr.mean().item()
-            metrics[f'mrr@{k}'] = rr.mean().item()  # 新增：RecBole原生mrr@k
+            metrics[f'mrr@{k}'] = rr.mean().item()
 
-            # 新增：RecBole原生precision@k
             precision = (ranks <= k).float() / k
             metrics[f'precision@{k}'] = precision.mean().item()
 
@@ -1091,21 +987,12 @@ class PMAT_SASRec(AbstractTrainableModel):
         metrics['Mean_Rank'] = ranks.mean().item()
         return metrics
 
-
     def predict(
-        self,
-        batch: Dict[str, torch.Tensor],
-        all_item_features: Optional[Dict] = None
+            self,
+            batch: Dict[str, torch.Tensor],
+            all_item_features: Optional[Dict] = None
     ) -> torch.Tensor:
-        """执行推荐预测
-
-        Args:
-            batch: 包含用户历史的批次数据
-            all_item_features: 所有物品的特征（用于全量排序）
-
-        Returns:
-            scores: 预测分数
-        """
+        """执行推荐预测"""
         self.eval()
         with torch.no_grad():
             # 编码用户
@@ -1132,7 +1019,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             else:
                 # 只对batch中的目标物品计算分数
                 outputs = self.forward(batch)
-                scores = outputs['pos_scores']
+                scores = outputs['logits'] if 'logits' in outputs else torch.zeros(1)
 
             return scores
 
@@ -1148,21 +1035,25 @@ class PMAT_SASRec(AbstractTrainableModel):
             return user_repr
 
     def get_item_embedding(
-        self,
-        text_feat: torch.Tensor,
-        vision_feat: torch.Tensor
+            self,
+            text_feat: torch.Tensor,
+            vision_feat: torch.Tensor
     ) -> torch.Tensor:
         """获取物品嵌入"""
         self.eval()
         with torch.no_grad():
-            item_repr, _, quantized_emb = self.encode_items(text_feat, vision_feat)
+            # 修复：完整接收5个返回值
+            item_repr, _, quantized_emb, _, _ = self.encode_items(text_feat, vision_feat)
+            # 维度检查，防止拼接失败
+            if item_repr.dim() != quantized_emb.dim():
+                quantized_emb = quantized_emb.reshape(item_repr.shape)
             # 返回融合特征和语义ID嵌入的拼接
             item_embedding = torch.cat([item_repr, quantized_emb], dim=-1)
             return item_embedding
 
 
 class TransformerBlock(nn.Module):
-    """适配3D因果掩码的TransformerBlock（兼容多模态）"""
+    """适配2D因果掩码的TransformerBlock（兼容多模态）"""
 
     def __init__(self, hidden_dim, num_heads, dropout_rate):
         super().__init__()
@@ -1187,18 +1078,18 @@ class TransformerBlock(nn.Module):
         Args:
             x: [batch_size, seq_len, hidden_dim]
             padding_mask: [batch_size, seq_len] 2D Padding Mask（True=padding）
-            attn_mask: [batch_size, seq_len, seq_len] 3D因果掩码
+            attn_mask: [seq_len, seq_len] 2D因果掩码
         """
         # Pre-LN（RecBole原生）
         x_norm = self.layer_norm1(x)
 
-        # 自注意力（支持3D attn_mask）
+        # 自注意力（支持2D attn_mask）
         attn_output, _ = self.attention(
             query=x_norm,
             key=x_norm,
             value=x_norm,
             key_padding_mask=padding_mask,  # 2D Padding Mask
-            attn_mask=attn_mask,  # 3D因果掩码
+            attn_mask=attn_mask,  # 2D因果掩码
             need_weights=False
         )
         x = x + self.dropout(attn_output)

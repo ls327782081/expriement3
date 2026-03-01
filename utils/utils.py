@@ -134,77 +134,95 @@ def check_tensor(tensor: torch.Tensor, module_name: str, step: str = "") :
         print(f"  - 张量形状: {tensor.shape}")
         return
 
-
-def validate_semantic_id_uniqueness(model, all_item_loader, device):
+def validate_semantic_id_uniqueness(model, all_item_loader, config):
     """
-    验证全量商品编码后的语义ID重复情况
-    Args:
-        model: 训练好的模型（包含item_encoder）
-        all_item_loader: 全量商品的dataloader（只需要item_id、text_feat、vision_feat）
-        device: 设备（cuda/cpu）
-    Returns:
-        统计结果字典
+    验证全量商品编码后的语义ID重复情况（修正版）
+    关键修复：
+    1. 正确计算码本利用率
+    2. 精准解析语义ID维度
+    3. 新增码本使用统计，定位重复根源
     """
-    # 1. 模型切换到评估模式，禁止梯度计算
     model.eval()
-    semantic_id_map = defaultdict(list)  # key: 语义ID字符串, value: 对应的商品ID列表
+    semantic_id_map = defaultdict(list)
     all_item_ids = []
     all_semantic_ids = []
 
-    with torch.no_grad():  # 关键：禁止梯度，加速编码
-        for batch in all_item_loader:
-            # 2. 取出批次数据
-            item_ids = batch['item_id'].cpu().numpy().tolist()  # 商品ID列表
-            text_feat = batch['text_feat'].to(device)
-            visual_feat = batch['vision_feat'].to(device)
+    # 新增：统计码本使用情况（每层的码本是否被使用）
+    codebook_usage = [set() for _ in range(config.id_length)]  # 每层一个集合，存被使用的码本索引
 
-            # 3. 执行编码，获取语义ID（核心步骤）
-            # 假设你的encoder返回：(embedding, 语义ID logits, 量化后的emb, 重建损失)
-            _, semantic_logits, _, _ = model.item_encoder(
+    with torch.no_grad():
+        for batch in all_item_loader:
+            item_ids = batch['item_id'].cpu().numpy().tolist()
+            text_feat = batch['text_feat'].to(config.device)
+            visual_feat = batch['vision_feat'].to(config.device)
+
+            # 执行编码
+            _, semantic_logits, _, _, _, _, batch_semantic_ids = model.item_encoder(
                 text_feat, visual_feat, return_semantic_logits=True
             )
 
-            # 4. 从logits中取出最终的语义ID（8层，每层选概率最大的）
-            batch_semantic_ids = torch.argmax(semantic_logits, dim=-1)  # [B, 8]
-            batch_semantic_ids = batch_semantic_ids.cpu().numpy()
+            # ========== 修正1：精准解析语义ID（适配config） ==========
+            # semantic_logits shape: [B, id_length, codebook_size]
+            assert semantic_logits.ndim == 3, f"semantic_logits维度错误，应为3维[B,id_length,codebook_size]，实际是{semantic_logits.ndim}维"
+            assert semantic_logits.shape[
+                       1] == config.id_length, f"语义ID层数错误，配置是{config.id_length}，实际是{semantic_logits.shape[1]}"
 
-            # 5. 记录映射关系（把8维ID转成字符串当key，方便去重）
+            # ========== 修正2：统计码本使用情况 ==========
+            for layer_idx in range(config.id_length):
+                # 取出该层所有batch的ID，加入集合（自动去重）
+                layer_ids = batch_semantic_ids[:, layer_idx]
+                codebook_usage[layer_idx].update(layer_ids.tolist())
+
+            # 记录ID映射
             for idx, item_id in enumerate(item_ids):
-                semantic_id = batch_semantic_ids[idx]  # [8,]
-                semantic_id_str = '_'.join(map(str, semantic_id))  # "669_755_25_573_188_268_32_358"
+                semantic_id = batch_semantic_ids[idx]  # [id_length,]
+                # 修正：确保转成纯数值（处理tensor/numpy数组两种情况）
+                semantic_id_vals = []
+                for val in semantic_id:
+                    if isinstance(val, torch.Tensor):
+                        semantic_id_vals.append(str(val.item()))
+                    else:
+                        semantic_id_vals.append(str(val))
+                semantic_id_str = '_'.join(semantic_id_vals)
 
                 semantic_id_map[semantic_id_str].append(item_id)
                 all_item_ids.append(item_id)
                 all_semantic_ids.append(semantic_id_str)
 
-    # 6. 核心统计（只保留关键结果，去掉冗余打印）
+    # ========== 核心统计（修正+新增） ==========
     total_items = len(all_item_ids)
-    unique_semantic_ids = len(semantic_id_map)  # 这就是之前日志里的195！
-    duplicate_ratio = 1 - (unique_semantic_ids / total_items)  # 重复率
+    unique_semantic_ids = len(semantic_id_map)
+    duplicate_ratio = 1 - (unique_semantic_ids / total_items)
 
-    # 7. 统计重复最严重的Top5语义ID
-    top5_duplicate = sorted(
-        semantic_id_map.items(),
-        key=lambda x: len(x[1]),
-        reverse=True
-    )[:5]
+    # 修正3：正确计算码本利用率
+    total_codebooks = config.id_length * config.codebook_size  # 总码本数
+    used_codebooks = sum([len(s) for s in codebook_usage])  # 被使用的码本数
+    codebook_utilization = used_codebooks / total_codebooks if total_codebooks > 0 else 0.0
 
-    # 8. 输出核心结果（极简版）
-    print("===== 语义ID重复率验证结果 =====")
+    # ========== 精准输出 ==========
+    print("===== 语义ID重复率验证结果（修正版） =====")
     print(f"1. 商品总数: {total_items}")
     print(f"2. 唯一语义ID数: {unique_semantic_ids}")
     print(f"3. 语义ID重复率: {duplicate_ratio:.4f} ({duplicate_ratio * 100:.2f}%)")
-    print(
-        f"4. 有效码本利用率: {unique_semantic_ids / total_items:.4f} ({unique_semantic_ids / total_items * 100:.2f}%)")
+    print(f"4. 有效码本利用率: {codebook_utilization:.4f} ({codebook_utilization * 100:.2f}%)")
+    print(f"   - 总码本数: {total_codebooks}（{config.id_length}层 × {config.codebook_size}码本/层）")
+    print(f"   - 被使用码本数: {used_codebooks}")
+    print(f"   - 每层使用码本数: {[len(s) for s in codebook_usage]}")
+
+    # Top5重复ID
     print("\n===== Top5 重复最多的语义ID =====")
+    top5_duplicate = sorted(semantic_id_map.items(), key=lambda x: len(x[1]), reverse=True)[:5]
     for i, (sem_id, items) in enumerate(top5_duplicate, 1):
         print(f"{i}. 语义ID {sem_id} → 对应{len(items)}个商品")
 
-    # 返回统计结果，方便后续分析
     return {
         "total_items": total_items,
         "unique_semantic_ids": unique_semantic_ids,
         "duplicate_ratio": duplicate_ratio,
+        "codebook_utilization": codebook_utilization,
+        "total_codebooks": total_codebooks,
+        "used_codebooks": used_codebooks,
+        "layer_codebook_usage": [len(s) for s in codebook_usage],
         "top5_duplicate": top5_duplicate,
-        "semantic_id_map": semantic_id_map  # 完整映射，可保存下来分析
+        "semantic_id_map": semantic_id_map
     }

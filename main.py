@@ -647,7 +647,7 @@ def run_pmat_recommendation_experiment(logger=None, quick_mode=False):
             skip_validation=True  # 预训练阶段跳过验证
         )
 
-        validate_semantic_id_uniqueness(model, pretrain_loader, config.device)
+        validate_semantic_id_uniqueness(model, pretrain_loader, config)
 
         logger.info("\n" + "-"*50)
         logger.info("===== 阶段2：训练序列模型（Cross Entropy） =====")
