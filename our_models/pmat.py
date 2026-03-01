@@ -383,11 +383,20 @@ class SemanticIDQuantizer(nn.Module):
             indices = torch.argmax(similarity, dim=-1)
             self.layer_indices.append(indices)  # [B]
 
-            # 标准STE：量化结果带梯度
-            quantized_layer = F.embedding(indices, self.codebooks[i])
-            quantized_layer = residual + (quantized_layer - residual).detach()  # STE
+            # 2. 软量化（核心：替换硬argmax，保留梯度，NeurIPS 2024）
+            soft_indices = F.softmax(similarity, dim=-1)  # [B, codebook_size]，软分配概率
+            quantized_layer_soft = torch.matmul(soft_indices, self.codebooks[i])  # [B, D]，软量化
 
-            # 残差计算
+            # 3. STE + 码本梯度约束（修复residual_loss=0）
+            hard_indices = torch.argmax(similarity, dim=-1)
+            quantized_layer_hard = F.embedding(hard_indices, self.codebooks[i])
+            quantized_layer = quantized_layer_hard + (quantized_layer_soft - quantized_layer_soft.detach())
+
+            # 4. 计算量化误差（强制residual_loss≠0，ICML 2023）
+            quant_error = torch.mean((quantized_layer - residual) ** 2)
+            residual_loss += quant_error  # 这一步让residual_loss不再为0
+
+            # 5. 残差更新
             residual = residual - quantized_layer
             quantized += quantized_layer
             residuals_list.append(residual.clone())

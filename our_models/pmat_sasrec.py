@@ -230,38 +230,49 @@ class PMATItemEncoder(nn.Module):
 
         balance_loss = self.compute_usage_balance_loss(
             self.semantic_quantizer.layer_indices,
+            self.semantic_quantizer.codebooks,
             self.config.codebook_size
         )
 
 
         return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids
 
-    def compute_usage_balance_loss(self, layer_indices, codebook_size):
+    def compute_codebook_diversity_loss(self, codebooks):
         """
-        升级版本：熵损失 + 重复惩罚，针对长尾重复ID
+        NeurIPS 2024：直接约束码本向量的多样性，绑定梯度
         """
-        loss = 0.0
-        num_layers = len(layer_indices)
+        diversity_loss = 0.0
+        for cb in codebooks:
+            # 码本归一化
+            cb_norm = F.normalize(cb, p=2, dim=-1)  # [C, D]
+            # 码本内两两相似度（越小越多样）
+            cb_sim = torch.mm(cb_norm, cb_norm.T)  # [C, C]
+            # 去掉对角线（自己和自己的相似度）
+            mask = 1 - torch.eye(cb_norm.shape[0], device=cb.device)
+            # 损失：相似度均值越小越好
+            diversity_loss += torch.mean(cb_sim * mask)
+        return diversity_loss / len(codebooks)
 
-        for idx, indices in enumerate(layer_indices):
-            # 1. 原有熵损失（保证码本均匀使用）
+    def compute_usage_balance_loss(self, layer_indices, codebooks, codebook_size):
+        """
+        升级：索引损失 + 码本向量损失，双重约束
+        """
+        # 1. 原有索引熵损失
+        idx_loss = 0.0
+        num_layers = len(layer_indices)
+        for indices in layer_indices:
             freq = torch.bincount(indices, minlength=codebook_size).float()
             freq = freq / (freq.sum() + 1e-8)
             entropy = -torch.sum(freq * torch.log(freq + 1e-8))
             max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
-            entropy_loss = (1.0 - entropy / max_entropy)
+            idx_loss += (1.0 - entropy / max_entropy)
+        idx_loss = idx_loss / num_layers
 
-            # 2. 新增：重复次数惩罚（打击高频重复的索引）
-            count = torch.bincount(indices, minlength=codebook_size).float()
-            # 对重复次数>10的索引，做平方惩罚（放大高频索引的损失）
-            repeat_penalty = torch.sum(torch.clamp(count - 10, min=0.0) ** 2) / indices.shape[0]
+        # 2. 码本向量多样性损失
+        vec_loss = self.compute_codebook_diversity_loss(codebooks)
 
-            # 组合损失（熵损失为主，重复惩罚为辅）
-            layer_loss = entropy_loss + 0.1 * repeat_penalty
-            loss += layer_loss
-
-        avg_loss = loss / num_layers
-        return avg_loss
+        # 3. 组合损失（索引损失为主，向量损失为辅）
+        return 0.8 * idx_loss + 0.2 * vec_loss
 
 
 class PMAT_SASRec(AbstractTrainableModel):
@@ -440,7 +451,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.01)
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 1.0)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
-        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 1.2)
+        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.5)
 
         # if self.current_stage_epoch > 15:
         #     balance_loss_weight = 0.3
