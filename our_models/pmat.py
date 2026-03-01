@@ -302,7 +302,7 @@ class SemanticIDQuantizer(nn.Module):
         self.id_length = id_length
 
         # 可学习温度系数
-        self.temperature = nn.Parameter(torch.tensor(1.0))
+        self.temperature = nn.Parameter(torch.tensor(0.05))
 
         # 码本参数
         self.codebooks = nn.ParameterList([
@@ -363,12 +363,20 @@ class SemanticIDQuantizer(nn.Module):
         # 多层量化逻辑
         for i in range(self.id_length):
             # 1. 计算相似度（原有逻辑）
-            similarity = torch.matmul(residual, self.codebooks[i].T) / torch.clamp(self.temperature, min=0.5)
+            similarity = torch.matmul(residual, self.codebooks[i].T) / torch.clamp(self.temperature, min=0.05)
 
             # 训练时加入Gumbel噪声（推理时仍用硬argmax）
             if self.training:
                 gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-8) + 1e-8)
                 similarity = similarity + gumbel_noise * 0.05  # 0.1是噪声系数，可调
+
+                # ========== 新增：强制打散相似度（核心！） ==========
+                # 1. 给每个样本的相似度加不同的随机偏移（避免所有样本选同一个索引）
+                sample_shift = torch.randn(similarity.shape[0], 1, device=similarity.device) * 0.5
+                similarity = similarity + sample_shift
+                # 2. 对每个码本的相似度做随机扰动（避免某几个码本永远是最大值）
+                codebook_shift = torch.randn(1, self.codebook_size, device=similarity.device) * 0.2
+                similarity = similarity + codebook_shift
 
             # 2. 保存相似度和索引
             self.layer_similarities.append(similarity)  # [B, codebook_size]

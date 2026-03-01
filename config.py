@@ -78,7 +78,7 @@ class BaseConfig:
     pretrain_temperature: float = 0.1  # 对比学习温度
     pretrain_intra_weight: float = 0.1 # 模态内对比损失权重
     pretrain_inter_weight: float = 0.01  # 模态间对比损失权重
-    recon_loss_weight: float = 1.0
+    recon_loss_weight: float = 0.5
     residual_loss_weight: float = 1.0
 
     # 阶段2：序列模型训练

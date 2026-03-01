@@ -434,12 +434,12 @@ class PMAT_SASRec(AbstractTrainableModel):
         inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.01)
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 1.0)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
-        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.1)
+        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 1.0)
 
-        if self.current_stage_epoch < 5:
-            balance_loss_weight = 0
-        elif self.current_stage_epoch < 10:
-            balance_loss_weight = 0.05
+        # if self.current_stage_epoch > 15:
+        #     balance_loss_weight = 0.3
+        # elif self.current_stage_epoch >5:
+        #     balance_loss_weight = 0.5
 
         total_loss = (intra_weight * intra_loss +
                       inter_weight * inter_loss +
