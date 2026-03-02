@@ -157,7 +157,7 @@ def validate_semantic_id_uniqueness(model, all_item_loader, config):
             visual_feat = batch['vision_feat'].to(config.device)
 
             # 执行编码
-            _, semantic_logits, _, _, _, _, batch_semantic_ids = model.item_encoder(
+            _, semantic_logits, _, _, _, _, batch_semantic_ids, _ = model.item_encoder(
                 text_feat, visual_feat, return_semantic_logits=True
             )
 

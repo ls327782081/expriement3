@@ -231,7 +231,11 @@ class PMATItemEncoder(nn.Module):
             self.config.codebook_size
         )
 
-        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids
+        codebook_contrastive_loss = self.codebook_contrastive_loss(
+            self.semantic_quantizer.codebooks
+        )
+
+        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss
 
     def compute_usage_balance_loss(self, layer_indices, codebook_size):
         """仅基础熵损失，无额外惩罚"""
@@ -245,6 +249,26 @@ class PMATItemEncoder(nn.Module):
             entropy_loss = (1.0 - entropy / max_entropy)
             loss += entropy_loss
         return loss / num_layers
+
+    def codebook_contrastive_loss(self, codebooks, margin=0.5):
+        """
+        论文核心损失：码本间对比损失
+        作用：强制任意两个码本向量的余弦相似度 < margin（避免码本扎堆）
+        来源：NeurIPS 2023《Stable VQ-VAE》
+        """
+        loss = 0.0
+        for cb in codebooks:
+            # 码本向量归一化
+            cb_norm = F.normalize(cb, p=2, dim=-1)
+            # 计算码本内所有向量的余弦相似度矩阵
+            sim_matrix = torch.matmul(cb_norm, cb_norm.T)
+            # 屏蔽对角线（自身相似度）
+            mask = 1 - torch.eye(sim_matrix.shape[0], device=sim_matrix.device)
+            sim_matrix = sim_matrix * mask
+            # 对比损失：相似度超过margin则惩罚
+            contrast_loss = torch.maximum(sim_matrix - margin, torch.tensor(0.0, device=sim_matrix.device))
+            loss += torch.mean(contrast_loss)
+        return loss / len(codebooks)
 
 
 class PMAT_SASRec(AbstractTrainableModel):
@@ -393,7 +417,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         batch_size = text_feat.size(0)
 
         # 调用forward：完整接收5个返回值
-        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids = self.item_encoder(
+        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss = self.item_encoder(
             text_feat, visual_feat, return_semantic_logits=True
         )
         pos_repr = self.prediction_layer(item_emb)
@@ -424,6 +448,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.7)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
         balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.6)
+        codebook_contrastive_loss_weight = getattr(self.config, 'codebook_contrastive_loss_weight', 0.1)
 
         # if self.current_stage_epoch > 15:
         #     balance_loss_weight = 0.3
@@ -434,7 +459,8 @@ class PMAT_SASRec(AbstractTrainableModel):
                       inter_weight * inter_loss +
                       recon_loss_weight * recon_loss +
                       residual_loss_weight * residual_loss +
-                      balance_loss_weight * balance_loss)
+                      balance_loss_weight * balance_loss +
+                      codebook_contrastive_loss_weight * codebook_contrastive_loss)
 
         return {
             'total_loss': total_loss,
@@ -443,6 +469,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             'recon_loss': recon_loss,
             'residual_loss': residual_loss,
             'balance_loss': balance_loss,
+            'codebook_contrastive_loss': codebook_contrastive_loss,
         }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
@@ -695,6 +722,7 @@ class PMAT_SASRec(AbstractTrainableModel):
                 'recon_loss': losses['recon_loss'].item(),
                 'residual_loss': losses['residual_loss'].item(),
                 'balance_loss': losses['balance_loss'].item(),
+                'codebook_contrastive_loss': losses['codebook_contrastive_loss'].item(),
             }
             return losses['total_loss'], metrics
         else:
