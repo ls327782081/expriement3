@@ -235,12 +235,9 @@ class PMATItemEncoder(nn.Module):
             self.semantic_quantizer.codebooks
         )
 
-        codebook_entropy_loss = self.codebook_entropy_loss(
-            self.semantic_quantizer.layer_indices,
-            self.config.codebook_size
-        )
 
-        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss, codebook_entropy_loss
+
+        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss
 
     def compute_usage_balance_loss(self, layer_indices, codebook_size):
         """仅基础熵损失，无额外惩罚"""
@@ -302,30 +299,6 @@ class PMATItemEncoder(nn.Module):
             contrast_loss = torch.maximum(sim_matrix - margin, torch.tensor(0.0, device=sim_matrix.device))
             loss += torch.mean(contrast_loss)
         return loss / len(codebooks)
-
-    def codebook_entropy_loss(self, layer_indices, codebook_size):
-        """
-        码本选择熵最大化损失（NeurIPS 2023论文核心）
-        作用：显式提升码本选择分布的熵值，强制ID多样性，适配任意层数/码本数
-        layer_indices: 各层码本选择索引 [num_layers, batch_size]
-        codebook_size: 单层级码本数（通用参数，无需硬编码）
-        """
-        total_entropy = 0.0
-        num_layers = len(layer_indices)
-
-        for indices in layer_indices:
-            # 计算当前层码本选择的频率分布
-            freq = torch.bincount(indices, minlength=codebook_size).float()
-            freq = freq / (freq.sum() + 1e-8)  # 归一化到0-1
-            # 计算熵值（熵越大，选择越均匀，ID多样性越高）
-            entropy = -torch.sum(freq * torch.log(freq + 1e-8))
-            # 最大化熵：损失 = 最大熵 - 当前熵（让熵趋近于理论最大值）
-            max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
-            entropy_loss = max_entropy - entropy
-            total_entropy += entropy_loss
-
-        # 平均到所有层（适配任意层数）
-        return total_entropy / num_layers
 
 
 class PMAT_SASRec(AbstractTrainableModel):
@@ -474,7 +447,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         batch_size = text_feat.size(0)
 
         # 调用forward：完整接收5个返回值
-        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids = self.item_encoder(
+        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss = self.item_encoder(
             text_feat, visual_feat, return_semantic_logits=True
         )
         pos_repr = self.prediction_layer(item_emb)
@@ -505,6 +478,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.7)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
         balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.6)
+        codebook_contrastive_loss_weight = getattr(self.config, 'codebook_contrastive_loss_weight', 0.2)
 
         # if self.current_stage_epoch > 15:
         #     balance_loss_weight = 0.3
@@ -515,7 +489,8 @@ class PMAT_SASRec(AbstractTrainableModel):
                       inter_weight * inter_loss +
                       recon_loss_weight * recon_loss +
                       residual_loss_weight * residual_loss +
-                      balance_loss_weight * balance_loss)
+                      balance_loss_weight * balance_loss +
+                      codebook_contrastive_loss_weight * codebook_contrastive_loss)
 
         return {
             'total_loss': total_loss,
