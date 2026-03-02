@@ -252,31 +252,31 @@ class PMATItemEncoder(nn.Module):
         total_balance_loss = 0.0
         total_entropy_loss = 0.0
         total_used = 0
-        total_codebooks = self.id_length * self.codebook_size
+        total_codebooks = self.config.id_length * codebook_size
 
-        for i, indices in enumerate(self.layer_indices):
+        for i, indices in enumerate(layer_indices):
             # 1. 计算当前层码本选择频率（通用，适配任意层/码本数）
-            freq = torch.bincount(indices, minlength=self.codebook_size).float()
+            freq = torch.bincount(indices, minlength=codebook_size).float()
             freq = freq / (freq.sum() + 1e-8)  # 归一化到0-1
             total_used += len(torch.unique(indices))
 
             # 2. 平衡损失（约束利用率，避免垄断）
-            target_freq = torch.ones_like(freq) / self.codebook_size  # 目标均匀分布
+            target_freq = torch.ones_like(freq) / codebook_size  # 目标均匀分布
             balance_loss = torch.mean((freq - target_freq) ** 2)  # MSE距离
             total_balance_loss += balance_loss
 
             # 3. 熵最大化损失（约束多样性，提升ID数）
             entropy = -torch.sum(freq * torch.log(freq + 1e-8))
-            max_entropy = torch.log(torch.tensor(self.codebook_size, device=indices.device))
+            max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
             entropy_loss = max_entropy - entropy  # 熵越大，损失越小
             total_entropy_loss += entropy_loss
 
             # 4. 缓存归一化熵值（用于自适应温度）
-            self.layer_entropy[i] = (entropy / max_entropy).item()
+            self.semantic_quantizer.layer_entropy[i] = (entropy / max_entropy).item()
 
         # 平均到所有层（适配任意层数）
-        avg_balance_loss = total_balance_loss / self.id_length
-        avg_entropy_loss = total_entropy_loss / self.id_length
+        avg_balance_loss = total_balance_loss / self.config.id_length
+        avg_entropy_loss = total_entropy_loss / self.config.id_length
         usage_ratio = total_used / total_codebooks  # 全局利用率
 
         # 统一分布损失（加权合并，平衡+熵）
@@ -474,7 +474,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         batch_size = text_feat.size(0)
 
         # 调用forward：完整接收5个返回值
-        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss = self.item_encoder(
+        item_emb, semantic_logits, quantized_emb, recon_loss, residual_loss, balance_loss, semantic_ids = self.item_encoder(
             text_feat, visual_feat, return_semantic_logits=True
         )
         pos_repr = self.prediction_layer(item_emb)
@@ -505,7 +505,6 @@ class PMAT_SASRec(AbstractTrainableModel):
         recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.7)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
         balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.6)
-        codebook_contrastive_loss_weight = getattr(self.config, 'codebook_contrastive_loss_weight', 0.1)
 
         # if self.current_stage_epoch > 15:
         #     balance_loss_weight = 0.3
@@ -516,8 +515,7 @@ class PMAT_SASRec(AbstractTrainableModel):
                       inter_weight * inter_loss +
                       recon_loss_weight * recon_loss +
                       residual_loss_weight * residual_loss +
-                      balance_loss_weight * balance_loss +
-                      codebook_contrastive_loss_weight * codebook_contrastive_loss)
+                      balance_loss_weight * balance_loss)
 
         return {
             'total_loss': total_loss,
@@ -526,7 +524,6 @@ class PMAT_SASRec(AbstractTrainableModel):
             'recon_loss': recon_loss,
             'residual_loss': residual_loss,
             'balance_loss': balance_loss,
-            'codebook_contrastive_loss': codebook_contrastive_loss,
         }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
