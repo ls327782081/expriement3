@@ -484,6 +484,7 @@ class ParallelBlockRVQ(nn.Module):
             'global': {'used': 0, 'total': self.codebook_size * self.id_length, 'usage_ratio': 0.0, 'dead_ratio': 0.0}}
         total_used = 0
 
+
         for layer in range(self.id_length):
             used = int(self.codebook_usage[layer].sum().item())
             usage_ratio = used / self.codebook_size
@@ -495,6 +496,7 @@ class ParallelBlockRVQ(nn.Module):
                 'dead_ratio': dead_ratio
             }
             total_used += used
+
 
         usage_stats['global']['used'] = total_used
         usage_stats['global']['usage_ratio'] = total_used / usage_stats['global']['total']
@@ -516,6 +518,19 @@ class ParallelBlockRVQ(nn.Module):
 
             # 2. 相似度计算（仅基础逻辑）
             similarity = torch.matmul(block, self.codebooks[i].T) / max(self.temperature, self.min_temp)
+
+            # 探针1：码本选择概率分布（核心！看是否少数码本垄断）
+            soft_indices = F.softmax(similarity, dim=-1)
+            # 计算每个码本的被选择概率（全局均值）
+            cb_select_prob = soft_indices.mean(dim=0)  # [codebook_size]
+            # 计算概率分布的基尼系数（越接近1，垄断越严重）
+            sorted_prob = torch.sort(cb_select_prob)[0]
+            n = len(sorted_prob)
+            gini = (2 * torch.sum(torch.arange(1, n + 1).to(x.device) * sorted_prob) / torch.sum(sorted_prob) - (
+                        n + 1)) / n
+            print(f"Layer {i} 码本选择基尼系数: {gini.item():.4f}")
+            print(f"Layer {i} 前5个码本选择概率: {cb_select_prob.topk(5).values.cpu().numpy()}")
+
             self.layer_similarities.append(similarity)
 
             # 3. 基础Gumbel噪声（仅训练，强度0.05）
@@ -541,6 +556,14 @@ class ParallelBlockRVQ(nn.Module):
             self.codebook_usage[i] = torch.zeros(self.codebook_size, device=x.device)
             unique_indices = torch.unique(hard_indices)
             self.codebook_usage[i][unique_indices] = 1.0
+
+            # 探针2：码本与特征的匹配度（看是否码本无匹配特征）
+            cb_norm = F.normalize(self.codebooks[i], p=2, dim=-1)
+            block_norm = F.normalize(block, p=2, dim=-1)
+            # 每个码本与所有特征的平均相似度
+            cb_feature_sim = torch.matmul(block_norm, cb_norm.T).mean(dim=0)  # [codebook_size]
+            print(
+                f"Layer {i} 码本-特征相似度均值: min={cb_feature_sim.min().item():.4f}, max={cb_feature_sim.max().item():.4f}, std={cb_feature_sim.std().item():.4f}")
 
             # 8. 基础死码激活（30%替换，无激进）
             if self.training:
