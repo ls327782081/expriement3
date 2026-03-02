@@ -23,12 +23,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from base_model import AbstractTrainableModel
-# 复用PMAT的核心模块（注意：这里要导入修复后的SemanticIDQuantizer）
+
 from our_models.pmat import (
     MultiModalEncoder,
     PersonalizedFusion,
-    # 确保导入的是修复后的SemanticIDQuantizer
-    SemanticIDQuantizer,
+    ParallelBlockRVQ,
     UserModalAttention,
     DynamicIDUpdater,
     UserItemMatcher
@@ -68,8 +67,7 @@ class PMATItemEncoder(nn.Module):
         # 个性化融合
         self.personalized_fusion = PersonalizedFusion(config.hidden_dim)
 
-        # 修改1：使用修复后的SemanticIDQuantizer
-        self.semantic_quantizer = SemanticIDQuantizer(
+        self.semantic_quantizer = ParallelBlockRVQ(
             hidden_dim=config.hidden_dim,
             codebook_size=config.codebook_size,
             id_length=config.id_length
@@ -230,49 +228,23 @@ class PMATItemEncoder(nn.Module):
 
         balance_loss = self.compute_usage_balance_loss(
             self.semantic_quantizer.layer_indices,
-            self.semantic_quantizer.codebooks,
             self.config.codebook_size
         )
 
-
         return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids
 
-    def compute_codebook_diversity_loss(self, codebooks):
-        """
-        NeurIPS 2024：直接约束码本向量的多样性，绑定梯度
-        """
-        diversity_loss = 0.0
-        for cb in codebooks:
-            # 码本归一化
-            cb_norm = F.normalize(cb, p=2, dim=-1)  # [C, D]
-            # 码本内两两相似度（越小越多样）
-            cb_sim = torch.mm(cb_norm, cb_norm.T)  # [C, C]
-            # 去掉对角线（自己和自己的相似度）
-            mask = 1 - torch.eye(cb_norm.shape[0], device=cb.device)
-            # 损失：相似度均值越小越好
-            diversity_loss += torch.mean(cb_sim * mask)
-        return diversity_loss / len(codebooks)
-
-    def compute_usage_balance_loss(self, layer_indices, codebooks, codebook_size):
-        """
-        升级：索引损失 + 码本向量损失，双重约束
-        """
-        # 1. 原有索引熵损失
-        idx_loss = 0.0
+    def compute_usage_balance_loss(self, layer_indices, codebook_size):
+        """仅基础熵损失，无额外惩罚"""
+        loss = 0.0
         num_layers = len(layer_indices)
         for indices in layer_indices:
             freq = torch.bincount(indices, minlength=codebook_size).float()
             freq = freq / (freq.sum() + 1e-8)
             entropy = -torch.sum(freq * torch.log(freq + 1e-8))
             max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
-            idx_loss += (1.0 - entropy / max_entropy)
-        idx_loss = idx_loss / num_layers
-
-        # 2. 码本向量多样性损失
-        vec_loss = self.compute_codebook_diversity_loss(codebooks)
-
-        # 3. 组合损失（索引损失为主，向量损失为辅）
-        return 0.8 * idx_loss + 0.2 * vec_loss
+            entropy_loss = (1.0 - entropy / max_entropy)
+            loss += entropy_loss
+        return loss / num_layers
 
 
 class PMAT_SASRec(AbstractTrainableModel):
@@ -449,9 +421,9 @@ class PMAT_SASRec(AbstractTrainableModel):
         # 保留你的损失加权逻辑（完全不变）
         intra_weight = getattr(self.config, 'pretrain_intra_weight', 0.1)
         inter_weight = getattr(self.config, 'pretrain_inter_weight', 0.01)
-        recon_loss_weight = getattr(self.config, 'recon_loss_weight', 1.0)
+        recon_loss_weight = getattr(self.config, 'recon_loss_weight', 0.7)
         residual_loss_weight = getattr(self.config, 'residual_loss_weight', 1.0)
-        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.5)
+        balance_loss_weight = getattr(self.config, 'balance_loss_weight', 0.6)
 
         # if self.current_stage_epoch > 15:
         #     balance_loss_weight = 0.3
@@ -502,7 +474,7 @@ class PMAT_SASRec(AbstractTrainableModel):
         padding_mask = padding_mask | (~valid_len_mask)  # 双重保障
 
         # ========== 2. PMAT多模态物品编码 ==========
-        # 修复：完整接收5个返回值，只取需要的前3个+忽略损失
+
         item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, semantic_ids = self.item_encoder(
             text_feat, vision_feat, return_semantic_logits=True
         )  # (batch, seq_len, hidden_dim)
@@ -561,7 +533,7 @@ class PMAT_SASRec(AbstractTrainableModel):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """编码候选物品"""
         # 修复：完整接收5个返回值
-        item_emb, semantic_logits, quantized_emb, _, _, _, _ = self.item_encoder(
+        item_emb, semantic_logits, quantized_emb, _, _, _ = self.item_encoder(
             text_feat, vision_feat,
             user_interest=user_interest,
             short_history=short_history,
@@ -602,7 +574,7 @@ class PMAT_SASRec(AbstractTrainableModel):
 
                 # 使用全局模态权重编码
                 # 修复：完整接收5个返回值
-                item_emb, _, quantized_emb, _, _, _, _ = self.item_encoder(
+                item_emb, _, quantized_emb, _, _, _ = self.item_encoder(
                     item_text, item_visual,
                     user_interest=None,
                     return_semantic_logits=False
@@ -888,7 +860,7 @@ class PMAT_SASRec(AbstractTrainableModel):
                         u_long_expand = u_long.expand(chunk_size, u_long.shape[1], u_long.shape[2])
 
                         # 个性化编码（保留动态ID更新）
-                        item_emb, _, _, _, _, _, _ = self.item_encoder(
+                        item_emb, _, _, _, _, _ = self.item_encoder(
                             u_chunk_text,
                             u_chunk_vision,
                             user_interest=u_user_interest,

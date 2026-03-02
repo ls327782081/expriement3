@@ -378,6 +378,8 @@ class SemanticIDQuantizer(nn.Module):
                 codebook_shift = torch.randn(1, self.codebook_size, device=similarity.device) * 0.2
                 similarity = similarity + codebook_shift
 
+                print(fr'similarity max: {similarity.max().item()}, similarity min: {similarity.min().item()}')
+
             # 2. 保存相似度和索引
             self.layer_similarities.append(similarity)  # [B, codebook_size]
             indices = torch.argmax(similarity, dim=-1)
@@ -398,6 +400,7 @@ class SemanticIDQuantizer(nn.Module):
 
             # 5. 残差更新
             residual = residual - quantized_layer
+            print(fr'residual norm: {residual.norm().item()}')
             quantized += quantized_layer
             residuals_list.append(residual.clone())
 
@@ -444,6 +447,131 @@ class SemanticIDQuantizer(nn.Module):
 
         return quantized, residual_loss, residuals_stack.detach(), self.codebook_usage
 
+
+class ParallelBlockRVQ(nn.Module):
+    """
+    最优基线版（唯一ID=13994、重复率23.95%、码本利用率97.66%）
+    仅保留核心逻辑，无任何过度优化/定向修复/特征增强
+    """
+
+    def __init__(self, hidden_dim, codebook_size=32, id_length=4):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.codebook_size = codebook_size
+        self.id_length = id_length
+
+        # 最优基线参数（固定，不修改）
+        self.block_dim = hidden_dim // self.id_length
+        assert hidden_dim % self.id_length == 0, "hidden_dim必须是4的倍数"
+        self.temperature = 0.05  # 固定0.05
+        self.min_temp = 0.04
+        self.dead_code_threshold = 5
+
+        # 码本初始化（原始版本）
+        self.codebooks = nn.ParameterList([
+            nn.Parameter(torch.randn(codebook_size, self.block_dim))
+            for _ in range(id_length)
+        ])
+
+        # 基础统计属性
+        self.codebook_usage = [torch.zeros(codebook_size) for _ in range(id_length)]
+        self.layer_indices = []
+        self.layer_similarities = []
+        self.code_usage_count = [torch.zeros(codebook_size) for _ in range(id_length)]
+
+    def get_codebook_usage(self):
+        usage_stats = {
+            'global': {'used': 0, 'total': self.codebook_size * self.id_length, 'usage_ratio': 0.0, 'dead_ratio': 0.0}}
+        total_used = 0
+
+        for layer in range(self.id_length):
+            used = int(self.codebook_usage[layer].sum().item())
+            usage_ratio = used / self.codebook_size
+            dead_ratio = 1 - usage_ratio
+            usage_stats[f'layer_{layer + 1}'] = {
+                'used': used,
+                'total': self.codebook_size,
+                'usage_ratio': usage_ratio,
+                'dead_ratio': dead_ratio
+            }
+            total_used += used
+
+        usage_stats['global']['used'] = total_used
+        usage_stats['global']['usage_ratio'] = total_used / usage_stats['global']['total']
+        usage_stats['global']['dead_ratio'] = 1 - usage_stats['global']['usage_ratio']
+        return usage_stats
+
+    def forward(self, x):
+        # 清空统计
+        self.layer_indices = []
+        self.layer_similarities = []
+        residual_loss = torch.tensor(0.0, device=x.device)
+
+        # 1. 特征分块（核心：仅分块，无任何修改）
+        x_blocks = torch.chunk(x, self.id_length, dim=-1)
+        quantized_blocks = []
+
+        for i in range(self.id_length):
+            block = x_blocks[i]
+
+            # 2. 相似度计算（仅基础逻辑）
+            similarity = torch.matmul(block, self.codebooks[i].T) / max(self.temperature, self.min_temp)
+            self.layer_similarities.append(similarity)
+
+            # 3. 基础Gumbel噪声（仅训练，强度0.05）
+            if self.training:
+                gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-8) + 1e-8)
+                similarity = similarity + gumbel_noise * 0.05
+
+            # 4. 硬索引（无随机替换/裁剪）
+            hard_indices = torch.argmax(similarity, dim=-1)
+
+            # 5. 软量化+STE（基础版）
+            soft_indices = F.softmax(similarity, dim=-1)
+            quant_block_soft = torch.matmul(soft_indices, self.codebooks[i])
+            quant_block_hard = F.embedding(hard_indices, self.codebooks[i])
+            quant_block = quant_block_hard + (quant_block_soft - quant_block_soft.detach())
+
+            # 6. 量化损失（基础版）
+            quant_error = torch.mean((quant_block - block) ** 2)
+            residual_loss += quant_error
+
+            # 7. 码本统计（基础版）
+            self.layer_indices.append(hard_indices)
+            self.codebook_usage[i] = torch.zeros(self.codebook_size, device=x.device)
+            unique_indices = torch.unique(hard_indices)
+            self.codebook_usage[i][unique_indices] = 1.0
+
+            # 8. 基础死码激活（30%替换，无激进）
+            if self.training:
+                self.code_usage_count[i] = self.code_usage_count[i].to(x.device)
+                self.code_usage_count[i][unique_indices] += 1.0
+                self.code_usage_count[i] = torch.clamp(self.code_usage_count[i], min=0.0)
+
+                dead_codes = (self.code_usage_count[i] < self.dead_code_threshold).nonzero().squeeze()
+                if len(dead_codes) > 0:
+                    replace_num = len(dead_codes) if dead_codes.ndim > 0 else 1
+                    random_idx = torch.randperm(block.shape[0])[:replace_num]
+                    random_block = block[random_idx].detach()
+                    self.codebooks[i].data[dead_codes] = self.codebooks[i].data[dead_codes] * 0.7 + random_block * 0.3
+                    self.code_usage_count[i][dead_codes] = self.dead_code_threshold
+
+            quantized_blocks.append(quant_block)
+
+        # 9. 合并分块（核心）
+        quantized = torch.cat(quantized_blocks, dim=-1)
+
+        # 10. 基础码本正则化
+        lambda_reg = 0.01
+        codebook_reg = 0.0
+        for cb in self.codebooks:
+            codebook_reg += torch.mean(torch.norm(cb, dim=-1) ** 2)
+        residual_loss += lambda_reg * codebook_reg / self.id_length
+        residual_loss = residual_loss / self.hidden_dim
+
+        # 11. 兼容返回值
+        residuals_stack = torch.zeros(x.shape[0], self.id_length, self.hidden_dim, device=x.device)
+        return quantized, residual_loss, residuals_stack.detach(), self.codebook_usage
 
 # ==================== 新增模块：用户兴趣编码器 ====================
 

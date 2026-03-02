@@ -75,11 +75,11 @@ class BaseConfig:
     stage2_lr: float = 1e-4  # 阶段2学习率
 
     # 阶段1：物品编码器预训练（对比学习）
-    pretrain_temperature: float = 0.1  # 对比学习温度
-    pretrain_intra_weight: float = 0.1 # 模态内对比损失权重
-    pretrain_inter_weight: float = 0.01  # 模态间对比损失权重
-    recon_loss_weight: float = 0.6
-    residual_loss_weight: float = 1.0
+    # pretrain_temperature: float = 0.1  # 对比学习温度
+    # pretrain_intra_weight: float = 0.1 # 模态内对比损失权重
+    # pretrain_inter_weight: float = 0.01  # 模态间对比损失权重
+    # recon_loss_weight: float = 0.6
+    # residual_loss_weight: float = 1.0
 
     # 阶段2：序列模型训练
     logit_temperature: float = 0.8  # Cross Entropy logits 温度缩放（避免数值不稳定）
