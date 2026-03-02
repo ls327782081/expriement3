@@ -555,13 +555,8 @@ class ParallelBlockRVQ(nn.Module):
                 block = block @ self.proj_matrices[i]  # 用新增的投影矩阵
 
             # 2. 相似度计算（仅基础逻辑）
-            # similarity = torch.matmul(block, self.codebooks[i].T) / max(self.temperature, self.min_temp)
-            current_entropy = self.layer_entropy.get(i, 0.5)  # 首次调用默认熵值0.5（中等水平）
-            current_temp = self.temperature * (2.0 - current_entropy)  # 熵越低，温度越高
-            current_temp = max(current_temp, self.min_temp)  # 保证温度不低于最小值
+            similarity = torch.matmul(block, self.codebooks[i].T) / max(self.temperature, self.min_temp)
 
-            # 相似度计算（最终版，无报错）
-            similarity = torch.matmul(block, self.codebooks[i].T) / current_temp
 
             # 探针1：码本选择概率分布（核心！看是否少数码本垄断）
             soft_indices = F.softmax(similarity, dim=-1)
