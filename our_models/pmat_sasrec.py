@@ -235,20 +235,53 @@ class PMATItemEncoder(nn.Module):
             self.semantic_quantizer.codebooks
         )
 
-        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss
+        codebook_entropy_loss = self.codebook_entropy_loss(
+            self.semantic_quantizer.layer_indices,
+            self.config.codebook_size
+        )
+
+        return item_emb, semantic_logits, quantized_emb_out, recon_loss, residual_loss, balance_loss, semantic_ids, codebook_contrastive_loss, codebook_entropy_loss
 
     def compute_usage_balance_loss(self, layer_indices, codebook_size):
         """仅基础熵损失，无额外惩罚"""
-        loss = 0.0
-        num_layers = len(layer_indices)
-        for indices in layer_indices:
-            freq = torch.bincount(indices, minlength=codebook_size).float()
-            freq = freq / (freq.sum() + 1e-8)
+        """
+                统一的码本分布约束损失（合并平衡损失+熵最大化损失）
+                作用：同时约束码本利用率（平衡）和ID多样性（熵），适配任意参数，无硬编码
+                返回：total_dist_loss（平衡+熵的加权和）、usage_ratio（利用率，用于动态权重）
+                """
+        total_balance_loss = 0.0
+        total_entropy_loss = 0.0
+        total_used = 0
+        total_codebooks = self.id_length * self.codebook_size
+
+        for i, indices in enumerate(self.layer_indices):
+            # 1. 计算当前层码本选择频率（通用，适配任意层/码本数）
+            freq = torch.bincount(indices, minlength=self.codebook_size).float()
+            freq = freq / (freq.sum() + 1e-8)  # 归一化到0-1
+            total_used += len(torch.unique(indices))
+
+            # 2. 平衡损失（约束利用率，避免垄断）
+            target_freq = torch.ones_like(freq) / self.codebook_size  # 目标均匀分布
+            balance_loss = torch.mean((freq - target_freq) ** 2)  # MSE距离
+            total_balance_loss += balance_loss
+
+            # 3. 熵最大化损失（约束多样性，提升ID数）
             entropy = -torch.sum(freq * torch.log(freq + 1e-8))
-            max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
-            entropy_loss = (1.0 - entropy / max_entropy)
-            loss += entropy_loss
-        return loss / num_layers
+            max_entropy = torch.log(torch.tensor(self.codebook_size, device=indices.device))
+            entropy_loss = max_entropy - entropy  # 熵越大，损失越小
+            total_entropy_loss += entropy_loss
+
+            # 4. 缓存归一化熵值（用于自适应温度）
+            self.layer_entropy[i] = (entropy / max_entropy).item()
+
+        # 平均到所有层（适配任意层数）
+        avg_balance_loss = total_balance_loss / self.id_length
+        avg_entropy_loss = total_entropy_loss / self.id_length
+        usage_ratio = total_used / total_codebooks  # 全局利用率
+
+        # 统一分布损失（加权合并，平衡+熵）
+        total_dist_loss = 0.6 * avg_balance_loss + 0.8 * usage_ratio * avg_entropy_loss
+        return total_dist_loss
 
     def codebook_contrastive_loss(self, codebooks, margin=0.5):
         """
@@ -269,6 +302,30 @@ class PMATItemEncoder(nn.Module):
             contrast_loss = torch.maximum(sim_matrix - margin, torch.tensor(0.0, device=sim_matrix.device))
             loss += torch.mean(contrast_loss)
         return loss / len(codebooks)
+
+    def codebook_entropy_loss(self, layer_indices, codebook_size):
+        """
+        码本选择熵最大化损失（NeurIPS 2023论文核心）
+        作用：显式提升码本选择分布的熵值，强制ID多样性，适配任意层数/码本数
+        layer_indices: 各层码本选择索引 [num_layers, batch_size]
+        codebook_size: 单层级码本数（通用参数，无需硬编码）
+        """
+        total_entropy = 0.0
+        num_layers = len(layer_indices)
+
+        for indices in layer_indices:
+            # 计算当前层码本选择的频率分布
+            freq = torch.bincount(indices, minlength=codebook_size).float()
+            freq = freq / (freq.sum() + 1e-8)  # 归一化到0-1
+            # 计算熵值（熵越大，选择越均匀，ID多样性越高）
+            entropy = -torch.sum(freq * torch.log(freq + 1e-8))
+            # 最大化熵：损失 = 最大熵 - 当前熵（让熵趋近于理论最大值）
+            max_entropy = torch.log(torch.tensor(codebook_size, device=indices.device))
+            entropy_loss = max_entropy - entropy
+            total_entropy += entropy_loss
+
+        # 平均到所有层（适配任意层数）
+        return total_entropy / num_layers
 
 
 class PMAT_SASRec(AbstractTrainableModel):

@@ -467,6 +467,16 @@ class ParallelBlockRVQ(nn.Module):
         self.min_temp = 0.04
         self.dead_code_threshold = 5
 
+        # ===================== 新增通用诊断参数 =====================
+        self.sim_std_threshold = 0.15  # 低区分度层判定阈值
+        self.sim_std_target = 0.20  # 正常阈值
+        # 层诊断状态（自动维护，无需手动改）
+        self.layer_diagnosis = {i: {'is_low': False, 'enhance_count': 0} for i in range(id_length)}
+        # 每层独立的特征投影矩阵（通用）
+        self.proj_matrices = nn.ParameterList([
+            nn.Parameter(torch.eye(self.block_dim)) for _ in range(id_length)
+        ])
+
         # 码本初始化（原始版本）
         self.codebooks = nn.ParameterList([
             nn.Parameter(torch.randn(codebook_size, self.block_dim))
@@ -478,6 +488,8 @@ class ParallelBlockRVQ(nn.Module):
         self.layer_indices = []
         self.layer_similarities = []
         self.code_usage_count = [torch.zeros(codebook_size) for _ in range(id_length)]
+
+        self.layer_entropy = {}
 
     def get_codebook_usage(self):
         usage_stats = {
@@ -503,6 +515,18 @@ class ParallelBlockRVQ(nn.Module):
         usage_stats['global']['dead_ratio'] = 1 - usage_stats['global']['usage_ratio']
         return usage_stats
 
+    def _diagnose_layer(self, layer_idx, cb_feature_sim):
+        """通用层诊断：自动判定是否为低区分度层（无需硬编码层号）"""
+        sim_std = cb_feature_sim.std().item()
+        # 更新层状态
+        self.layer_diagnosis[layer_idx]['is_low'] = sim_std < self.sim_std_threshold
+        self.layer_diagnosis[layer_idx]['current_std'] = sim_std
+        # 每100步打印一次诊断结果（方便监控，可注释）
+        if self.training and (layer_idx % 100 == 0):
+            status = "低区分度层（需增强）" if self.layer_diagnosis[layer_idx]['is_low'] else "正常层（无需增强）"
+            print(f"Layer {layer_idx} 诊断结果：相似度std={sim_std:.4f} | 状态={status}")
+        return self.layer_diagnosis[layer_idx]['is_low']
+
     def forward(self, x):
         # 清空统计
         self.layer_indices = []
@@ -516,8 +540,28 @@ class ParallelBlockRVQ(nn.Module):
         for i in range(self.id_length):
             block = x_blocks[i]
 
+            # ===================== 新增：通用层诊断 + 特征增强 =====================
+            cb = self.codebooks[i]
+            # 计算码本-特征相似度（用于诊断）
+            cb_norm = F.normalize(cb, p=2, dim=-1)
+            block_norm = F.normalize(block, p=2, dim=-1)
+            cb_feature_sim = torch.matmul(block_norm, cb_norm.T).mean(dim=0)
+            # 自动诊断当前层是否为低区分度层
+            is_low_layer = self._diagnose_layer(i, cb_feature_sim)
+
+            # 仅对低区分度层做特征增强（通用，无硬编码）
+            if is_low_layer:
+                block = (block - block.mean(dim=0, keepdim=True)) / (block.std(dim=0, keepdim=True) + 1e-8)
+                block = block @ self.proj_matrices[i]  # 用新增的投影矩阵
+
             # 2. 相似度计算（仅基础逻辑）
-            similarity = torch.matmul(block, self.codebooks[i].T) / max(self.temperature, self.min_temp)
+            # similarity = torch.matmul(block, self.codebooks[i].T) / max(self.temperature, self.min_temp)
+            current_entropy = self.layer_entropy.get(i, 0.5)  # 首次调用默认熵值0.5（中等水平）
+            current_temp = self.temperature * (2.0 - current_entropy)  # 熵越低，温度越高
+            current_temp = max(current_temp, self.min_temp)  # 保证温度不低于最小值
+
+            # 相似度计算（最终版，无报错）
+            similarity = torch.matmul(block, self.codebooks[i].T) / current_temp
 
             # 探针1：码本选择概率分布（核心！看是否少数码本垄断）
             soft_indices = F.softmax(similarity, dim=-1)
@@ -529,7 +573,7 @@ class ParallelBlockRVQ(nn.Module):
             gini = (2 * torch.sum(torch.arange(1, n + 1).to(x.device) * sorted_prob) / torch.sum(sorted_prob) - (
                         n + 1)) / n
             print(f"Layer {i} 码本选择基尼系数: {gini.item():.4f}")
-            print(f"Layer {i} 前5个码本选择概率: {cb_select_prob.topk(5).values.cpu().numpy()}")
+            print(f"Layer {i} 前5个码本选择概率: {cb_select_prob.topk(5).values.detach().cpu().numpy()}")
 
             self.layer_similarities.append(similarity)
 
@@ -545,7 +589,14 @@ class ParallelBlockRVQ(nn.Module):
             soft_indices = F.softmax(similarity, dim=-1)
             quant_block_soft = torch.matmul(soft_indices, self.codebooks[i])
             quant_block_hard = F.embedding(hard_indices, self.codebooks[i])
-            quant_block = quant_block_hard + (quant_block_soft - quant_block_soft.detach())
+            # quant_block = quant_block_hard + (quant_block_soft - quant_block_soft.detach())
+            # ===================== 修改：通用梯度对齐 =====================
+            if is_low_layer:  # 仅低区分度层触发
+                grad_align_alpha = 0.05
+                quant_block = quant_block_hard + (quant_block_soft - quant_block_soft.detach()) + \
+                              grad_align_alpha * (block - quant_block_hard).detach()
+            else:  # 正常层保留原逻辑
+                quant_block = quant_block_hard + (quant_block_soft - quant_block_soft.detach())
 
             # 6. 量化损失（基础版）
             quant_error = torch.mean((quant_block - block) ** 2)
@@ -571,12 +622,30 @@ class ParallelBlockRVQ(nn.Module):
                 self.code_usage_count[i][unique_indices] += 1.0
                 self.code_usage_count[i] = torch.clamp(self.code_usage_count[i], min=0.0)
 
+                # dead_codes = (self.code_usage_count[i] < self.dead_code_threshold).nonzero().squeeze()
+                # if len(dead_codes) > 0:
+                #     replace_num = len(dead_codes) if dead_codes.ndim > 0 else 1
+                #     random_idx = torch.randperm(block.shape[0])[:replace_num]
+                #     random_block = block[random_idx].detach()
+                #     self.codebooks[i].data[dead_codes] = self.codebooks[i].data[dead_codes] * 0.7 + random_block * 0.3
+                #     self.code_usage_count[i][dead_codes] = self.dead_code_threshold
                 dead_codes = (self.code_usage_count[i] < self.dead_code_threshold).nonzero().squeeze()
-                if len(dead_codes) > 0:
-                    replace_num = len(dead_codes) if dead_codes.ndim > 0 else 1
-                    random_idx = torch.randperm(block.shape[0])[:replace_num]
-                    random_block = block[random_idx].detach()
-                    self.codebooks[i].data[dead_codes] = self.codebooks[i].data[dead_codes] * 0.7 + random_block * 0.3
+                if len(dead_codes) > 0 and dead_codes.ndim > 0:
+                    # ===================== 修改：通用码本更新 =====================
+                    if is_low_layer:  # 低区分度层用KMeans更新
+                        from sklearn.cluster import KMeans
+                        batch_features = block.detach().cpu().numpy()
+                        kmeans = KMeans(n_clusters=len(dead_codes), random_state=42, n_init=10)
+                        kmeans.fit(batch_features)
+                        new_codes = torch.tensor(kmeans.cluster_centers_, device=self.codebooks[i].device)
+                        self.codebooks[i].data[dead_codes] = self.codebooks[i].data[dead_codes] * 0.3 + new_codes * 0.7
+                    else:  # 正常层保留原随机更新
+                        replace_num = len(dead_codes) if dead_codes.ndim > 0 else 1
+                        random_idx = torch.randperm(block.shape[0])[:replace_num]
+                        random_block = block[random_idx].detach()
+                        self.codebooks[i].data[dead_codes] = self.codebooks[i].data[
+                                                                 dead_codes] * 0.7 + random_block * 0.3
+                    # ===================== 修改结束 =====================
                     self.code_usage_count[i][dead_codes] = self.dead_code_threshold
 
             quantized_blocks.append(quant_block)
