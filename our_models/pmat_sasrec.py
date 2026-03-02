@@ -499,6 +499,7 @@ class PMAT_SASRec(AbstractTrainableModel):
             'recon_loss': recon_loss,
             'residual_loss': residual_loss,
             'balance_loss': balance_loss,
+            'codebook_contrastive_loss':codebook_contrastive_loss,
         }
 
     def _get_causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
