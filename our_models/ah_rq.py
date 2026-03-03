@@ -176,7 +176,7 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
                         random_feat = block[random_idx].detach()
                         for i, code_idx in enumerate(dead_codes):
                             self.codebooks[cb_key].data[code_idx] = (
-                                    self.codebooks[cb_key].data[code_idx] * 0.7 + random_feat[i] * 0.3
+                                    self.codebooks[cb_key].data[code_idx] * 0.7 + random_feat[i].squeeze() * 0.3
                             )
                             self.code_usage_count[cb_key][code_idx] = self.reset_threshold
 
