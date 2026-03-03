@@ -140,3 +140,69 @@ class BaseConfig:
 
 # 实例化配置
 config = BaseConfig()
+
+
+class Config:
+    def __init__(self):
+        # 通用配置
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.seed = 42
+        self.batch_size = 256
+        self.epochs = 50
+        self.lr = 1e-3
+        self.weight_decay = 1e-4
+        self.grad_clip = 1.0
+
+        self.num_negative_samples = 10
+
+        # SASRec配置
+        self.sasrec_hidden_dim = 64
+        self.sasrec_num_heads = 4
+        self.sasrec_num_layers = 2
+        self.sasrec_max_len = 50
+        self.sasrec_dropout = 0.1
+
+        # AH-RQ量化配置（核心）
+        self.ahrq_hidden_dim = 64  # 需与SASRec/PMAT的hidden_dim一致
+        # 层次化配置：Topic(层0/1) + Style(层2/3)
+        self.semantic_hierarchy = {
+            "topic": {
+                "layers": [0, 1],
+                "codebook_size": 1024,
+                "loss_weight": 1.0,
+                "ema_decay": 0.99
+            },
+            "style": {
+                "layers": [2, 3],
+                "codebook_size": 512,
+                "loss_weight": 0.8,
+                "ema_decay": 0.99
+            }
+        }
+        self.ahrq_beta = 0.25  # 量化损失权重
+        self.ahrq_use_ema = True
+        self.ahrq_reset_unused_codes = True
+        self.ahrq_reset_threshold = 100  # 死码阈值
+        self.ahrq_temperature = 0.05
+
+        self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
+        self.text_dim: int = 768  # 文本特征维度 (BERT-base)
+
+        # PMAT配置（复用你原有逻辑）
+        self.pmat_hidden_dim = 64
+        self.pmat_num_modalities = 2  # 文本+视觉
+
+        self.pmat_drift_threshold = 0.3
+        self.pmat_rec_loss_weight = 1.0
+        self.pmat_semantic_loss_weight = 0.1
+        self.pmat_consistency_weight = 0.5
+
+        # 数据集配置（替换为你的路径）
+        self.data_path = "./data/"
+        self.train_path = self.data_path + "train.csv"
+        self.val_path = self.data_path + "val.csv"
+        self.test_path = self.data_path + "test.csv"
+
+
+# 全局配置实例
+new_config = Config()

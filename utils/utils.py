@@ -1,9 +1,12 @@
+import os
 from collections import defaultdict
 
 import numpy as np
 import torch
 import scipy.sparse as sp
 from sklearn.metrics.pairwise import cosine_similarity
+
+from config import Config
 
 
 def build_sim(features):
@@ -226,3 +229,157 @@ def validate_semantic_id_uniqueness(model, all_item_loader, config):
         "top5_duplicate": top5_duplicate,
         "semantic_id_map": semantic_id_map
     }
+
+
+def calculate_metrics(pos_scores, neg_scores, k_list=[5, 10, 20]):
+    """计算推荐指标：HR@k、NDCG@k、MRR"""
+    metrics = defaultdict(float)
+    pos_scores = pos_scores.unsqueeze(1)  # (batch, 1)
+
+    # HR@k
+    for k in k_list:
+        # 取前k个负样本
+        topk_neg = torch.topk(neg_scores, k, dim=1)[0]
+        # 正样本分数 > 负样本分数的数量 / k
+        hr = (pos_scores > topk_neg).float().sum() / (len(pos_scores) * k)
+        metrics[f"HR@{k}"] = hr.item()
+
+    # NDCG@k
+    for k in k_list:
+        all_scores = torch.cat([pos_scores, neg_scores], dim=1)  # (batch, 1+num_neg)
+        _, indices = torch.sort(all_scores, dim=1, descending=True)
+        # 找到正样本的位置
+        pos_rank = (indices == 0).nonzero()[:, 1] + 1  # 1-based
+        # NDCG = 1 / log2(rank + 1) if rank <=k else 0
+        ndcg = (pos_rank <= k).float() / torch.log2(pos_rank.float() + 1)
+        metrics[f"NDCG@{k}"] = ndcg.mean().item()
+
+    # MRR
+    all_scores = torch.cat([pos_scores, neg_scores], dim=1)
+    _, indices = torch.sort(all_scores, dim=1, descending=True)
+    pos_rank = (indices == 0).nonzero()[:, 1] + 1
+    mrr = (1 / pos_rank.float()).mean().item()
+    metrics["MRR"] = mrr
+
+    return metrics
+
+
+def calculate_id_metrics(indices_list, config:Config = None):
+    """计算语义ID指标：重复率、基尼系数、码本利用率"""
+    metrics = defaultdict(float)
+    # indices_list: [layer0_indices, layer1_indices, ...] (每个元素是(batch,)
+
+    # 1. ID重复率：先拼接所有层的ID成完整ID
+    full_ids = []
+    for batch_idx in range(len(indices_list[0])):
+        id_str = "_".join([str(indices_list[layer][batch_idx].item()) for layer in range(len(indices_list))])
+        full_ids.append(id_str)
+    unique_ids = len(set(full_ids))
+    total_ids = len(full_ids)
+    metrics["id_repeat_rate"] = 1 - (unique_ids / total_ids)
+
+    # 2. 各层码本利用率
+    for layer_idx, indices in enumerate(indices_list):
+        used_codes = len(torch.unique(indices))
+        # 从配置中获取该层的码本大小
+        if layer_idx in config.semantic_hierarchy["topic"]["layers"]:
+            total_codes = config.semantic_hierarchy["topic"]["codebook_size"]
+        else:
+            total_codes = config.semantic_hierarchy["style"]["codebook_size"]
+        metrics[f"codebook_usage_layer{layer_idx}"] = used_codes / total_codes
+
+    # 3. 各层基尼系数（码本选择均衡性）
+    for layer_idx, indices in enumerate(indices_list):
+        # 统计每个码本被选择的次数
+        code_counts = torch.bincount(indices, minlength=total_codes)
+        code_counts = code_counts / code_counts.sum()  # 归一化
+        # 计算基尼系数
+        sorted_counts = torch.sort(code_counts)[0]
+        n = len(sorted_counts)
+        cum_counts = torch.cumsum(sorted_counts, dim=0)
+        gini = (n + 1 - 2 * torch.sum(cum_counts) / cum_counts[-1]) / n
+        metrics[f"gini_layer{layer_idx}"] = gini.item()
+
+    return metrics
+
+
+def seed_everything(seed):
+    """固定随机种子"""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+class EarlyStopping:
+    """早停工具类：防止过拟合，保存最优模型"""
+
+    def __init__(self, patience=7, verbose=False, delta=0.0001, path='best_model.pth'):
+        """
+        Args:
+            patience: 多少个epoch验证集指标没有提升就停止训练
+            verbose: 是否打印日志
+            delta: 指标提升的最小阈值（小于该值视为无提升）
+            path: 最优模型保存路径
+        """
+        self.patience = patience
+        self.verbose = verbose
+        self.delta = delta
+        self.path = path
+
+        self.counter = 0  # 无提升的epoch计数
+        self.best_score = None  # 最优指标值
+        self.early_stop = False  # 是否触发早停
+        self.best_epoch = 0  # 最优模型对应的epoch
+
+    def __call__(self, val_score, model, optimizer=None):
+        """
+        每次验证集评估后调用
+        Args:
+            val_score: 验证集指标（越大越好，如NDCG@10）
+            model: 模型实例
+            optimizer: 优化器（可选，保存优化器状态）
+        """
+        # 第一次调用初始化最优分数
+        if self.best_score is None:
+            self.best_score = val_score
+            self.save_checkpoint(val_score, model, optimizer)
+        # 指标未提升（考虑delta阈值）
+        elif val_score < self.best_score + self.delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            # 触发早停
+            if self.counter >= self.patience:
+                self.early_stop = True
+        # 指标提升，保存新的最优模型
+        else:
+            self.best_score = val_score
+            self.save_checkpoint(val_score, model, optimizer)
+            self.counter = 0
+
+    def save_checkpoint(self, val_score, model, optimizer):
+        """保存最优模型"""
+        if self.verbose:
+            print(f'Validation score improved ({self.best_score:.6f} --> {val_score:.6f}). Saving model to {self.path}')
+
+        # 构建保存内容
+        save_dict = {
+            'model_state_dict': model.state_dict(),
+            'best_score': val_score,
+            'epoch': self.best_epoch + 1
+        }
+        # 可选保存优化器状态
+        if optimizer is not None:
+            save_dict['optimizer_state_dict'] = optimizer.state_dict()
+
+        # 创建保存目录
+        save_dir = os.path.dirname(self.path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        # 保存模型
+        torch.save(save_dict, self.path)
+        self.best_epoch += 1

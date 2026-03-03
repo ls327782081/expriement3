@@ -46,10 +46,6 @@ from .mcrl import (
     InterModalContrastive
 )
 
-from .pmat_sasrec import (
-    PMAT_SASRec,
-    PMATItemEncoder
-)
 
 __all__ = [
     # PMAT components

@@ -1628,8 +1628,8 @@ def get_pmat_dataloader(
     val_dataset = PMATDataset(
         data, "val_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=0,  # Full Ranking模式不需要负样本
-        full_ranking=True,
+        num_negative_samples=999,
+        full_ranking=False,
         logger=logger
     )
     test_dataset = PMATDataset(
