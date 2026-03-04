@@ -132,7 +132,7 @@ def train_sasrec_ahrq():
         verbose=True,
         delta=1e-4,  # Gini提升阈值
         path="./best_quant_ahrq.pth",
-        mode='min'  # 关键：适配Gini系数
+        mode='max'  # 关键：适配Gini系数
     )
 
     pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
@@ -191,12 +191,16 @@ def train_sasrec_ahrq():
         model.eval()
         val_id_metrics = []
         with torch.no_grad():
-            for batch in train_bar:
+            val_bar = tqdm(pretrain_loader, desc=f"Stage1 Epoch {epoch + 1}/{new_config.stage1_epochs}")
+
+            for batch in val_bar:
                 text_feat = batch['text_feat'].float()
                 vision_feat = batch['vision_feat'].float()
                 quantized, indices_list, quant_layers, code_probs, raw = model.ahrq(text_feat,vision_feat)
                 id_metrics = calculate_id_metrics(indices_list)
                 val_id_metrics.append(id_metrics)
+                val_bar.set_postfix({**id_metrics})
+            val_bar.close()
 
         # 计算Stage1平均指标
         # 计算验证集平均Gini（早停核心指标）
