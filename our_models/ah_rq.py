@@ -172,11 +172,14 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
                 if cb_key in self.code_usage_count:
                     dead_codes = [k for k, v in self.code_usage_count[cb_key].items() if v < self.reset_threshold]
                     if len(dead_codes) > 0:
-                        random_idx = torch.randperm(block.shape[0])[:len(dead_codes)]
+
+                        max_idx = block.shape[0] - 1
+                        random_idx = torch.randint(0, max_idx, (len(dead_codes),), device=block.device)
                         random_feat = block[random_idx].detach()
+
                         for i, code_idx in enumerate(dead_codes):
                             self.codebooks[cb_key].data[code_idx] = (
-                                    self.codebooks[cb_key].data[code_idx] * 0.7 + random_feat[i].squeeze() * 0.3
+                                    self.codebooks[cb_key].data[code_idx] * 0.7 + random_feat[i].mean(dim=0) * 0.3
                             )
                             self.code_usage_count[cb_key][code_idx] = self.reset_threshold
 

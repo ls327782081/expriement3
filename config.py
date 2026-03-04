@@ -153,7 +153,7 @@ class Config:
         self.weight_decay = 1e-4
         self.grad_clip = 1.0
 
-        self.num_negative_samples = 10
+        self.num_negative_samples = 99
 
         # SASRec配置
         self.sasrec_hidden_dim = 64

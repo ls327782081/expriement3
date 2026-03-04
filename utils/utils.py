@@ -6,7 +6,7 @@ import torch
 import scipy.sparse as sp
 from sklearn.metrics.pairwise import cosine_similarity
 
-from config import Config
+from config import new_config
 
 
 def build_sim(features):
@@ -137,7 +137,7 @@ def check_tensor(tensor: torch.Tensor, module_name: str, step: str = "") :
         print(f"  - 张量形状: {tensor.shape}")
         return
 
-def validate_semantic_id_uniqueness(model, all_item_loader, config):
+def validate_semantic_id_uniqueness(model, all_item_loader, new_config):
     """
     验证全量商品编码后的语义ID重复情况（修正版）
     关键修复：
@@ -151,27 +151,27 @@ def validate_semantic_id_uniqueness(model, all_item_loader, config):
     all_semantic_ids = []
 
     # 新增：统计码本使用情况（每层的码本是否被使用）
-    codebook_usage = [set() for _ in range(config.id_length)]  # 每层一个集合，存被使用的码本索引
+    codebook_usage = [set() for _ in range(new_config.id_length)]  # 每层一个集合，存被使用的码本索引
 
     with torch.no_grad():
         for batch in all_item_loader:
             item_ids = batch['item_id'].cpu().numpy().tolist()
-            text_feat = batch['text_feat'].to(config.device)
-            visual_feat = batch['vision_feat'].to(config.device)
+            text_feat = batch['text_feat'].to(new_config.device)
+            visual_feat = batch['vision_feat'].to(new_config.device)
 
             # 执行编码
             _, semantic_logits, _, _, _, _, batch_semantic_ids, _ = model.item_encoder(
                 text_feat, visual_feat, return_semantic_logits=True
             )
 
-            # ========== 修正1：精准解析语义ID（适配config） ==========
+            # ========== 修正1：精准解析语义ID（适配new_config） ==========
             # semantic_logits shape: [B, id_length, codebook_size]
             assert semantic_logits.ndim == 3, f"semantic_logits维度错误，应为3维[B,id_length,codebook_size]，实际是{semantic_logits.ndim}维"
             assert semantic_logits.shape[
-                       1] == config.id_length, f"语义ID层数错误，配置是{config.id_length}，实际是{semantic_logits.shape[1]}"
+                       1] == new_config.id_length, f"语义ID层数错误，配置是{new_config.id_length}，实际是{semantic_logits.shape[1]}"
 
             # ========== 修正2：统计码本使用情况 ==========
-            for layer_idx in range(config.id_length):
+            for layer_idx in range(new_config.id_length):
                 # 取出该层所有batch的ID，加入集合（自动去重）
                 layer_ids = batch_semantic_ids[:, layer_idx]
                 codebook_usage[layer_idx].update(layer_ids.tolist())
@@ -198,7 +198,7 @@ def validate_semantic_id_uniqueness(model, all_item_loader, config):
     duplicate_ratio = 1 - (unique_semantic_ids / total_items)
 
     # 修正3：正确计算码本利用率
-    total_codebooks = config.id_length * config.codebook_size  # 总码本数
+    total_codebooks = new_config.id_length * new_config.codebook_size  # 总码本数
     used_codebooks = sum([len(s) for s in codebook_usage])  # 被使用的码本数
     codebook_utilization = used_codebooks / total_codebooks if total_codebooks > 0 else 0.0
 
@@ -208,7 +208,7 @@ def validate_semantic_id_uniqueness(model, all_item_loader, config):
     print(f"2. 唯一语义ID数: {unique_semantic_ids}")
     print(f"3. 语义ID重复率: {duplicate_ratio:.4f} ({duplicate_ratio * 100:.2f}%)")
     print(f"4. 有效码本利用率: {codebook_utilization:.4f} ({codebook_utilization * 100:.2f}%)")
-    print(f"   - 总码本数: {total_codebooks}（{config.id_length}层 × {config.codebook_size}码本/层）")
+    print(f"   - 总码本数: {total_codebooks}（{new_config.id_length}层 × {new_config.codebook_size}码本/层）")
     print(f"   - 被使用码本数: {used_codebooks}")
     print(f"   - 每层使用码本数: {[len(s) for s in codebook_usage]}")
 
@@ -264,7 +264,7 @@ def calculate_metrics(pos_scores, neg_scores, k_list=[5, 10, 20]):
     return metrics
 
 
-def calculate_id_metrics(indices_list, config:Config = None):
+def calculate_id_metrics(indices_list):
     """计算语义ID指标：重复率、基尼系数、码本利用率"""
     metrics = defaultdict(float)
     # indices_list: [layer0_indices, layer1_indices, ...] (每个元素是(batch,)
@@ -282,10 +282,10 @@ def calculate_id_metrics(indices_list, config:Config = None):
     for layer_idx, indices in enumerate(indices_list):
         used_codes = len(torch.unique(indices))
         # 从配置中获取该层的码本大小
-        if layer_idx in config.semantic_hierarchy["topic"]["layers"]:
-            total_codes = config.semantic_hierarchy["topic"]["codebook_size"]
+        if layer_idx in new_config.semantic_hierarchy["topic"]["layers"]:
+            total_codes = new_config.semantic_hierarchy["topic"]["codebook_size"]
         else:
-            total_codes = config.semantic_hierarchy["style"]["codebook_size"]
+            total_codes = new_config.semantic_hierarchy["style"]["codebook_size"]
         metrics[f"codebook_usage_layer{layer_idx}"] = used_codes / total_codes
 
     # 3. 各层基尼系数（码本选择均衡性）

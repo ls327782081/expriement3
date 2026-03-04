@@ -167,11 +167,11 @@ class SASRecAHRQ(nn.Module):
         device = history_sem_feat.device
 
         # 位置编码
-        positions = torch.arange(self.max_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
         history_sem_feat = history_sem_feat + self.position_embedding(positions)
 
         # 掩码（防止看到未来）
-        mask = torch.tril(torch.ones((self.max_len, self.max_len), device=device)).bool()
+        mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
 
         # Transformer编码
         encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask)

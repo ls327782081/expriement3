@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from config import config
+from config import new_config
 
 
 def bpr_loss(pos_scores, neg_scores):
@@ -32,7 +32,7 @@ def hierarchical_consistency_loss(quantized_layers, indices, hierarchy):
         # 计算余弦相似度，要求Style层与Topic层相似度高
         sim = F.cosine_similarity(style_feat, topic_feat, dim=-1)
         consistency = 1 - sim.mean()  # 相似度越低，损失越大
-        loss += consistency * config.pmat_consistency_weight
+        loss += consistency * new_config.pmat_consistency_weight
 
     return loss
 
@@ -40,13 +40,13 @@ def hierarchical_consistency_loss(quantized_layers, indices, hierarchy):
 def total_loss(pos_scores, neg_scores, quantized, x, quantized_layers, indices, hierarchy):
     """总损失：BPR + 量化 + 层次一致性"""
     bpr = bpr_loss(pos_scores, neg_scores)
-    quant = quantization_loss(quantized, x, config.ahrq_beta)
+    quant = quantization_loss(quantized, x, new_config.ahrq_beta)
     consistency = hierarchical_consistency_loss(quantized_layers, indices, hierarchy)
 
     # 分层加权
     total = (
-            config.pmat_rec_loss_weight * bpr +
-            config.pmat_semantic_loss_weight * quant +
+            new_config.pmat_rec_loss_weight * bpr +
+            new_config.pmat_semantic_loss_weight * quant +
             consistency
     )
     return total, {"bpr_loss": bpr.item(), "quant_loss": quant.item(), "consistency_loss": consistency.item()}
