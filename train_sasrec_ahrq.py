@@ -1,22 +1,232 @@
-import torch
 import os
-import numpy as np
-from tqdm import tqdm
-from config import new_config
-from data_utils import get_pmat_dataloader
-from our_models.sasrec_ahrq import SASRecAHRQ
-from utils.loss import total_loss, compute_total_loss
-from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything
-from log import Logger
 
+import numpy as np
+import torch
+from tqdm import tqdm
+
+from config import new_config
+from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
+from log import Logger
+from our_models.sasrec_ahrq import SASRecAHRQ
+from utils.loss import compute_quantization_loss, compute_ranking_loss
+from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
 
 NUM_WORKS = 0 if os.name == 'nt' else 4
+
+
+def evaluate_test_full(model, test_loader, all_item_features, topk=10, device="cuda"):
+    """
+    测试集全量排序评估（适配批量batch_size>1，特征索引=物品ID）
+    Args:
+        model: 训练好的SASRecAHRQ模型
+        test_loader: 测试集dataloader（任意batch_size）
+        all_item_features: dict，包含所有物品的文本/视觉特征
+            - text: (num_items, text_dim) 文本特征，索引=物品ID
+            - visual: (num_items, visual_dim) 视觉特征，索引=物品ID
+            - num_items: 物品总数
+        topk: 评估HR@10/NDCG@10
+        device: 设备
+    Returns:
+        avg_hr: 全量评估HR@10
+        avg_ndcg: 全量评估NDCG@10
+    """
+    model.eval()
+    total_hr = 0.0
+    total_ndcg = 0.0
+    total_users = 0
+
+    # 提取全量物品特征并移到设备（特征索引=物品ID）
+    all_item_text = all_item_features["text"].float().to(device)  # (num_items, text_dim)
+    all_item_vision = all_item_features["visual"].float().to(device)  # (num_items, visual_dim)
+    num_items = all_item_features["num_items"]  # 物品总数
+
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Full Ranking Evaluation on Test Set"):
+            # 1. 提取批量用户的历史特征
+            batch_size = batch["history_text_feat"].shape[0]
+            history_text = batch["history_text_feat"].float().to(device)  # (batch_size, max_len, text_dim)
+            history_vision = batch["history_vision_feat"].float().to(device)  # (batch_size, max_len, visual_dim)
+
+            # 2. 提取批量用户的正样本ID和已交互物品ID
+            target_item_ids = batch["target_item"].cpu().numpy()  # (batch_size,) 批量正样本ID
+            history_item_ids = batch["history_items"].cpu().numpy()  # (batch_size, max_len) 批量历史ID
+
+            # 3. 批量全量打分：每个用户对所有物品的推荐分数
+            all_scores = model.predict_all(
+                history_text=history_text,
+                history_vision=history_vision,
+                all_item_text=all_item_text,
+                all_item_vision=all_item_vision
+            )  # (batch_size, num_items)
+
+            # 4. 逐用户处理：排除已交互物品 + 计算指标
+            for i in range(batch_size):
+                # 4.1 单个用户的已交互物品ID（排除padding/无效ID）
+                interacted_ids = [id for id in history_item_ids[i] if id != 0 and id < num_items]
+                # 4.2 排除已交互物品
+                if len(interacted_ids) > 0:
+                    all_scores[i, interacted_ids] = -float('inf')
+
+                # 4.3 单个用户的全量排序，取Top-K
+                user_scores = all_scores[i:i + 1, :]  # (1, num_items)
+                _, topk_indices = torch.topk(user_scores, k=topk, dim=1)  # (1, topk)
+                topk_ids = topk_indices.squeeze(0).cpu().numpy()  # (topk,)
+
+                # 4.4 单个用户的正样本ID
+                target_id = target_item_ids[i]
+                # 跳过无效正样本ID
+                if target_id >= num_items or target_id == 0:
+                    continue
+
+                # 4.5 计算单个用户的HR@10/NDCG@10
+                if target_id in topk_ids:
+                    hr = 1.0
+                    rank = np.where(topk_ids == target_id)[0][0] + 1  # 排名从1开始
+                    ndcg = 1.0 / np.log2(rank + 1)
+                else:
+                    hr = 0.0
+                    ndcg = 0.0
+
+                total_hr += hr
+                total_ndcg += ndcg
+                total_users += 1
+
+    # 计算平均指标（避免除以0）
+    if total_users == 0:
+        return 0.0, 0.0
+    avg_hr = total_hr / total_users
+    avg_ndcg = total_ndcg / total_users
+    return avg_hr, avg_ndcg
 
 # ===================== 训练逻辑 =====================
 def train_sasrec_ahrq():
     logger = Logger("./logs/train_sasrec_ahrq.log")
     # 固定种子
     seed_everything(new_config.seed)
+
+    # 2. 初始化模型
+    model = SASRecAHRQ().to(new_config.device)
+
+    # ===================== Stage 1：量化预训练（仅训AHRQ，无排序损失） =====================
+    print("\n========== Stage 1: Quantization Pre-training (AHRQ Only) ==========")
+    # 应用Stage1冻结逻辑（模型内置方法）
+    model.freeze_for_stage1()
+    # Stage1优化器：仅AH-RQ可训练参数
+    quant_params = [p for p in model.ahrq.parameters() if p.requires_grad]
+    optimizer_quant = torch.optim.AdamW(
+        quant_params,
+        lr=1e-4,  # 比之前的5e-5略大，全量数据收敛更快
+        weight_decay=1e-5,  # 降低权重衰减，避免过度正则
+        betas=(0.9, 0.999)
+    )
+    # 学习率调度：更平缓的衰减，适配全量数据
+    scheduler_quant = torch.optim.lr_scheduler.StepLR(
+        optimizer_quant,
+        step_size=10,
+        gamma=0.9
+    )
+
+    # 初始化Stage1早停（Gini系数越小越好，mode='min'）
+    early_stopping_quant = EarlyStopping(
+        patience=getattr(new_config, "stage1_patience", 8),
+        verbose=True,
+        delta=1e-4,  # Gini提升阈值
+        path="./best_quant_ahrq.pth",
+        mode='min'  # 关键：适配Gini系数
+    )
+
+    pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
+        cache_dir="./data",
+        category='Video_Games',
+        batch_size=new_config.batch_size,
+        shuffle=True,
+        quick_mode=True,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
+
+    best_quant_gini = 1.0  # 量化阶段最优Gini（越小越好）
+    model.train()
+
+    for epoch in range(new_config.stage1_epochs):
+        train_bar = tqdm(pretrain_loader, desc=f"Stage1 Epoch {epoch + 1}/{new_config.stage1_epochs}")
+        train_losses = []
+        train_id_metrics = []
+
+        for batch in train_bar:
+            text_feat = batch['text_feat'].float()
+            vision_feat = batch['vision_feat'].float()
+            # 前向传播（仅获取量化相关输出）
+            quantized, indices, quant_layers,code_probs, raw= model.ahrq(text_feat, vision_feat)
+
+            # Stage1总损失
+            loss, loss_dict = compute_quantization_loss(quantized, raw,code_probs, new_config)
+
+
+            # 反向传播（仅更新AH-RQ参数）
+            optimizer_quant.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(quant_params, new_config.grad_clip)
+            optimizer_quant.step()
+
+            # 记录指标
+            train_losses.append(loss.item())
+            # 仅记录ID质量指标（Stage1无排序指标）
+            id_metrics = calculate_id_metrics([idx.detach() for idx in indices])
+            train_id_metrics.append(id_metrics)
+
+            # 更新进度条
+            avg_loss = np.mean(train_losses)
+            avg_gini = np.mean([m["gini_layer0"] for m in train_id_metrics]) if train_id_metrics else 1.0
+            train_bar.set_postfix({
+                "loss": f"{avg_loss:.4f}",
+                "gini_layer0": f"{avg_gini:.4f}"
+            })
+
+        # 学习率调度
+        scheduler_quant.step()
+
+        # Stage1验证（仅评估量化质量）
+        model.eval()
+        val_id_metrics = []
+        with torch.no_grad():
+            for batch in train_bar:
+                text_feat = batch['text_feat'].float()
+                vision_feat = batch['vision_feat'].float()
+                quantized, indices_list, quant_layers, code_probs, raw = model.ahrq(text_feat,vision_feat)
+                id_metrics = calculate_id_metrics(indices_list)
+                val_id_metrics.append(id_metrics)
+
+        # 计算Stage1平均指标
+        # 计算验证集平均Gini（早停核心指标）
+        avg_train_loss = np.mean(train_losses)
+        avg_train_gini = np.mean([m["gini_layer0"] for m in train_id_metrics])
+        avg_train_id_repeat = np.mean([m["id_repeat_rate"] for m in train_id_metrics])
+        avg_val_gini = np.mean([m["gini_layer0"] for m in val_id_metrics])
+        avg_val_id_repeat = np.mean([m["id_repeat_rate"] for m in val_id_metrics])
+
+        # 打印日志
+        print(f"\nStage1 Epoch {epoch + 1} Summary:")
+        print(f"Train Loss: {avg_train_loss:.4f}")
+        print(f"Train ID Repeat Rate: {avg_train_id_repeat:.4f} | Val ID Repeat Rate: {avg_val_id_repeat:.4f}")
+        print(f"Train Gini Layer0: {avg_train_gini:.4f} | Val Gini Layer0: {avg_val_gini:.4f}")
+
+        # 调用早停（传入验证集Gini系数）
+        early_stopping_quant(avg_val_gini, model, optimizer_quant)
+
+        # 触发早停则终止训练
+        if early_stopping_quant.early_stop:
+            print(
+                f"Stage1 Early stop at epoch {epoch + 1}! Best val Gini: {early_stopping_quant.best_score:.4f}")
+            break
+
+        # 每5轮执行稳定的全局死码重置（避免扰动）
+        if (epoch + 1) % 5 == 0 and epoch > 0:
+            fast_codebook_reset(model.ahrq, all_item_meta['text_features'].float(), all_item_meta['image_features'].float(), new_config)  # 用训练集特征重置
+
+    print("\n========== Stage 2: Recommendation Training (SASRec Only) ==========")
+    # 应用Stage2冻结逻辑（模型内置方法）
+    model.freeze_for_stage2()
 
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
@@ -30,132 +240,132 @@ def train_sasrec_ahrq():
         logger=logger
     )
 
-    # 2. 初始化模型
-    model = SASRecAHRQ().to(new_config.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=new_config.lr, weight_decay=new_config.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=new_config.epochs)
+    # Stage2优化器：仅SASRec可训练参数
+    rec_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer_rec = torch.optim.AdamW(
+        rec_params,
+        lr=new_config.lr,
+        weight_decay=new_config.weight_decay
+    )
+    scheduler_rec = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer_rec,
+        T_max=new_config.stage2_epochs
+    )
 
-    # 3. 训练
+    model.train()
+
     best_ndcg = 0.0
-    for epoch in range(new_config.epochs):
-        # 训练阶段
-        model.train()
-        train_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{new_config.epochs}")
+    for epoch in range(new_config.stage2_epochs):
+        train_bar = tqdm(train_loader, desc=f"Stage2 Epoch {epoch + 1}/{new_config.stage2_epochs}")
         train_losses = []
         train_metrics = []
         train_id_metrics = []
 
         for batch in train_bar:
+            # 前向传播（AH-RQ已冻结，仅更新SASRec）
+            pos_scores, neg_scores, _, user_emb, indices_list, _, _, _ = model(batch)
 
-            # 前向传播
-            pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers, pos_code_probs, pos_raw = model(batch)
+            # Stage2损失：仅排序损失（BPR+分数正则，无量化损失）
+
+            loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)
 
 
-            # 计算损失
-            # loss, loss_dict = total_loss(
-            #     pos_scores, neg_scores, quantized, user_emb,
-            #     quantized_layers, indices_list, new_config.semantic_hierarchy
-            # )
-            # 计算多目标损失
-            loss, loss_dict = compute_total_loss(
-                pos_scores=pos_scores,
-                neg_scores=neg_scores,
-                quant_feat=quantized,
-                raw_feat=pos_raw,
-                code_probs=pos_code_probs,
-                config=new_config
-            )
-
-            # 反向传播
-            optimizer.zero_grad()
+            # 反向传播（仅更新SASRec参数）
+            optimizer_rec.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), new_config.grad_clip)
-            optimizer.step()
+            torch.nn.utils.clip_grad_norm_(rec_params, new_config.grad_clip)
+            optimizer_rec.step()
 
             # 记录指标
             train_losses.append(loss.item())
             # 推荐指标
             rec_metrics = calculate_metrics(pos_scores.detach(), neg_scores.detach())
-            # ID质量指标
+            # ID质量指标（监控是否稳定）
             id_metrics = calculate_id_metrics([idx.detach() for idx in indices_list])
-            # 合并指标
             batch_metrics = {**loss_dict, **rec_metrics, **id_metrics}
             train_metrics.append(batch_metrics)
 
             # 更新进度条
-            # 1. 合法的参数名 + 格式化为4位小数
-            # 2. 空值保护：避免key不存在导致报错
-            hr10 = batch_metrics.get("HR@10", 0.0)  # 无该键则默认0.0
-            postfix_dict = {
-                "loss": f"{np.mean(train_losses):.4f}",  # 平均损失保留4位
-                "HR@10": f"{hr10:.4f}"  # HR@10保留4位，参数名无空格
-            }
-            # 3. 安全更新进度条
-            train_bar.set_postfix(**postfix_dict)
+            hr10 = batch_metrics.get("HR@10", 0.0)
+            avg_loss = np.mean(train_losses)
+            train_bar.set_postfix({
+                "loss": f"{avg_loss:.4f}",
+                "HR@10": f"{hr10:.4f}"
+            })
 
-            # 学习率调度
-            scheduler.step()
+        # 学习率调度
+        scheduler_rec.step()
 
-            # 4. 验证阶段
-            model.eval()
-            val_losses = []
-            val_metrics = []
-            with torch.no_grad():
-                for batch in val_loader:
+        # Stage2验证
+        model.eval()
+        val_losses = []
+        val_metrics = []
+        with torch.no_grad():
+            for batch in val_loader:
+                pos_scores, neg_scores, _, _, indices_list, _, _, _ = model(batch)
 
-                    pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers, pos_code_probs, pos_raw = model(batch)
-                    # loss, loss_dict = total_loss(
-                    #     pos_scores, neg_scores, quantized, user_emb,
-                    #     quantized_layers, indices_list, new_config.semantic_hierarchy
-                    # )
-                    loss, loss_dict = compute_total_loss(
-                        pos_scores=pos_scores,
-                        neg_scores=neg_scores,
-                        quant_feat=quantized,
-                        raw_feat=pos_raw,
-                        code_probs=pos_code_probs,
-                        config=new_config
-                    )
+                # 验证阶段排序损失
+                loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)
 
-                    val_losses.append(loss.item())
-                    rec_metrics = calculate_metrics(pos_scores, neg_scores)
-                    id_metrics = calculate_id_metrics(indices_list)
-                    val_metrics.append({**loss_dict, **rec_metrics, **id_metrics})
+                val_losses.append(loss.item())
+                rec_metrics = calculate_metrics(pos_scores, neg_scores)
+                id_metrics = calculate_id_metrics(indices_list)
+                val_metrics.append({**loss_dict, **rec_metrics, **id_metrics})
 
-            # 5. 计算平均指标
-            avg_train_loss = np.mean(train_losses)
-            avg_val_loss = np.mean(val_losses)
+        # 计算Stage2平均指标
+        avg_train_loss = np.mean(train_losses)
+        avg_val_loss = np.mean(val_losses)
 
-            # 训练指标平均
-            avg_train_metrics = {}
-            for key in train_metrics[0].keys():
-                avg_train_metrics[key] = np.mean([m[key] for m in train_metrics])
+        avg_train_metrics = {}
+        for key in train_metrics[0].keys():
+            avg_train_metrics[key] = np.mean([m[key] for m in train_metrics])
 
-            # 验证指标平均
-            avg_val_metrics = {}
-            for key in val_metrics[0].keys():
-                avg_val_metrics[key] = np.mean([m[key] for m in val_metrics])
+        avg_val_metrics = {}
+        for key in val_metrics[0].keys():
+            avg_val_metrics[key] = np.mean([m[key] for m in val_metrics])
 
-            # 6. 打印日志
-            print(f"\nEpoch {epoch + 1} Summary:")
-            print(f"Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-            print(f"Train HR@10: {avg_train_metrics['HR@10']:.4f} | Val HR@10: {avg_val_metrics['HR@10']:.4f}")
-            print(f"Train NDCG@10: {avg_train_metrics['NDCG@10']:.4f} | Val NDCG@10: {avg_val_metrics['NDCG@10']:.4f}")
-            print(
-                f"Train ID Repeat Rate: {avg_train_metrics['id_repeat_rate']:.4f} | Val ID Repeat Rate: {avg_val_metrics['id_repeat_rate']:.4f}")
-            print(
-                f"Train Gini Layer0: {avg_train_metrics['gini_layer0']:.4f} | Val Gini Layer0: {avg_val_metrics['gini_layer0']:.4f}")
+        # 打印Stage2日志（保持和原脚本一致的输出格式）
+        print(f"\nStage2 Epoch {epoch + 1} Summary:")
+        print(f"Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        print(f"Train HR@10: {avg_train_metrics['HR@10']:.4f} | Val HR@10: {avg_val_metrics['HR@10']:.4f}")
+        print(f"Train NDCG@10: {avg_train_metrics['NDCG@10']:.4f} | Val NDCG@10: {avg_val_metrics['NDCG@10']:.4f}")
+        print(
+            f"Train ID Repeat Rate: {avg_train_metrics['id_repeat_rate']:.4f} | Val ID Repeat Rate: {avg_val_metrics['id_repeat_rate']:.4f}")
+        print(
+            f"Train Gini Layer0: {avg_train_metrics['gini_layer0']:.4f} | Val Gini Layer0: {avg_val_metrics['gini_layer0']:.4f}")
 
-            # 7. 保存最优模型
-            if avg_val_metrics["NDCG@10"] > best_ndcg:
-                best_ndcg = avg_val_metrics["NDCG@10"]
-                torch.save({
-                    "epoch": epoch + 1,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "best_ndcg": best_ndcg
-                }, "./best_sasrec_ahrq.pth")
-                print(f"Best model saved! NDCG@10: {best_ndcg:.4f}")
+        # 保存Stage2最优排序模型
+        if avg_val_metrics["NDCG@10"] > best_ndcg:
+            best_ndcg = avg_val_metrics["NDCG@10"]
+            torch.save({
+                "stage": 2,
+                "epoch": epoch + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_rec_state_dict": optimizer_rec.state_dict(),
+                "best_ndcg": best_ndcg
+            }, "./best_sasrec_ahrq.pth")
+            print(f"Stage2 Best model saved! NDCG@10: {best_ndcg:.4f}")
+
+    # 执行全量评估
+    test_hr_full, test_ndcg_full = evaluate_test_full(
+        model=model,
+        test_loader=test_loader,
+        all_item_features=all_item_features,
+        topk=10,
+        device=new_config.device
+    )
+
+    # 打印最终全量评估结果
+    print("\n========== Final Test Result (Full Ranking) ==========")
+    print(f"Test HR@10 (Full): {test_hr_full:.4f}")
+    print(f"Test NDCG@10 (Full): {test_ndcg_full:.4f}")
+
+    # 最终保存完整模型
+    torch.save(model.state_dict(), "./final_sasrec_ahrq.pth")
+    print("\n========== Two-Stage Training Completed! ==========")
+    print(f"Best Quant Gini: {best_quant_gini:.4f} | Best Recommendation NDCG (Val): {best_ndcg:.4f}")
+    print(f"Final Test HR@10 (Full): {test_hr_full:.4f} | Final Test NDCG@10 (Full): {test_ndcg_full:.4f}")
+
 
 if __name__ == "__main__":
     train_sasrec_ahrq()

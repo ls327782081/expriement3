@@ -1,9 +1,10 @@
 import torch
 import torch.nn.functional as F
 from config import new_config
+import numpy as np
 
 
-def bpr_loss(pos_scores, neg_scores):
+def compute_bpr_loss(pos_scores, neg_scores):
     """BPR损失（序列/推荐任务核心）"""
     pos_scores = pos_scores.unsqueeze(1)  # (batch, 1)
     loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-8)
@@ -18,6 +19,46 @@ def quantization_loss(quantized, x, commitment_cost=0.25):
     commit_loss = F.mse_loss(x, quantized.detach())
     return recon_loss + commitment_cost * commit_loss
 
+
+def compute_quantization_loss(quantized, pos_raw, pos_code_probs, config):
+    """
+    修复核心：
+    1. 降低重构损失权重，让「ID均匀性」成为优化核心
+    2. 改用「Gini系数损失」直接惩罚ID分布不均（和你的评估指标对齐）
+    3. 增加「ID多样性损失」强制每个批次使用更多ID
+    """
+    # 1. 重构损失（降低权重，仅保证特征不偏离太远）
+    recon_loss = F.mse_loss(quantized, pos_raw) * getattr(config, "recon_weight", 0.1)  # 从1.0→0.1
+
+    # 2. 码本Gini系数损失（直接对齐评估指标，Gini越小越好）
+    prob_flat = pos_code_probs.reshape(-1, pos_code_probs.size(-1)) + 1e-8
+    code_usage = prob_flat.mean(0)  # 每个ID的平均使用率
+    # 计算Gini系数（0=完全均匀，1=完全集中）
+    sorted_usage = torch.sort(code_usage)[0]
+    n = len(sorted_usage)
+    cumsum = torch.cumsum(sorted_usage, dim=0)
+    gini = (n + 1 - 2 * torch.sum(cumsum) / cumsum[-1]) / n
+    gini_loss = gini * getattr(config, "gini_weight", 1.0)  # 核心损失，权重1.0
+
+    # 3. ID多样性损失（强制每个批次使用至少80%的ID）
+    batch_usage = (prob_flat > 1e-4).float().sum(0)  # 每个ID在批次内被使用的样本数
+    batch_usage_rate = (batch_usage > 0).float().mean()  # 批次内被使用的ID比例
+    diversity_loss = (1 - batch_usage_rate) * getattr(config, "diversity_weight", 0.8)  # 权重0.8
+
+    # 4. 熵损失（辅助，保持原有逻辑但降低权重）
+    entropy = -(prob_flat * prob_flat.log()).sum(-1).mean()
+    entropy_norm = 1 - (entropy / np.log(prob_flat.size(-1)))
+    entropy_loss = entropy_norm * getattr(config, "entropy_weight", 0.1)  # 权重0.1
+
+    # 总损失：Gini损失主导 + 多样性损失 + 熵损失 + 弱重构损失
+    total_loss = gini_loss + diversity_loss + entropy_loss + recon_loss
+    return total_loss, {
+        "gini_loss": gini_loss.item(),
+        "diversity_loss": diversity_loss.item(),
+        "entropy_loss": entropy_loss.item(),
+        "recon_loss": recon_loss.item(),
+        "total_loss": total_loss.item()
+    }
 
 def hierarchical_consistency_loss(quantized_layers, indices, hierarchy):
     """层次语义一致性损失（Topic→Style约束）"""
@@ -39,7 +80,7 @@ def hierarchical_consistency_loss(quantized_layers, indices, hierarchy):
 
 def total_loss(pos_scores, neg_scores, quantized, x, quantized_layers, indices, hierarchy):
     """总损失：BPR + 量化 + 层次一致性"""
-    bpr = bpr_loss(pos_scores, neg_scores)
+    bpr = compute_bpr_loss(pos_scores, neg_scores)
     quant = quantization_loss(quantized, x, new_config.ahrq_beta)
     consistency = hierarchical_consistency_loss(quantized_layers, indices, hierarchy)
 
@@ -91,4 +132,57 @@ def compute_total_loss(pos_scores, neg_scores, quant_feat, raw_feat, code_probs,
                         "entropy_loss": entropy_loss.item(),
                         "recon_loss": recon_loss.item(),
                         "score_reg": score_reg.item()}
+
+def quantization_uniform_loss(code_probs):
+    """
+    码本均匀性损失：强制每个码本ID被均匀使用
+    理论依据：SIGIR 2023《QuantRec》
+    """
+    # code_probs: [batch, seq_len, cb_size] 或 [batch, cb_size]
+    if len(code_probs.shape) == 3:
+        code_probs = code_probs.reshape(-1, code_probs.size(-1))
+    # 计算每个ID的使用频率
+    id_usage = code_probs.sum(dim=0) / code_probs.sum()
+    # 均匀性损失：最小化与均匀分布的KL散度
+    uniform_dist = torch.ones_like(id_usage) / id_usage.size(0)
+    kl_div = torch.sum(id_usage * (id_usage + 1e-8).log() - id_usage * (uniform_dist + 1e-8).log())
+    return kl_div
+
+
+def compute_ranking_loss(pos_scores, neg_scores, config):
+    """
+    Stage2排序损失函数（封装，避免重复代码）
+    兼容配置参数缺失，加入异常处理
+    """
+    try:
+        # 确保pos_scores维度正确
+        pos_flat = pos_scores.squeeze(1) if pos_scores.dim() > 1 else pos_scores
+        neg_flat = neg_scores.reshape(-1) if neg_scores.dim() > 2 else neg_scores
+
+        # BPR损失（带margin）
+        bpr_margin = getattr(config, "bpr_margin", 0.4)
+        diff = (pos_flat.unsqueeze(1) - neg_scores) - bpr_margin
+        bpr_loss = -torch.nn.functional.logsigmoid(diff).mean()
+
+        # 分数正则损失（兼容默认值）
+        reg_weight = getattr(config, "reg_weight", 0.005)
+        score_reg = (torch.var(pos_flat) + torch.var(neg_scores)).mean() * reg_weight
+
+        # 总损失
+        total_loss = bpr_loss + score_reg
+        return total_loss, {
+            "bpr_loss": bpr_loss.item(),
+            "score_reg": score_reg.item(),
+            "total_loss": total_loss.item()
+        }
+    except Exception as e:
+        # 异常兜底：仅用BPR损失
+        print(f"Ranking loss compute error: {e}, fallback to BPR only")
+        pos_flat = pos_scores.squeeze(1) if pos_scores.dim() > 1 else pos_scores
+        bpr_loss = -torch.nn.functional.logsigmoid(pos_flat.unsqueeze(1) - neg_scores).mean()
+        return bpr_loss, {
+            "bpr_loss": bpr_loss.item(),
+            "score_reg": 0.0,
+            "total_loss": bpr_loss.item()
+        }
 

@@ -71,7 +71,7 @@ class BaseConfig:
     two_stage_training: bool = True  # 是否启用两阶段训练
     stage1_epochs: int = 20  # 阶段1（预训练物品编码器）的epoch数
     stage2_epochs: int = 20  # 阶段2（训练序列模型）的epoch数
-    stage1_lr: float = 1e-3  # 阶段1学习率（预训练通常用较大学习率）
+    stage1_lr: float = 5e-5  # 阶段1学习率（预训练通常用较大学习率）
     stage2_lr: float = 1e-4  # 阶段2学习率
 
     # 阶段1：物品编码器预训练（对比学习）
@@ -147,18 +147,22 @@ class Config:
         # 通用配置
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = 42
-        self.batch_size = 256
+        self.batch_size = 64
         self.epochs = 50
         self.lr = 1e-3
         self.weight_decay = 1e-4
         self.grad_clip = 1.0
 
-        self.num_negative_samples = 99
+        self.num_negative_samples = 9999
 
-        # 配置损失权重（理论依据：网格搜索最优权重比，SIGIR 2023）
-        self.entropy_weight = 0.25  # 熵损失权重（从0.01逐步提升）
-        self.recon_weight = 0.1  # 重构损失权重
-        self.reg_weight = 0.005  # 分数正则权重
+        # 两阶段训练参数
+        self.stage1_epochs = 20  # 量化预训练轮数
+        self.stage2_epochs = 30  # 排序训练轮数
+        self.quant_uniform_weight = 0.1  # 码本均匀性损失权重
+        self.bpr_margin = 0.4  # BPR间距（降低排序难度）
+        self.reg_weight = 0.005          # 分数正则化损失权重
+        self.usage_weight = 0.2  # 码本使用率损失权重（新增）
+        self.quant_uniform_weight = 0.3  # 均匀性损失权重（从0.1调高，约束Gini）
 
         # SASRec配置
         self.sasrec_hidden_dim = 64
@@ -187,7 +191,7 @@ class Config:
         self.ahrq_beta = 0.25  # 量化损失权重
         self.ahrq_use_ema = True
         self.ahrq_reset_unused_codes = True
-        self.ahrq_reset_threshold = 100  # 死码阈值
+        self.ahrq_reset_threshold = 50  # 死码阈值
         self.ahrq_temperature = 0.5
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)

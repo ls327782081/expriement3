@@ -110,6 +110,50 @@ class SASRecAHRQ(nn.Module):
         semantic_feat = torch.cat(semantic_blocks, dim=-1)  # (batch, seq_len, hidden_dim)
         return semantic_feat
 
+    def freeze_for_stage1(self):
+        """
+        Stage 1 冻结：仅训练AH-RQ（含多模态对齐层），冻结SASRec所有模块
+        包括：semantic_id_emb/transformer/score_layer/position_embedding 全部冻结
+        """
+        # 1. 冻结SASRec核心模块（语义ID映射+序列建模+打分）
+        for param in self.semantic_id_emb.parameters():
+            param.requires_grad = False
+        for param in self.position_embedding.parameters():
+            param.requires_grad = False
+        for param in self.transformer_encoder.parameters():
+            param.requires_grad = False
+        for param in self.score_layer.parameters():
+            param.requires_grad = False
+
+        # 2. 解冻AH-RQ全量参数（含多模态对齐层）
+        for param in self.ahrq.parameters():
+            param.requires_grad = True
+        # 确保AH-RQ的EMA/死码重置逻辑生效（Stage1需要训练码本）
+        self.ahrq.use_ema = new_config.ahrq_use_ema
+        self.ahrq.reset_unused_codes = new_config.ahrq_reset_unused_codes
+
+    def freeze_for_stage2(self):
+        """
+        Stage 2 冻结：仅训练SASRec（语义ID映射+序列建模+打分），冻结AH-RQ全量参数
+        """
+        # 1. 冻结AH-RQ全量参数（核心：彻底锁死量化模块）
+        for param in self.ahrq.parameters():
+            param.requires_grad = False
+        # 关闭AH-RQ的EMA/死码重置（防止训练中篡改码本）
+        self.ahrq.use_ema = False
+        self.ahrq.reset_unused_codes = False
+
+        # 2. 解冻SASRec全量模块
+        for param in self.semantic_id_emb.parameters():
+            param.requires_grad = True
+        for param in self.position_embedding.parameters():
+            param.requires_grad = True
+        for param in self.transformer_encoder.parameters():
+            param.requires_grad = True
+        for param in self.score_layer.parameters():
+            param.requires_grad = True
+
+
     def forward(self, batch):
         """
         前向传播：多模态特征 → AH-RQ语义ID → 语义特征 → SASRec
@@ -212,3 +256,81 @@ class SASRecAHRQ(nn.Module):
             pos_indices, pos_quant_layers,
             pos_code_probs, pos_raw
         )
+
+    def get_user_embedding(self, history_text, history_vision):
+        """
+        抽取用户表征（100%复用forward中的SASRec序列建模逻辑）
+        Args:
+            history_text: (batch, max_len, text_dim) 历史序列文本特征
+            history_vision: (batch, max_len, visual_dim) 历史序列视觉特征
+        Returns:
+            user_emb: (batch, hidden_dim) 用户表征
+        """
+        self.eval()  # 评估模式，关闭Dropout/EMA
+        with torch.no_grad():
+            # Step 1: AH-RQ量化历史序列（和forward完全一致）
+            hist_quantized, hist_indices, hist_quant_layers, _, _ = self.ahrq(history_text, history_vision)
+
+            # Step 2: 语义ID → 语义特征（和forward完全一致）
+            history_sem_feat = self.semantic_id_to_feat(hist_indices)  # (batch, max_len, hidden_dim)
+
+            # Step 3: 特征处理（严格对齐forward中的历史序列逻辑）
+            history_sem_feat = F.normalize(history_sem_feat, p=2, dim=-1) * 10
+            history_sem_feat = F.gelu(history_sem_feat)
+            history_sem_feat = F.dropout(history_sem_feat, p=0.1, training=False)  # 评估时关闭Dropout
+
+            # Step 4: 位置编码（和forward完全一致）
+            batch_size = history_sem_feat.shape[0]
+            device = history_sem_feat.device
+            positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
+            history_sem_feat = history_sem_feat + self.position_embedding(positions)
+
+            # Step 5: Transformer编码（和forward完全一致）
+            bool_mask = torch.tril(
+                torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
+            mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
+            encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask)
+
+            # Step 6: 聚合用户表征（和forward完全一致）
+            non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)  # 非padding掩码
+            last_indices = non_zero_mask.sum(dim=1) - 1
+            last_indices = torch.clamp(last_indices, min=0)
+            user_emb = encoded_seq[torch.arange(batch_size), last_indices]  # (batch, hidden_dim)
+
+            return user_emb
+
+    def predict_all(self, history_text, history_vision, all_item_text, all_item_vision):
+        """
+        全量物品打分：100%对齐forward中的打分逻辑
+        Args:
+            history_text: (batch, max_len, text_dim) 用户历史序列文本特征
+            history_vision: (batch, max_len, visual_dim) 用户历史序列视觉特征
+            all_item_text: (item_num, text_dim) 所有物品的文本特征
+            all_item_vision: (item_num, visual_dim) 所有物品的视觉特征
+        Returns:
+            all_scores: (batch, item_num) 每个用户对所有物品的打分
+        """
+        self.eval()  # 评估模式
+        device = history_text.device
+        batch_size = history_text.shape[0]
+        item_num = all_item_text.shape[0]
+
+        with torch.no_grad():
+            # Step 1: 抽取用户表征（和forward完全一致）
+            user_emb = self.get_user_embedding(history_text, history_vision)  # (batch, hidden_dim)
+
+            # Step 2: 对所有物品做AH-RQ量化+语义特征映射（严格对齐forward中的正/负样本逻辑）
+            # AH-RQ量化所有物品（和forward中正样本量化逻辑一致）
+            all_quantized, all_indices, all_quant_layers, _, _ = self.ahrq(all_item_text, all_item_vision)
+            # 语义ID → 语义特征（和forward中正样本逻辑一致）
+            all_sem_feat = self.semantic_id_to_feat(all_indices)  # (item_num, hidden_dim)
+            # 特征归一化（100%对齐forward中的正/负样本处理：仅归一化×10，无gelu/dropout）
+            all_sem_feat = F.normalize(all_sem_feat, p=2, dim=-1) * 10
+
+            # Step 3: 计算用户对所有物品的打分（和forward完全一致）
+            # 扩展维度：(batch, 1, hidden_dim) × (1, item_num, hidden_dim) → (batch, item_num, hidden_dim)
+            interaction = user_emb.unsqueeze(1) * all_sem_feat.unsqueeze(0)
+            # 打分：(batch, item_num, 1) → (batch, item_num)（和forward中的score_layer一致）
+            all_scores = self.score_layer(interaction).squeeze(-1)
+
+        return all_scores

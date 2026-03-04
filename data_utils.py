@@ -1382,21 +1382,43 @@ class PMATDataset(Dataset):
         return len(self.samples)
 
     def _sample_negatives(self, user_id: int, num_samples: int) -> List[int]:
-        """采样负样本（用户未交互过的物品）"""
+        """
+        采样负样本（用户未交互过的物品）
+        优化点：
+        1. 先计算可采样的负样本池，避免死循环
+        2. 采样数超过可用数量时，给出警告并返回最大可用样本
+        3. 保留原有的校验逻辑，保证采样正确性
+        """
+        # 1. 获取用户已交互物品集合
         user_items = self.user_item_set.get(user_id, set())
-        negatives = []
+        user_items = set(user_items)  # 确保是集合类型，加速查找
 
-        while len(negatives) < num_samples:
-            # 随机采样，排除padding item 0
-            neg_item = np.random.randint(1, self.num_items)
-            if neg_item not in user_items and neg_item not in negatives:
-                negatives.append(neg_item)
+        # 2. 计算可采样的负样本池（所有物品 - 已交互物品）
+        all_items = set(range(self.num_items))  # 全量物品ID集合
+        candidate_negatives = list(all_items - user_items)  # 可用负样本列表
+        available_neg_num = len(candidate_negatives)
 
-        # 校验：负样本是否真的不在交互列表中
+        # 3. 处理采样数超过可用数量的情况（避免死循环核心）
+        if num_samples > available_neg_num:
+            print(
+                f"⚠️ [负采样警告] 用户{user_id}：请求采样{num_samples}个负样本，但仅{available_neg_num}个可用（已交互{len(user_items)}个）")
+            # 返回所有可用负样本（不足部分不再补充，避免死循环）
+            negatives = candidate_negatives
+        else:
+            # 4. 从候选池中随机采样（无重复）
+            # 用np.random.choice替代while循环，效率更高
+            sampled_indices = np.random.choice(
+                len(candidate_negatives),
+                size=num_samples,
+                replace=False  # 不重复采样
+            )
+            negatives = [candidate_negatives[idx] for idx in sampled_indices]
+
+        # 5. 保留原有的校验逻辑（双重保障）
         invalid = [n for n in negatives if n in user_items]
         if invalid:
             print(f"[负采样验证] 用户{user_id}：交互物品数={len(user_items)}, 采样负样本={negatives}")
-            print(f"⚠️  用户{user_id}负采样错误：{invalid}在交互列表中！")
+            print(f"❌ 用户{user_id}负采样错误：{invalid}在交互列表中！")
 
         return negatives
 
@@ -1628,7 +1650,7 @@ def get_pmat_dataloader(
     val_dataset = PMATDataset(
         data, "val_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=999,
+        num_negative_samples=9999,
         full_ranking=False,
         logger=logger
     )

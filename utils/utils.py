@@ -370,21 +370,50 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = False
 
 
-class EarlyStopping:
-    """早停工具类：防止过拟合，保存最优模型"""
+def fast_codebook_reset(ahrq_model, text_feat, vision_feat, config):
+    ahrq_model.code_usage_count = {}
+    ahrq_model.eval()
 
-    def __init__(self, patience=7, verbose=False, delta=0.0001, path='best_model.pth'):
+
+    with torch.no_grad():
+        quantized, _, _, _, _ = ahrq_model(text_feat, vision_feat)
+    feat_mean = quantized.mean(dim=0).detach()  # 训练集特征均值（更稳定）
+
+    total_reset = 0
+    for cb_key, usage in ahrq_model.code_usage_count.items():
+        codebook = ahrq_model.codebooks[cb_key]
+        cb_size = codebook.size(0)
+        dead_codes = [k for k in range(cb_size) if usage.get(k, 0) < config.ahrq_reset_threshold]
+
+        if len(dead_codes) > 0:
+            # 用训练集特征均值+小噪声重置（保持语义一致性）
+            noise = torch.randn(len(dead_codes), codebook.size(-1)).to(codebook.device) * 0.01
+            reset_feat = feat_mean.unsqueeze(0).repeat(len(dead_codes), 1) + noise
+
+            for i, code_idx in enumerate(dead_codes):
+                # 小幅更新：90%原有值 + 10%特征均值（避免大幅扰动）
+                codebook.data[code_idx] = codebook.data[code_idx] * 0.9 + reset_feat[i] * 0.1
+                ahrq_model.code_usage_count[cb_key][code_idx] = config.ahrq_reset_threshold
+            total_reset += len(dead_codes)
+    print(f"Global codebook reset completed! Reset {total_reset} dead codes (stable update)")
+
+class EarlyStopping:
+    """早停工具类：支持「越大越好」（如NDCG）和「越小越好」（如Gini）的指标"""
+
+    def __init__(self, patience=7, verbose=False, delta=0.0001, path='best_model.pth', mode='max'):
         """
         Args:
             patience: 多少个epoch验证集指标没有提升就停止训练
             verbose: 是否打印日志
             delta: 指标提升的最小阈值（小于该值视为无提升）
             path: 最优模型保存路径
+            mode: 'max'（指标越大越好，如NDCG）| 'min'（指标越小越好，如Gini）
         """
         self.patience = patience
         self.verbose = verbose
         self.delta = delta
         self.path = path
+        self.mode = mode  # 新增：适配不同指标类型
 
         self.counter = 0  # 无提升的epoch计数
         self.best_score = None  # 最优指标值
@@ -395,16 +424,19 @@ class EarlyStopping:
         """
         每次验证集评估后调用
         Args:
-            val_score: 验证集指标（越大越好，如NDCG@10）
+            val_score: 验证集指标（Gini用min，NDCG用max）
             model: 模型实例
             optimizer: 优化器（可选，保存优化器状态）
         """
+        # 根据mode转换分数（统一按max处理）
+        score = val_score if self.mode == 'max' else -val_score
+
         # 第一次调用初始化最优分数
         if self.best_score is None:
-            self.best_score = val_score
+            self.best_score = score
             self.save_checkpoint(val_score, model, optimizer)
         # 指标未提升（考虑delta阈值）
-        elif val_score < self.best_score + self.delta:
+        elif score < self.best_score + self.delta:
             self.counter += 1
             if self.verbose:
                 print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
@@ -413,24 +445,35 @@ class EarlyStopping:
                 self.early_stop = True
         # 指标提升，保存新的最优模型
         else:
-            self.best_score = val_score
+            self.best_score = score
             self.save_checkpoint(val_score, model, optimizer)
             self.counter = 0
 
     def save_checkpoint(self, val_score, model, optimizer):
         """保存最优模型"""
         if self.verbose:
-            print(f'Validation score improved ({self.best_score:.6f} --> {val_score:.6f}). Saving model to {self.path}')
+            if self.mode == 'max':
+                print(f'Validation score improved ({self.best_score:.6f} --> {val_score:.6f}). Saving model to {self.path}')
+            else:
+                # 修复：用原始best_score（未转换）打印
+                best_gini = -self.best_score if self.best_score < 0 else self.best_score
+                print(f'Validation Gini improved ({best_gini:.6f} --> {val_score:.6f}). Saving model to {self.path}')
 
-        # 构建保存内容
+        # 构建保存内容（Stage1仅保存AH-RQ，Stage2保存完整模型）
         save_dict = {
-            'model_state_dict': model.state_dict(),
             'best_score': val_score,
             'epoch': self.best_epoch + 1
         }
-        # 可选保存优化器状态
-        if optimizer is not None:
-            save_dict['optimizer_state_dict'] = optimizer.state_dict()
+        # Stage1：仅保存AH-RQ参数（减少存储）
+        if 'quant' in self.path:
+            save_dict['ahrq_state_dict'] = model.ahrq.state_dict()
+            if optimizer is not None:
+                save_dict['optimizer_quant_state_dict'] = optimizer.state_dict()
+        # Stage2：保存完整模型
+        else:
+            save_dict['model_state_dict'] = model.state_dict()
+            if optimizer is not None:
+                save_dict['optimizer_rec_state_dict'] = optimizer.state_dict()
 
         # 创建保存目录
         save_dir = os.path.dirname(self.path)

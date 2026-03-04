@@ -202,3 +202,24 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
 
         return quantized, indices_list, quantized_layers, avg_code_probs, raw_feat
 
+    # 在AdaptiveHierarchicalQuantizer类中新增
+    def collect_code_usage(self, indices_list):
+        """
+        批量统计ID使用情况（供外部重置调用）
+        Args:
+            indices_list: list of tensor，多层ID (batch, seq_len)
+        """
+        for layer_idx, indices in enumerate(indices_list):
+            # 匹配cb_key的命名规则
+            if layer_idx in self.semantic_hierarchy["topic"]["layers"]:
+                cb_type = "topic"
+            else:
+                cb_type = "style"
+            cb_key = f"{cb_type}_{layer_idx}"
+
+            if cb_key not in self.code_usage_count:
+                self.code_usage_count[cb_key] = {}
+            unique_indices, counts = torch.unique(indices, return_counts=True)
+            for idx, cnt in zip(unique_indices, counts):
+                idx_item = idx.item()
+                self.code_usage_count[cb_key][idx_item] = self.code_usage_count[cb_key].get(idx_item, 0) + cnt.item()
