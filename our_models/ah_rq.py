@@ -115,11 +115,14 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
             # 单模态输入：仅特征
             x = args[0]
 
+        raw_feat = x.clone()
+
         # Step 2: 原有AH-RQ量化逻辑（完全复用）
         x_blocks = torch.chunk(x, self.num_layers, dim=-1)
         quantized_blocks = []
         indices_list = []
         quantized_layers = []
+        code_probs_list = []  # 存储每层的码本选择概率
 
         for layer_idx, block in enumerate(x_blocks):
             if layer_idx in self.semantic_hierarchy["topic"]["layers"]:
@@ -142,6 +145,9 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
 
             indices = torch.argmax(similarity, dim=-1)
             indices_list.append(indices)
+
+            code_probs = F.softmax(similarity, dim=-1)  # [batch, ..., cb_size]
+            code_probs_list.append(code_probs)
 
             soft_indices = F.softmax(similarity, dim=-1)
             quant_block_soft = torch.matmul(soft_indices, codebook)
@@ -184,10 +190,15 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
                             self.code_usage_count[cb_key][code_idx] = self.reset_threshold
 
         quantized = torch.cat(quantized_blocks, dim=-1)
+
+        code_probs_stack = torch.stack(code_probs_list, dim=-2)  # [batch, ..., num_layers, cb_size]
+        avg_code_probs = code_probs_stack.mean(dim=-2)  # 所有层取平均 → [batch, ..., cb_size]
+
         self._last_quant_output = {
             "quantized": quantized,
             "indices": indices_list,
             "quantized_layers": quantized_layers
         }
 
-        return quantized, indices_list, quantized_layers
+        return quantized, indices_list, quantized_layers, avg_code_probs, raw_feat
+

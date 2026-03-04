@@ -155,6 +155,11 @@ class Config:
 
         self.num_negative_samples = 99
 
+        # 配置损失权重（理论依据：网格搜索最优权重比，SIGIR 2023）
+        self.entropy_weight = 0.05  # 熵损失权重（从0.01逐步提升）
+        self.recon_weight = 0.1  # 重构损失权重
+        self.reg_weight = 0.01  # 分数正则权重
+
         # SASRec配置
         self.sasrec_hidden_dim = 64
         self.sasrec_num_heads = 4
@@ -183,7 +188,7 @@ class Config:
         self.ahrq_use_ema = True
         self.ahrq_reset_unused_codes = True
         self.ahrq_reset_threshold = 100  # 死码阈值
-        self.ahrq_temperature = 0.05
+        self.ahrq_temperature = 0.5
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
         self.text_dim: int = 768  # 文本特征维度 (BERT-base)

@@ -145,9 +145,9 @@ class SASRecAHRQ(nn.Module):
 
         # Step 2: AH-RQ量化（启用多模态对齐，直接处理文本+视觉特征）
         # 历史序列量化（多模态输入）
-        hist_quantized, hist_indices, hist_quant_layers = self.ahrq(history_text, history_vision)
+        hist_quantized, hist_indices, hist_quant_layers, _, _ = self.ahrq(history_text, history_vision)
         # 正样本量化（多模态输入）
-        pos_quantized, pos_indices, pos_quant_layers = self.ahrq(target_text, target_vision)
+        pos_quantized, pos_indices, pos_quant_layers,pos_code_probs, pos_raw = self.ahrq(target_text, target_vision)
         # 负样本量化（展平处理多模态特征）
         neg_batch = neg_text.shape[0]
         neg_num = neg_text.shape[1]
@@ -155,7 +155,7 @@ class SASRecAHRQ(nn.Module):
         neg_text_flat = neg_text.view(-1, neg_text.size(-1))  # (batch*num_neg, text_dim)
         neg_vision_flat = neg_vision.view(-1, neg_vision.size(-1))  # (batch*num_neg, visual_dim)
         # AH-RQ量化展平的负样本
-        neg_quantized_flat, neg_indices, neg_quant_layers = self.ahrq(neg_text_flat, neg_vision_flat)
+        neg_quantized_flat, neg_indices, neg_quant_layers, _, _ = self.ahrq(neg_text_flat, neg_vision_flat)
         # 恢复维度
         # neg_quantized = neg_quantized_flat.view(neg_batch, neg_num, self.hidden_dim)  # (batch, num_neg, hidden_dim)
 
@@ -165,6 +165,7 @@ class SASRecAHRQ(nn.Module):
         pos_sem_feat = self.semantic_id_to_feat(pos_indices)  # (batch, hidden_dim)
         neg_sem_feat = self.semantic_id_to_feat(neg_indices)  # (batch*num_neg, hidden_dim)
         neg_sem_feat = neg_sem_feat.view(neg_batch, neg_num, self.hidden_dim)  # (batch, num_neg, hidden_dim)
+
         history_sem_feat = F.normalize(history_sem_feat, p=2, dim=-1) * 10
         pos_sem_feat = F.normalize(pos_sem_feat, p=2, dim=-1) * 10
         neg_sem_feat = F.normalize(neg_sem_feat, p=2, dim=-1) * 10
@@ -180,26 +181,22 @@ class SASRecAHRQ(nn.Module):
         # 位置编码
         positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
         history_sem_feat = history_sem_feat + self.position_embedding(positions)
-        print("位置编码后history_sem_feat是否有nan:", torch.isnan(history_sem_feat).any().item())  # 应输出False
-        print("position_embedding权重均值:", self.position_embedding.weight.mean().item())
+
 
         # 掩码（防止看到未来）
-        mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
-        print("mask维度:", mask.shape, "是否有nan:", torch.isnan(mask).any().item())
+        bool_mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
+        # 2. 转换为数值型mask：True→0（保留），False→-1e9（屏蔽未来）
+        mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
 
         # Transformer编码
         encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask)
-        print("Transformer输出encoded_seq是否有nan:", torch.isnan(encoded_seq).any().item())
 
         # 用户表征聚合
         non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)  # 非padding掩码
         last_indices = non_zero_mask.sum(dim=1) - 1
         last_indices = torch.clamp(last_indices, min=0)
-        print("last_indices前10个值:", last_indices[:10].tolist())  # 正常应是0~31的整数
-        print("encoded_seq维度:", encoded_seq.shape)
 
         user_emb = encoded_seq[torch.arange(batch_size), last_indices]  # (batch, hidden_dim)
-        print("user_emb是否有nan:", torch.isnan(user_emb).any().item())
 
         # Step 5: 推荐分数计算（逻辑完全不变）
         pos_interaction = user_emb * pos_sem_feat
@@ -208,18 +205,10 @@ class SASRecAHRQ(nn.Module):
         neg_interaction = user_emb.unsqueeze(1) * neg_sem_feat
         neg_scores = self.score_layer(neg_interaction).squeeze(-1)  # (batch, num_neg)
 
-        print("=== 环节4：推荐分数 ===")
-        print(f"pos_scores[:10]（前10个正样本分数）: {pos_scores[:10].tolist()}")
-        print(f"neg_scores[:10]（前10个负样本分数）: {neg_scores[:10].tolist()}")
-        print(f"user_emb mean: {user_emb.mean().item()}, std: {user_emb.std().item()}")
-        print(f"分数是否有nan: {torch.isnan(pos_scores).any().item()}")
-        # 检查正样本是否比负样本低（HR=0的核心原因）
-        print(
-            f"正样本分数 < 负样本分数的比例: {(pos_scores.unsqueeze(1) < neg_scores).all(dim=1).float().mean().item()}")
-
         # 返回结果（兼容原有接口）
         return (
             pos_scores, neg_scores,
             pos_quantized, user_emb,
-            pos_indices, pos_quant_layers
+            pos_indices, pos_quant_layers,
+            pos_code_probs, pos_raw
         )

@@ -5,7 +5,7 @@ from tqdm import tqdm
 from config import new_config
 from data_utils import get_pmat_dataloader
 from our_models.sasrec_ahrq import SASRecAHRQ
-from utils.loss import total_loss
+from utils.loss import total_loss, compute_total_loss
 from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything
 from log import Logger
 
@@ -48,23 +48,22 @@ def train_sasrec_ahrq():
         for batch in train_bar:
 
             # 前向传播
-            pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers = model(batch)
+            pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers, pos_code_probs, pos_raw = model(batch)
 
-            diff = pos_scores.unsqueeze(1) - neg_scores
-            sigmoid_diff = torch.sigmoid(diff)
-            loss = -torch.log(sigmoid_diff + 1e-8).mean()
-
-            # 此处加断点，抓取以下数据
-            print("=== 环节5：损失计算 ===")
-            print(f"diff mean: {diff.mean().item()}, min: {diff.min().item()}, max: {diff.max().item()}")
-            print(f"sigmoid_diff mean: {sigmoid_diff.mean().item()}")
-            print(f"loss: {loss.item()}")
-            print(f"是否有nan: {torch.isnan(loss).item()}")
 
             # 计算损失
-            loss, loss_dict = total_loss(
-                pos_scores, neg_scores, quantized, user_emb,
-                quantized_layers, indices_list, new_config.semantic_hierarchy
+            # loss, loss_dict = total_loss(
+            #     pos_scores, neg_scores, quantized, user_emb,
+            #     quantized_layers, indices_list, new_config.semantic_hierarchy
+            # )
+            # 计算多目标损失
+            loss, loss_dict = compute_total_loss(
+                pos_scores=pos_scores,
+                neg_scores=neg_scores,
+                quant_feat=quantized,
+                raw_feat=pos_raw,
+                code_probs=pos_code_probs,
+                config=new_config
             )
 
             # 反向传播
@@ -104,10 +103,18 @@ def train_sasrec_ahrq():
             with torch.no_grad():
                 for batch in val_loader:
 
-                    pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers = model(batch)
-                    loss, loss_dict = total_loss(
-                        pos_scores, neg_scores, quantized, user_emb,
-                        quantized_layers, indices_list, new_config.semantic_hierarchy
+                    pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers, pos_code_probs, pos_raw = model(batch)
+                    # loss, loss_dict = total_loss(
+                    #     pos_scores, neg_scores, quantized, user_emb,
+                    #     quantized_layers, indices_list, new_config.semantic_hierarchy
+                    # )
+                    loss, loss_dict = compute_total_loss(
+                        pos_scores=pos_scores,
+                        neg_scores=neg_scores,
+                        quant_feat=quantized,
+                        raw_feat=pos_raw,
+                        code_probs=pos_code_probs,
+                        config=new_config
                     )
 
                     val_losses.append(loss.item())

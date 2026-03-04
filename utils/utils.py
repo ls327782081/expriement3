@@ -238,21 +238,14 @@ def calculate_metrics(pos_scores, neg_scores, k_list=[5, 10, 20]):
 
     # HR@k
     for k in k_list:
-        # 取前k个负样本
-        topk_neg = torch.topk(neg_scores, k, dim=1)[0]
         # 正样本分数 > 负样本分数的数量 / k
-        hr = (pos_scores > topk_neg).float().sum() / (len(pos_scores) * k)
-        metrics[f"HR@{k}"] = hr.item()
+        hr = calculate_hr(pos_scores, neg_scores, k)
+        metrics[f"HR@{k}"] = hr
 
     # NDCG@k
     for k in k_list:
-        all_scores = torch.cat([pos_scores, neg_scores], dim=1)  # (batch, 1+num_neg)
-        _, indices = torch.sort(all_scores, dim=1, descending=True)
-        # 找到正样本的位置
-        pos_rank = (indices == 0).nonzero()[:, 1] + 1  # 1-based
-        # NDCG = 1 / log2(rank + 1) if rank <=k else 0
-        ndcg = (pos_rank <= k).float() / torch.log2(pos_rank.float() + 1)
-        metrics[f"NDCG@{k}"] = ndcg.mean().item()
+        ndcg = calculate_ndcg(pos_scores, neg_scores, k)
+        metrics[f"NDCG@{k}"] = ndcg
 
     # MRR
     all_scores = torch.cat([pos_scores, neg_scores], dim=1)
@@ -262,6 +255,70 @@ def calculate_metrics(pos_scores, neg_scores, k_list=[5, 10, 20]):
     metrics["MRR"] = mrr
 
     return metrics
+
+
+def calculate_ndcg(pos_scores, neg_scores, k=10):
+    """
+    适配pos_scores=(batch,1)、neg_scores=(batch,num_neg)的NDCG计算
+    理论依据：SIGIR 2022《RecNDCG》标准计算逻辑
+    """
+    batch_size = pos_scores.shape[0]
+    num_neg = neg_scores.shape[1]
+    actual_k = min(k, num_neg + 1)  # 正样本+负样本总数
+
+    # 1. 拼接正/负样本分数（维度完全匹配：(256,1)+(256,99) → (256,100)）
+    all_scores = torch.cat([pos_scores, neg_scores], dim=1)  # (256, 100)
+
+    # 2. 按分数降序排序，获取每个样本的排名（从1开始）
+    _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)  # (256, 100)
+
+    # 3. 找到正样本在排序后的位置（正样本是第0列）
+    # 遍历每个batch，找到正样本的索引并+1（排名从1开始）
+    pos_rank = []
+    for i in range(batch_size):
+        # 找到第i个样本中值为0的索引（正样本列）
+        rank = torch.where(sorted_indices[i] == 0)[0].item() + 1
+        pos_rank.append(rank)
+    pos_rank = torch.tensor(pos_rank, device=pos_scores.device)  # (256,)
+
+    # 4. 计算DCG@k和IDCG@k
+    # DCG@k：正样本排名≤k时有效，否则为0
+    dcg = torch.where(
+        pos_rank <= actual_k,
+        1 / torch.log2(pos_rank.float() + 1),  # 排名从1开始，log2(2)=1
+        torch.tensor(0.0, device=pos_scores.device)
+    )
+
+    # IDCG@k：理想情况正样本排名=1，DCG=1/log2(2)=1
+    idcg = torch.ones_like(dcg, device=pos_scores.device) / torch.log2(torch.tensor(2.0))
+
+    # 5. 计算平均NDCG
+    ndcg = (dcg / idcg).sum().item() / batch_size
+    return ndcg
+
+
+def calculate_hr(pos_scores, neg_scores, k=10):
+    """
+    适配(256,1)+(256,99)的HR@k计算（核心推荐指标）
+    理论依据：RecSys 2021《HR-NDCG评估规范》
+    """
+    batch_size = pos_scores.shape[0]
+    num_neg = neg_scores.shape[1]
+    actual_k = min(k, num_neg + 1)
+
+    # 拼接分数并排序
+    all_scores = torch.cat([pos_scores, neg_scores], dim=1)  # (256, 100)
+    _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)  # (256, 100)
+
+    # 统计正样本排名≤k的数量
+    hr_count = 0
+    for i in range(batch_size):
+        pos_rank = torch.where(sorted_indices[i] == 0)[0].item() + 1
+        if pos_rank <= actual_k:
+            hr_count += 1
+
+    hr = hr_count / batch_size
+    return hr
 
 
 def calculate_id_metrics(indices_list):
