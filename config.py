@@ -168,13 +168,13 @@ class Config:
         self.semantic_hierarchy = {
             "topic": {
                 "layers": [0, 1],
-                "codebook_size": 1024,
+                "codebook_size": 32,
                 "loss_weight": 1.0,
                 "ema_decay": 0.99
             },
             "style": {
                 "layers": [2, 3],
-                "codebook_size": 512,
+                "codebook_size": 32,
                 "loss_weight": 0.8,
                 "ema_decay": 0.99
             }
