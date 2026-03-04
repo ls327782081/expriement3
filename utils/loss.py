@@ -22,43 +22,94 @@ def quantization_loss(quantized, x, commitment_cost=0.25):
 
 def compute_quantization_loss(quantized, pos_raw, pos_code_probs, config):
     """
-    修复核心：
-    1. 降低重构损失权重，让「ID均匀性」成为优化核心
-    2. 改用「Gini系数损失」直接惩罚ID分布不均（和你的评估指标对齐）
-    3. 增加「ID多样性损失」强制每个批次使用更多ID
+    最终修复版：解决多样性损失后期为0导致Gini反弹的问题
+    核心改进：
+    1. 多样性损失从「阈值惩罚」→「方差惩罚」，持续约束码本使用均匀性
+    2. 降低重构损失权重，强化码本损失优先级
+    3. 保留分层优化逻辑，适配三维code_probs
     """
-    # 1. 重构损失（降低权重，仅保证特征不偏离太远）
-    recon_loss = F.mse_loss(quantized, pos_raw) * getattr(config, "recon_weight", 0.1)  # 从1.0→0.1
+    # ========== 0. 维度校验（新增，避免传参错误） ==========
+    if len(pos_code_probs.shape) != 3:
+        raise ValueError(f"pos_code_probs必须是3维(batch, num_layers, cb_size)，当前是{pos_code_probs.shape}")
+    batch_size, num_layers, cb_size = pos_code_probs.shape
 
-    # 2. 码本Gini系数损失（直接对齐评估指标，Gini越小越好）
-    prob_flat = pos_code_probs.reshape(-1, pos_code_probs.size(-1)) + 1e-8
-    code_usage = prob_flat.mean(0)  # 每个ID的平均使用率
-    # 计算Gini系数（0=完全均匀，1=完全集中）
-    sorted_usage = torch.sort(code_usage)[0]
-    n = len(sorted_usage)
-    cumsum = torch.cumsum(sorted_usage, dim=0)
-    gini = (n + 1 - 2 * torch.sum(cumsum) / cumsum[-1]) / n
-    gini_loss = gini * getattr(config, "gini_weight", 1.0)  # 核心损失，权重1.0
+    # ========== 1. 全局重构损失（权重降至极低，避免过拟合） ==========
+    recon_loss = F.mse_loss(quantized, pos_raw) * getattr(config, "recon_weight", 0.001)
 
-    # 3. ID多样性损失（强制每个批次使用至少80%的ID）
-    batch_usage = (prob_flat > 1e-4).float().sum(0)  # 每个ID在批次内被使用的样本数
-    batch_usage_rate = (batch_usage > 0).float().mean()  # 批次内被使用的ID比例
-    diversity_loss = (1 - batch_usage_rate) * getattr(config, "diversity_weight", 0.8)  # 权重0.8
+    # ========== 2. 分层计算码本损失（核心：每层独立优化） ==========
+    layer_gini_losses = []  # 每层的Gini损失
+    layer_diversity_losses = []  # 每层的多样性损失（方差惩罚）
+    layer_entropy_losses = []  # 每层的熵损失
 
-    # 4. 熵损失（辅助，保持原有逻辑但降低权重）
-    entropy = -(prob_flat * prob_flat.log()).sum(-1).mean()
-    entropy_norm = 1 - (entropy / np.log(prob_flat.size(-1)))
-    entropy_loss = entropy_norm * getattr(config, "entropy_weight", 0.1)  # 权重0.1
+    for layer_idx in range(num_layers):
+        # 取出当前层的code_probs：(batch, cb_size)
+        layer_code_probs = pos_code_probs[:, layer_idx, :] + 1e-8  # 加小值避免log(0)
 
-    # 总损失：Gini损失主导 + 多样性损失 + 熵损失 + 弱重构损失
-    total_loss = gini_loss + diversity_loss + entropy_loss + recon_loss
-    return total_loss, {
-        "gini_loss": gini_loss.item(),
-        "diversity_loss": diversity_loss.item(),
-        "entropy_loss": entropy_loss.item(),
+        # ---------- 2.1 分层Gini系数损失（对齐评估指标） ----------
+        code_usage = layer_code_probs.mean(0)  # (cb_size,) 该层每个码本的平均使用率
+        sorted_usage = torch.sort(code_usage)[0]
+        n = len(sorted_usage)
+        cumsum = torch.cumsum(sorted_usage, dim=0)
+        cumsum_total = cumsum[-1] if cumsum[-1] > 1e-8 else 1e-8  # 兜底避免除以0
+        gini = (n + 1 - 2 * torch.sum(cumsum) / cumsum_total) / n
+        layer_gini_losses.append(gini)
+
+        # ---------- 2.2 分层ID多样性损失（核心修复：方差惩罚） ----------
+        prob_threshold = getattr(config, "prob_threshold", 1e-6)  # 适配你的数值范围
+        # 步骤1：计算每个码本在批次内的使用次数（而非仅“是否使用”）
+        # code_usage_count: (cb_size,) → 每个码本被多少样本选择
+        code_usage_count = (layer_code_probs > prob_threshold).float().sum(0)
+
+        # 步骤2：计算使用次数的方差（方差越大，码本使用越集中）
+        # 方差=0 → 所有码本使用次数完全相同（理想状态）
+        # 方差越大 → 少数码本被频繁使用，多数被闲置
+        usage_variance = torch.var(code_usage_count)
+
+        # 步骤3：可选：基础使用率保底（先保证用够80%码本，再优化均匀性）
+        code_used = (code_usage_count > 0).float().mean()  # 该层码本使用率
+        usage_penalty = F.relu(0.8 - code_used) * getattr(config, "usage_weight", 1.0)
+        # 新增：归一化方差（除以批次大小的平方，拉回0~1区间）
+        usage_variance_norm = usage_variance / (batch_size ** 2)
+        # 总多样性损失：方差惩罚（核心） + 使用率保底（辅助）
+        diversity_loss = (usage_variance_norm + usage_penalty) * getattr(config, "diversity_weight", 3.0)
+        layer_diversity_losses.append(diversity_loss)
+
+        # ---------- 2.3 分层熵损失（辅助提升码本分布多样性） ----------
+        entropy = -(layer_code_probs * layer_code_probs.log()).sum(-1).mean()
+        entropy_norm = 1 - (entropy / np.log(cb_size))  # 归一化到0-1
+        layer_entropy_losses.append(entropy_norm * getattr(config, "entropy_weight", 0.05))
+
+    # 汇总分层损失（取均值，保证各层权重一致）
+    avg_gini_loss = torch.stack(layer_gini_losses).mean() * getattr(config, "gini_weight", 8.0)
+    avg_diversity_loss = torch.stack(layer_diversity_losses).mean()
+    avg_entropy_loss = torch.stack(layer_entropy_losses).mean()
+
+    # ========== 3. 总损失（分层码本损失主导 + 弱重构损失） ==========
+    total_loss = avg_gini_loss + avg_diversity_loss + avg_entropy_loss + recon_loss
+
+    # ========== 4. 整理损失字典（便于监控每层效果） ==========
+    loss_dict = {
+        # 全局损失
         "recon_loss": recon_loss.item(),
-        "total_loss": total_loss.item()
+        "total_loss": total_loss.item(),
+        # 分层损失均值
+        "avg_gini_loss": avg_gini_loss.item(),
+        "avg_diversity_loss": avg_diversity_loss.item(),
+        "avg_entropy_loss": avg_entropy_loss.item(),
+        # 每层详细损失（便于调试）
+        # "layer_gini_losses": [g.item() for g in layer_gini_losses],
+        # "layer_diversity_losses": [d.item() for d in layer_diversity_losses],
+        # "layer_entropy_losses": [e.item() for e in layer_entropy_losses],
+        # 关键监控指标
+        # "avg_gini": np.mean([g.item() for g in layer_gini_losses]),
+        # 保留原使用率指标（便于对比）
+        # "avg_batch_usage_rate": np.mean([
+        #     (pos_code_probs[:, idx, :] > 1e-6).any(dim=0).float().mean().item()
+        #     for idx in range(num_layers)
+        # ])
     }
+
+    return total_loss, loss_dict
 
 def hierarchical_consistency_loss(quantized_layers, indices, hierarchy):
     """层次语义一致性损失（Topic→Style约束）"""

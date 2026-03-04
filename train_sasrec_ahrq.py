@@ -128,7 +128,7 @@ def train_sasrec_ahrq():
 
     # 初始化Stage1早停（Gini系数越小越好，mode='min'）
     early_stopping_quant = EarlyStopping(
-        patience=getattr(new_config, "stage1_patience", 8),
+        patience=getattr(new_config, "stage1_patience", 5),
         verbose=True,
         delta=1e-4,  # Gini提升阈值
         path="./best_quant_ahrq.pth",
@@ -146,9 +146,9 @@ def train_sasrec_ahrq():
     )
 
     best_quant_gini = 1.0  # 量化阶段最优Gini（越小越好）
-    model.train()
 
     for epoch in range(new_config.stage1_epochs):
+        model.train()
         train_bar = tqdm(pretrain_loader, desc=f"Stage1 Epoch {epoch + 1}/{new_config.stage1_epochs}")
         train_losses = []
         train_id_metrics = []
@@ -180,7 +180,8 @@ def train_sasrec_ahrq():
             avg_gini = np.mean([m["gini_layer0"] for m in train_id_metrics]) if train_id_metrics else 1.0
             train_bar.set_postfix({
                 "loss": f"{avg_loss:.4f}",
-                "gini_layer0": f"{avg_gini:.4f}"
+                "gini_layer0": f"{avg_gini:.4f}",
+                **loss_dict
             })
 
         # 学习率调度
@@ -252,10 +253,9 @@ def train_sasrec_ahrq():
         T_max=new_config.stage2_epochs
     )
 
-    model.train()
-
     best_ndcg = 0.0
     for epoch in range(new_config.stage2_epochs):
+        model.train()
         train_bar = tqdm(train_loader, desc=f"Stage2 Epoch {epoch + 1}/{new_config.stage2_epochs}")
         train_losses = []
         train_metrics = []
@@ -290,7 +290,8 @@ def train_sasrec_ahrq():
             avg_loss = np.mean(train_losses)
             train_bar.set_postfix({
                 "loss": f"{avg_loss:.4f}",
-                "HR@10": f"{hr10:.4f}"
+                "HR@10": f"{hr10:.4f}",
+                **loss_dict
             })
 
         # 学习率调度

@@ -35,6 +35,7 @@ class SASRecAHRQ(nn.Module):
         # 3. 语义ID映射层（将多层次语义ID转为特征，替代原始Embedding）
         self.num_layers = len(new_config.semantic_hierarchy["topic"]["layers"]) + len(
             new_config.semantic_hierarchy["style"]["layers"])
+
         self.semantic_id_emb = nn.ModuleDict()
         # Topic层语义ID Embedding
         for layer in new_config.semantic_hierarchy["topic"]["layers"]:
@@ -49,7 +50,7 @@ class SASRecAHRQ(nn.Module):
         self.hidden_dim = new_config.sasrec_hidden_dim
         self.max_len = new_config.sasrec_max_len
         self.num_heads = new_config.sasrec_num_heads
-        self.num_layers = new_config.sasrec_num_layers
+        self.sasrec_num_layers = new_config.sasrec_num_layers
         self.dropout = new_config.sasrec_dropout
 
         # 位置编码（保留）
@@ -65,11 +66,13 @@ class SASRecAHRQ(nn.Module):
             batch_first=True,
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer,
-                                                         num_layers=self.num_layers,
+                                                         num_layers=self.sasrec_num_layers,
                                                          enable_nested_tensor=False)
 
         # 推荐打分层（保留）
         self.score_layer = nn.Linear(self.hidden_dim, 1)
+
+        self.alpha = nn.Parameter(torch.tensor(0.5))
 
         # 权重初始化
         self.apply(self._init_weights)
@@ -81,7 +84,34 @@ class SASRecAHRQ(nn.Module):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+        for layer in new_config.semantic_hierarchy["topic"]["layers"]:
+            # 论文推荐的初始化方式（Xavier均匀初始化）
+            nn.init.xavier_uniform_(self.semantic_id_emb[f"topic_{layer}"].weight)
+            # Style层语义ID Embedding
+        for layer in new_config.semantic_hierarchy["style"]["layers"]:
+            nn.init.xavier_uniform_(self.semantic_id_emb[f"style_{layer}"].weight)
 
+        nn.init.xavier_uniform_(self.position_embedding.weight)
+
+        for module in self.transformer_encoder.modules():
+            if isinstance(module, nn.Linear):
+                # 线性层（注意力/QKV/FFN）：Xavier初始化（论文推荐）
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
+            elif isinstance(module, nn.LayerNorm):
+                # LayerNorm：权重=1，偏置=0（论文要求）
+                nn.init.constant_(module.weight, 1.0)
+                nn.init.constant_(module.bias, 0.0)
+            elif isinstance(module, nn.MultiheadAttention):
+                # 多头注意力层：单独初始化QKV权重
+                for param in module.parameters():
+                    if param.dim() > 1:
+                        nn.init.xavier_uniform_(param)
+                    else:
+                        nn.init.constant_(param, 0.0)
+
+        nn.init.constant_(self.alpha, 0.5)
     def semantic_id_to_feat(self, indices_list):
         """
         核心：将AH-RQ生成的多层次语义ID映射为特征
@@ -90,12 +120,22 @@ class SASRecAHRQ(nn.Module):
         Returns:
             semantic_feat: (batch, seq_len, hidden_dim) 语义特征
         """
+        # 校验：indices数量必须等于总层数（论文维度均分要求）
+        if len(indices_list) != self.num_layers:
+            raise ValueError(f"语义ID层数{len(indices_list)}≠配置层数{self.num_layers}（违反分层量化维度均分原则）")
+
+
         semantic_blocks = []
         layer_idx = 0
         # Topic层语义ID映射
         for layer in new_config.semantic_hierarchy["topic"]["layers"]:
             cb_key = f"topic_{layer}"
             indices = indices_list[layer_idx]  # (batch, seq_len)
+
+            cb_size = new_config.semantic_hierarchy["topic"]["codebook_size"]
+            if (indices < 0).any() or (indices >= cb_size).any():
+                raise ValueError(f"Topic层{layer}的ID超出范围[0, {cb_size - 1}]")
+
             block_feat = self.semantic_id_emb[cb_key](indices)  # (batch, seq_len, layer_dim)
             semantic_blocks.append(block_feat)
             layer_idx += 1
@@ -104,10 +144,28 @@ class SASRecAHRQ(nn.Module):
             cb_key = f"style_{layer}"
             indices = indices_list[layer_idx]  # (batch, seq_len)
             block_feat = self.semantic_id_emb[cb_key](indices)  # (batch, seq_len, layer_dim)
+
+            cb_size = new_config.semantic_hierarchy["style"]["codebook_size"]
+            if (indices < 0).any() or (indices >= cb_size).any():
+                raise ValueError(f"Style层{layer}的ID超出范围[0, {cb_size - 1}]")
+
             semantic_blocks.append(block_feat)
             layer_idx += 1
         # 拼接所有层特征
         semantic_feat = torch.cat(semantic_blocks, dim=-1)  # (batch, seq_len, hidden_dim)
+
+        if semantic_feat.shape[-1] != self.hidden_dim:
+            raise ValueError(f"拼接后维度{semantic_feat.shape[-1]}≠配置维度{self.hidden_dim}")
+
+        # 1. 先激活，再归一化（顺序调换，避免先压缩）
+        semantic_feat = F.gelu(semantic_feat)
+        # 2. 归一化（保留方向信息）
+        semantic_feat = F.normalize(semantic_feat, p=2, dim=-1)
+        # 3. 尺度恢复（《Transformer》论文标准操作，提升方差）
+        # hidden_dim=64 → √64=8，直接提升方差8倍
+        semantic_feat = semantic_feat * (self.hidden_dim ** 0.5)
+        # 4. 可选：添加小幅度dropout，增强区分度（避免过拟合）
+        semantic_feat = F.dropout(semantic_feat, p=0.05, training=self.training)
         return semantic_feat
 
     def freeze_for_stage1(self):
@@ -190,8 +248,11 @@ class SASRecAHRQ(nn.Module):
         # Step 2: AH-RQ量化（启用多模态对齐，直接处理文本+视觉特征）
         # 历史序列量化（多模态输入）
         hist_quantized, hist_indices, hist_quant_layers, _, _ = self.ahrq(history_text, history_vision)
+        hist_quantized = F.normalize(hist_quantized, p=2, dim=-1)
         # 正样本量化（多模态输入）
         pos_quantized, pos_indices, pos_quant_layers,pos_code_probs, pos_raw = self.ahrq(target_text, target_vision)
+        pos_quantized = F.normalize(pos_quantized, p=2, dim=-1)
+
         # 负样本量化（展平处理多模态特征）
         neg_batch = neg_text.shape[0]
         neg_num = neg_text.shape[1]
@@ -200,6 +261,8 @@ class SASRecAHRQ(nn.Module):
         neg_vision_flat = neg_vision.view(-1, neg_vision.size(-1))  # (batch*num_neg, visual_dim)
         # AH-RQ量化展平的负样本
         neg_quantized_flat, neg_indices, neg_quant_layers, _, _ = self.ahrq(neg_text_flat, neg_vision_flat)
+        neg_quantized_flat = F.normalize(neg_quantized_flat, p=2, dim=-1)
+
         # 恢复维度
         # neg_quantized = neg_quantized_flat.view(neg_batch, neg_num, self.hidden_dim)  # (batch, num_neg, hidden_dim)
 
@@ -210,14 +273,6 @@ class SASRecAHRQ(nn.Module):
         neg_sem_feat = self.semantic_id_to_feat(neg_indices)  # (batch*num_neg, hidden_dim)
         neg_sem_feat = neg_sem_feat.view(neg_batch, neg_num, self.hidden_dim)  # (batch, num_neg, hidden_dim)
 
-        history_sem_feat = F.normalize(history_sem_feat, p=2, dim=-1) * 10
-        pos_sem_feat = F.normalize(pos_sem_feat, p=2, dim=-1) * 10
-        neg_sem_feat = F.normalize(neg_sem_feat, p=2, dim=-1) * 10
-        # 2. 激活函数（引入非线性，提升区分度）
-        history_sem_feat = F.gelu(history_sem_feat)
-        # 3. Dropout（防止过拟合，可选但建议加）
-        history_sem_feat = F.dropout(history_sem_feat, p=0.1, training=self.training)
-
         # Step 4: SASRec序列建模（输入为语义特征，逻辑完全不变）
         batch_size = history_sem_feat.shape[0]
         device = history_sem_feat.device
@@ -225,21 +280,22 @@ class SASRecAHRQ(nn.Module):
         # 位置编码
         positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
         history_sem_feat = history_sem_feat + self.position_embedding(positions)
+        assert self.position_embedding.weight.requires_grad, "位置编码必须可训练"
 
 
         # 掩码（防止看到未来）
         bool_mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
         # 2. 转换为数值型mask：True→0（保留），False→-1e9（屏蔽未来）
         mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
-
+        src_key_padding_mask = torch.zeros((batch_size, history_sem_feat.shape[1]), dtype=torch.bool, device=device)
         # Transformer编码
-        encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask)
+        encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask, src_key_padding_mask=src_key_padding_mask)
+
 
         # 用户表征聚合
         non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)  # 非padding掩码
         last_indices = non_zero_mask.sum(dim=1) - 1
         last_indices = torch.clamp(last_indices, min=0)
-
         user_emb = encoded_seq[torch.arange(batch_size), last_indices]  # (batch, hidden_dim)
 
         # Step 5: 推荐分数计算（逻辑完全不变）

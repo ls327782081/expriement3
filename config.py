@@ -149,8 +149,8 @@ class Config:
         self.seed = 42
         self.batch_size = 64
         self.epochs = 50
-        self.lr = 1e-3
-        self.weight_decay = 1e-4
+        self.lr = 1e-4
+        self.weight_decay = 1e-5
         self.grad_clip = 1.0
 
         self.num_negative_samples = 9999
@@ -161,7 +161,7 @@ class Config:
         self.quant_uniform_weight = 0.1  # 码本均匀性损失权重
         self.bpr_margin = 0.4  # BPR间距（降低排序难度）
         self.reg_weight = 0.005          # 分数正则化损失权重
-        self.usage_weight = 0.2  # 码本使用率损失权重（新增）
+        self.usage_weight = 1.0 # 码本使用率损失权重（新增）
         self.quant_uniform_weight = 0.3  # 均匀性损失权重（从0.1调高，约束Gini）
 
         # SASRec配置
