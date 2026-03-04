@@ -171,8 +171,10 @@ def train_sasrec_ahrq():
 
             # 记录指标
             train_losses.append(loss.item())
-            # 仅记录ID质量指标（Stage1无排序指标）
-            id_metrics = calculate_id_metrics([idx.detach() for idx in indices])
+
+            with torch.no_grad():
+                # 仅记录ID质量指标（Stage1无排序指标）
+                id_metrics = calculate_id_metrics(indices)
             train_id_metrics.append(id_metrics)
 
             # 更新进度条
