@@ -156,9 +156,9 @@ class Config:
         self.num_negative_samples = 99
 
         # 配置损失权重（理论依据：网格搜索最优权重比，SIGIR 2023）
-        self.entropy_weight = 0.05  # 熵损失权重（从0.01逐步提升）
+        self.entropy_weight = 0.25  # 熵损失权重（从0.01逐步提升）
         self.recon_weight = 0.1  # 重构损失权重
-        self.reg_weight = 0.01  # 分数正则权重
+        self.reg_weight = 0.005  # 分数正则权重
 
         # SASRec配置
         self.sasrec_hidden_dim = 64

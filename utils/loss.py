@@ -73,6 +73,10 @@ def compute_total_loss(pos_scores, neg_scores, quant_feat, raw_feat, code_probs,
     entropy = -torch.sum(code_probs * torch.log(code_probs + 1e-8), dim=-1).mean()
     entropy_loss = -config.entropy_weight * entropy  # 负号：最大化熵→最小化损失
 
+    prob = code_probs.reshape(-1, code_probs.size(-1))
+    entropy = -(prob * (prob + 1e-8).log()).sum(-1).mean()
+    entropy_loss = -config.entropy_weight * entropy * 3
+
     # 3. 特征重构损失（约束量化精度，理论：自编码器重构理论）
     # 理论依据：ICLR 2019《VQ-VAE》：重构损失保证量化特征保留原始特征信息
     recon_loss = F.mse_loss(quant_feat, raw_feat) * config.recon_weight
