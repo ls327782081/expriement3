@@ -18,11 +18,11 @@ class SASRecAHRQ(nn.Module):
         super().__init__()
     
 
-        # 2. AH-RQ量化器（单模态，生成多层次语义ID）
+        # 2. AH-RQ量化器（多模态模式）
         self.ahrq = AdaptiveHierarchicalQuantizer(
             hidden_dim=new_config.ahrq_hidden_dim,
             semantic_hierarchy=new_config.semantic_hierarchy,
-            use_multimodal=True,  
+            use_multimodal=True,  # 启用多模态融合
             text_dim=new_config.text_dim,
             visual_dim=new_config.visual_dim,
             beta=new_config.ahrq_beta,

@@ -21,16 +21,19 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
         self.semantic_hierarchy = semantic_hierarchy
         self.use_multimodal = use_multimodal  # 核心开关：是否处理多模态
 
-        # ========== 新增：多模态对齐层（仅use_multimodal=True时生效） ==========
+        # ========== 特征投影层 ==========
+        # 保存原始特征维度
+        self.text_dim = text_dim
+        self.visual_dim = visual_dim
+
         if self.use_multimodal:
-            # 文本特征映射到统一维度
+            # 多模态模式：分别投影后融合
             self.text_proj = nn.Sequential(
                 nn.Linear(text_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(0.1)
             )
-            # 视觉特征映射到统一维度
             self.visual_proj = nn.Sequential(
                 nn.Linear(visual_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim),
@@ -43,6 +46,15 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
                 nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 2),
                 nn.Softmax(dim=-1)
+            )
+        else:
+            # 非多模态模式：拼接后投影到 hidden_dim
+            combined_dim = text_dim + visual_dim
+            self.feature_proj = nn.Sequential(
+                nn.Linear(combined_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1)
             )
 
         # ========== 原有AH-RQ量化逻辑（完全保留） ==========
@@ -112,8 +124,14 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
             text_feat, visual_feat = args
             x = self.multimodal_align(text_feat, visual_feat)
         else:
-            # 单模态输入：仅特征
-            x = args[0]
+            # 非多模态模式：拼接 text + vision 特征，然后投影
+            if len(args) == 2:
+                text_feat, visual_feat = args
+                combined = torch.cat([text_feat, visual_feat], dim=-1)
+                x = self.feature_proj(combined)
+            else:
+                # 仅一个特征时直接投影
+                x = self.feature_proj(args[0])
 
         raw_feat = x.clone()
 
