@@ -10,6 +10,8 @@ from log import Logger
 from our_models.sasrec_ahrq import SASRecAHRQ
 from utils.loss import compute_quantization_loss, compute_ranking_loss
 from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
+import torch.nn.functional as F
+
 
 NUM_WORKS = 0 if os.name == 'nt' else 4
 
@@ -52,11 +54,13 @@ def evaluate_test_full(model, test_loader, all_item_features, topk=10, device="c
             history_item_ids = batch["history_items"].cpu().numpy()  # (batch_size, max_len) 批量历史ID
 
             # 3. 批量全量打分：每个用户对所有物品的推荐分数
+            history_items = batch["history_items"].to(device)  # (batch_size, max_len) 用于确定有效序列长度
             all_scores = model.predict_all(
                 history_text=history_text,
                 history_vision=history_vision,
                 all_item_text=all_item_text,
-                all_item_vision=all_item_vision
+                all_item_vision=all_item_vision,
+                history_items=history_items
             )  # (batch_size, num_items)
 
             # 4. 逐用户处理：排除已交互物品 + 计算指标
@@ -130,22 +134,22 @@ def train_sasrec_ahrq():
     early_stopping_quant = EarlyStopping(
         patience=getattr(new_config, "stage1_patience", 5),
         verbose=True,
-        delta=1e-4,  # Gini提升阈值
+        delta=1e-6,  # 重构损失的最小提升阈值
         path="./best_quant_ahrq.pth",
-        mode='max'  # 关键：适配Gini系数
+        mode='min'  # 关键：适配Gini系数
     )
 
     pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
         cache_dir="./data",
         category='Video_Games',
         batch_size=new_config.batch_size,
-        shuffle=True,
+        shuffle=False,
         quick_mode=True,
         num_workers=NUM_WORKS,
         logger=logger
     )
 
-    best_quant_gini = 1.0  # 量化阶段最优Gini（越小越好）
+    best_recon_loss = float('inf')  # 重构损失
 
     for epoch in range(new_config.stage1_epochs):
         model.train()
@@ -160,7 +164,7 @@ def train_sasrec_ahrq():
             quantized, indices, quant_layers,code_probs, raw= model.ahrq(text_feat, vision_feat)
 
             # Stage1总损失
-            loss, loss_dict = compute_quantization_loss(quantized, raw,code_probs, new_config)
+            loss, loss_dict = compute_quantization_loss(quantized, raw,code_probs, indices, new_config)
 
 
             # 反向传播（仅更新AH-RQ参数）
@@ -179,11 +183,11 @@ def train_sasrec_ahrq():
 
             # 更新进度条
             avg_loss = np.mean(train_losses)
-            avg_gini = np.mean([m["gini_layer0"] for m in train_id_metrics]) if train_id_metrics else 1.0
             train_bar.set_postfix({
                 "loss": f"{avg_loss:.4f}",
-                "gini_layer0": f"{avg_gini:.4f}",
-                **loss_dict
+                "recon_loss": f"{loss_dict['recon_loss']:.6f}",
+                "usage_loss": f"{loss_dict['usage_loss']:.6f}",
+                "total_loss": f"{loss_dict['total_loss']:.6f}"
             })
 
         # 学习率调度
@@ -191,6 +195,7 @@ def train_sasrec_ahrq():
 
         # Stage1验证（仅评估量化质量）
         model.eval()
+        val_recon_losses = []  # 存储验证集重构损失
         val_id_metrics = []
         with torch.no_grad():
             val_bar = tqdm(pretrain_loader, desc=f"Stage1 Epoch {epoch + 1}/{new_config.stage1_epochs}")
@@ -199,37 +204,50 @@ def train_sasrec_ahrq():
                 text_feat = batch['text_feat'].float()
                 vision_feat = batch['vision_feat'].float()
                 quantized, indices_list, quant_layers, code_probs, raw = model.ahrq(text_feat,vision_feat)
-                id_metrics = calculate_id_metrics(indices_list)
-                val_id_metrics.append(id_metrics)
-                val_bar.set_postfix({**id_metrics})
+
+                recon_loss = F.mse_loss(quantized, raw).item()
+                val_recon_losses.append(recon_loss)
+
+                v_id_metrics = calculate_id_metrics(indices_list)
+                val_id_metrics.append(v_id_metrics)
+                val_bar.set_postfix({
+                    "val_recon_loss": f"{np.mean(val_recon_losses):.6f}",
+                    "id_repeat_rate": f"{v_id_metrics['id_repeat_rate']:.4f}"
+                })
             val_bar.close()
 
         # 计算Stage1平均指标
-        # 计算验证集平均Gini（早停核心指标）
         avg_train_loss = np.mean(train_losses)
-        avg_train_gini = np.mean([m["gini_layer0"] for m in train_id_metrics])
-        avg_train_id_repeat = np.mean([m["id_repeat_rate"] for m in train_id_metrics])
-        avg_val_gini = np.mean([m["gini_layer0"] for m in val_id_metrics])
-        avg_val_id_repeat = np.mean([m["id_repeat_rate"] for m in val_id_metrics])
+        avg_val_recon_loss = np.mean(val_recon_losses)
+        avg_train_id_repeat = np.mean([m["id_repeat_rate"] for m in train_id_metrics]) if train_id_metrics else 0.0
+        avg_val_id_repeat = np.mean([m["id_repeat_rate"] for m in val_id_metrics]) if val_id_metrics else 0.0
 
-        # 打印日志
+        # ========== 核心修复3：日志只打印重构损失+ID重复率（移除Gini） ==========
         print(f"\nStage1 Epoch {epoch + 1} Summary:")
-        print(f"Train Loss: {avg_train_loss:.4f}")
+        print(f"Train Loss: {avg_train_loss:.4f} | Val Recon Loss: {avg_val_recon_loss:.6f}")
         print(f"Train ID Repeat Rate: {avg_train_id_repeat:.4f} | Val ID Repeat Rate: {avg_val_id_repeat:.4f}")
-        print(f"Train Gini Layer0: {avg_train_gini:.4f} | Val Gini Layer0: {avg_val_gini:.4f}")
 
-        # 调用早停（传入验证集Gini系数）
-        early_stopping_quant(avg_val_gini, model, optimizer_quant)
+        # ========== 核心修复4：早停只传重构损失（移除Gini） ==========
+        early_stopping_quant(avg_val_recon_loss, model, optimizer_quant)
+
+        # 更新最优重构损失（日志用）
+        if avg_val_recon_loss < best_recon_loss:
+            best_recon_loss = avg_val_recon_loss
 
         # 触发早停则终止训练
         if early_stopping_quant.early_stop:
-            print(
-                f"Stage1 Early stop at epoch {epoch + 1}! Best val Gini: {early_stopping_quant.best_score:.4f}")
+            print(f"Stage1 Early stop at epoch {epoch + 1}! Best Val Recon Loss: {early_stopping_quant.best_score:.6f}")
             break
 
         # 每5轮执行稳定的全局死码重置（避免扰动）
         if (epoch + 1) % 5 == 0 and epoch > 0:
-            fast_codebook_reset(model.ahrq, all_item_meta['text_features'].float(), all_item_meta['image_features'].float(), new_config)  # 用训练集特征重置
+            # 修复：特征加device
+            fast_codebook_reset(
+                model.ahrq,
+                all_item_meta['text_features'].float().to(new_config.device),
+                all_item_meta['image_features'].float().to(new_config.device),
+                new_config
+            )# 用训练集特征重置
 
     print("\n========== Stage 2: Recommendation Training (SASRec Only) ==========")
     # 应用Stage2冻结逻辑（模型内置方法）
@@ -370,7 +388,7 @@ def train_sasrec_ahrq():
     # 最终保存完整模型
     torch.save(model.state_dict(), "./final_sasrec_ahrq.pth")
     print("\n========== Two-Stage Training Completed! ==========")
-    print(f"Best Quant Gini: {best_quant_gini:.4f} | Best Recommendation NDCG (Val): {best_ndcg:.4f}")
+    print(f"Best Quant Recon Loss: {best_recon_loss:.6f} | Best Recommendation NDCG (Val): {best_ndcg:.4f}")
     print(f"Final Test HR@10 (Full): {test_hr_full:.4f} | Final Test NDCG@10 (Full): {test_ndcg_full:.4f}")
 
 

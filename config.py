@@ -164,7 +164,7 @@ class Config:
         self.quant_uniform_weight = 0.3  # 均匀性损失权重（从0.1调高，约束Gini）
 
         # SASRec配置
-        self.sasrec_hidden_dim = 64
+        self.sasrec_hidden_dim = 256
         self.sasrec_num_heads = 4
         self.sasrec_num_layers = 2
         self.sasrec_max_len = 50
@@ -187,17 +187,18 @@ class Config:
                 "ema_decay": 0.99
             }
         }
+        self.ahrq_hidden_dim = 256
         self.ahrq_beta = 0.25  # 量化损失权重
         self.ahrq_use_ema = True
         self.ahrq_reset_unused_codes = True
         self.ahrq_reset_threshold = 50  # 死码阈值
-        self.ahrq_temperature = 0.5
+        self.ahrq_temperature = 0.05
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
         self.text_dim: int = 768  # 文本特征维度 (BERT-base)
 
         # PMAT配置（复用你原有逻辑）
-        self.pmat_hidden_dim = 64
+        self.pmat_hidden_dim = 256
         self.pmat_num_modalities = 2  # 文本+视觉
 
         self.pmat_drift_threshold = 0.3

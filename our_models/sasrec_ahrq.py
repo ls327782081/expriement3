@@ -20,7 +20,7 @@ class SASRecAHRQ(nn.Module):
 
         # 2. AH-RQ量化器（单模态，生成多层次语义ID）
         self.ahrq = AdaptiveHierarchicalQuantizer(
-            hidden_dim=new_config.pmat_hidden_dim,
+            hidden_dim=new_config.ahrq_hidden_dim,
             semantic_hierarchy=new_config.semantic_hierarchy,
             use_multimodal=True,  
             text_dim=new_config.text_dim,
@@ -162,10 +162,10 @@ class SASRecAHRQ(nn.Module):
         # 2. 归一化（保留方向信息）
         semantic_feat = F.normalize(semantic_feat, p=2, dim=-1)
         # 3. 尺度恢复（《Transformer》论文标准操作，提升方差）
-        # hidden_dim=64 → √64=8，直接提升方差8倍
+        # hidden_dim=256 → √256=16，直接提升方差16倍
         semantic_feat = semantic_feat * (self.hidden_dim ** 0.5)
-        # 4. 可选：添加小幅度dropout，增强区分度（避免过拟合）
-        semantic_feat = F.dropout(semantic_feat, p=0.05, training=self.training)
+        # 注意：这里不再添加 dropout，避免训练/评估行为不一致
+        # 如果需要 dropout，应该在更上层（如 transformer 输入前）添加
         return semantic_feat
 
     def freeze_for_stage1(self):
@@ -200,6 +200,8 @@ class SASRecAHRQ(nn.Module):
         # 关闭AH-RQ的EMA/死码重置（防止训练中篡改码本）
         self.ahrq.use_ema = False
         self.ahrq.reset_unused_codes = False
+        # 禁用Gumbel噪声，确保Stage2量化结果稳定（关键！）
+        self.ahrq._disable_gumbel = True
 
         # 2. 解冻SASRec全量模块
         for param in self.semantic_id_emb.parameters():
@@ -287,16 +289,27 @@ class SASRecAHRQ(nn.Module):
         bool_mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
         # 2. 转换为数值型mask：True→0（保留），False→-1e9（屏蔽未来）
         mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
+
+        # Transformer编码（先编码）
         src_key_padding_mask = torch.zeros((batch_size, history_sem_feat.shape[1]), dtype=torch.bool, device=device)
-        # Transformer编码
         encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask, src_key_padding_mask=src_key_padding_mask)
 
+        # 关键修复：从 batch 中获取真实的 history_len（在 encoded_seq 定义之后）
+        history_lens = batch.get("history_len", None)
+        if history_lens is not None:
+            # 使用数据集中真实的序列长度
+            history_lens = history_lens.to(device)
+            last_indices = history_lens - 1
+            last_indices = torch.clamp(last_indices, min=0)
+        else:
+            # 备用方案：基于历史物品ID判断（假设0是padding）
+            history_items_batch = batch.get("history_items", torch.zeros(batch_size, history_sem_feat.shape[1], dtype=torch.long, device=device))
+            non_zero_mask = (history_items_batch != 0)  # 物品ID为0的是padding
+            last_indices = non_zero_mask.sum(dim=1) - 1
+            last_indices = torch.clamp(last_indices, min=0)
 
         # 用户表征聚合
-        non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)  # 非padding掩码
-        last_indices = non_zero_mask.sum(dim=1) - 1
-        last_indices = torch.clamp(last_indices, min=0)
-        user_emb = encoded_seq[torch.arange(batch_size), last_indices]  # (batch, hidden_dim)
+        user_emb = encoded_seq[torch.arange(batch_size, device=device), last_indices]  # (batch, hidden_dim)
 
         # Step 5: 推荐分数计算（逻辑完全不变）
         pos_interaction = user_emb * pos_sem_feat
@@ -313,12 +326,13 @@ class SASRecAHRQ(nn.Module):
             pos_code_probs, pos_raw
         )
 
-    def get_user_embedding(self, history_text, history_vision):
+    def get_user_embedding(self, history_text, history_vision, history_items=None):
         """
         抽取用户表征（100%复用forward中的SASRec序列建模逻辑）
         Args:
             history_text: (batch, max_len, text_dim) 历史序列文本特征
             history_vision: (batch, max_len, visual_dim) 历史序列视觉特征
+            history_items: (batch, max_len) 历史物品ID（可选，用于确定有效序列长度）
         Returns:
             user_emb: (batch, hidden_dim) 用户表征
         """
@@ -327,35 +341,38 @@ class SASRecAHRQ(nn.Module):
             # Step 1: AH-RQ量化历史序列（和forward完全一致）
             hist_quantized, hist_indices, hist_quant_layers, _, _ = self.ahrq(history_text, history_vision)
 
-            # Step 2: 语义ID → 语义特征（和forward完全一致）
+            # Step 2: 语义ID → 语义特征（100%复用forward中的semantic_id_to_feat处理）
+            # 注意：semantic_id_to_feat 内部已经包含了 gelu → normalize → scale → dropout
             history_sem_feat = self.semantic_id_to_feat(hist_indices)  # (batch, max_len, hidden_dim)
 
-            # Step 3: 特征处理（严格对齐forward中的历史序列逻辑）
-            history_sem_feat = F.normalize(history_sem_feat, p=2, dim=-1) * 10
-            history_sem_feat = F.gelu(history_sem_feat)
-            history_sem_feat = F.dropout(history_sem_feat, p=0.1, training=False)  # 评估时关闭Dropout
-
-            # Step 4: 位置编码（和forward完全一致）
+            # Step 3: 位置编码（和forward完全一致）
             batch_size = history_sem_feat.shape[0]
             device = history_sem_feat.device
             positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
             history_sem_feat = history_sem_feat + self.position_embedding(positions)
 
-            # Step 5: Transformer编码（和forward完全一致）
+            # Step 4: Transformer编码（和forward完全一致）
             bool_mask = torch.tril(
                 torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
             mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
             encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask)
 
-            # Step 6: 聚合用户表征（和forward完全一致）
-            non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)  # 非padding掩码
-            last_indices = non_zero_mask.sum(dim=1) - 1
-            last_indices = torch.clamp(last_indices, min=0)
-            user_emb = encoded_seq[torch.arange(batch_size), last_indices]  # (batch, hidden_dim)
+            # Step 5: 聚合用户表征（关键修复：基于history_items确定有效序列长度）
+            if history_items is not None:
+                # 使用真实的序列长度
+                non_zero_mask = (history_items != 0)  # 物品ID为0的是padding
+                last_indices = non_zero_mask.sum(dim=1) - 1
+                last_indices = torch.clamp(last_indices, min=0)
+            else:
+                # 备用方案：基于历史特征判断
+                non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)
+                last_indices = non_zero_mask.sum(dim=1) - 1
+                last_indices = torch.clamp(last_indices, min=0)
+            user_emb = encoded_seq[torch.arange(batch_size, device=device), last_indices]  # (batch, hidden_dim)
 
             return user_emb
 
-    def predict_all(self, history_text, history_vision, all_item_text, all_item_vision):
+    def predict_all(self, history_text, history_vision, all_item_text, all_item_vision, history_items=None):
         """
         全量物品打分：100%对齐forward中的打分逻辑
         Args:
@@ -363,6 +380,7 @@ class SASRecAHRQ(nn.Module):
             history_vision: (batch, max_len, visual_dim) 用户历史序列视觉特征
             all_item_text: (item_num, text_dim) 所有物品的文本特征
             all_item_vision: (item_num, visual_dim) 所有物品的视觉特征
+            history_items: (batch, max_len) 历史物品ID（可选，用于确定有效序列长度）
         Returns:
             all_scores: (batch, item_num) 每个用户对所有物品的打分
         """
@@ -373,15 +391,14 @@ class SASRecAHRQ(nn.Module):
 
         with torch.no_grad():
             # Step 1: 抽取用户表征（和forward完全一致）
-            user_emb = self.get_user_embedding(history_text, history_vision)  # (batch, hidden_dim)
+            user_emb = self.get_user_embedding(history_text, history_vision, history_items)  # (batch, hidden_dim)
 
             # Step 2: 对所有物品做AH-RQ量化+语义特征映射（严格对齐forward中的正/负样本逻辑）
             # AH-RQ量化所有物品（和forward中正样本量化逻辑一致）
             all_quantized, all_indices, all_quant_layers, _, _ = self.ahrq(all_item_text, all_item_vision)
-            # 语义ID → 语义特征（和forward中正样本逻辑一致）
+            # 语义ID → 语义特征（100%复用semantic_id_to_feat，和forward中正样本逻辑一致）
+            # 注意：semantic_id_to_feat 内部已经包含了完整的特征处理（gelu → normalize → scale → dropout）
             all_sem_feat = self.semantic_id_to_feat(all_indices)  # (item_num, hidden_dim)
-            # 特征归一化（100%对齐forward中的正/负样本处理：仅归一化×10，无gelu/dropout）
-            all_sem_feat = F.normalize(all_sem_feat, p=2, dim=-1) * 10
 
             # Step 3: 计算用户对所有物品的打分（和forward完全一致）
             # 扩展维度：(batch, 1, hidden_dim) × (1, item_num, hidden_dim) → (batch, item_num, hidden_dim)

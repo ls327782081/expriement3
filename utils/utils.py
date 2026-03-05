@@ -451,13 +451,6 @@ class EarlyStopping:
 
     def save_checkpoint(self, val_score, model, optimizer):
         """保存最优模型"""
-        if self.verbose:
-            if self.mode == 'max':
-                print(f'Validation score improved ({self.best_score:.6f} --> {val_score:.6f}). Saving model to {self.path}')
-            else:
-                # 修复：用原始best_score（未转换）打印
-                best_gini = -self.best_score if self.best_score < 0 else self.best_score
-                print(f'Validation Gini improved ({best_gini:.6f} --> {val_score:.6f}). Saving model to {self.path}')
 
         # 构建保存内容（Stage1仅保存AH-RQ，Stage2保存完整模型）
         save_dict = {

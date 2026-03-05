@@ -20,81 +20,36 @@ def quantization_loss(quantized, x, commitment_cost=0.25):
     return recon_loss + commitment_cost * commit_loss
 
 
-def compute_quantization_loss(quantized, pos_raw, pos_code_probs, config):
+def compute_quantization_loss(quantized, pos_raw, pos_code_probs, indices, config):
     """
-    最终修复版：解决特征坍缩+损失目标背离问题
-    核心改进：
-    1. 大幅降低Gini/多样性损失权重，回归辅助角色
-    2. 新增特征范数约束，防止特征值坍缩
-    3. 调整损失优先级：重构损失（主） + 码本损失（辅）
-    4. 保留分层优化+维度校验，兼容原有逻辑
+    真正 RQ-VAE 标准损失
+    只做 2 件事：
+    1) 重构（必须）
+    2) 码本均匀（必须）
+    不做：范数强压、Gini、熵、多样性惩罚
     """
-    # ========== 0. 维度校验（保留，避免传参错误） ==========
-    if len(pos_code_probs.shape) != 3:
-        raise ValueError(f"pos_code_probs必须是3维(batch, num_layers, cb_size)，当前是{pos_code_probs.shape}")
-    batch_size, num_layers, cb_size = pos_code_probs.shape
+    batch_size, num_layers, codebook_size = pos_code_probs.shape
 
-    # ========== 新增：特征范数约束（防止特征坍缩，理论依据：归一化理论） ==========
-    # 约束quantized特征的L2范数≈1.0，避免特征值过小/过大
-    feat_norm = torch.norm(quantized, p=2, dim=-1).mean()  # 计算批次特征均值范数
-    norm_loss = F.mse_loss(feat_norm, torch.tensor(1.0).to(feat_norm.device)) * getattr(config, "norm_weight", 0.01)
+    # ===================== 1. 重构损失 (RQ-VAE 核心) =====================
+    recon_loss = F.mse_loss(quantized, pos_raw)
 
-    # ========== 1. 全局重构损失（权重适度提升，回归主损失角色） ==========
-    # 原权重0.001 → 改为0.1，让模型优先学习特征重建（主任务）
-    recon_loss = F.mse_loss(quantized, pos_raw) * getattr(config, "recon_weight", 0.1)
+    # ===================== 2. 码本均匀使用损失 (RQ-VAE 标准) =====================
+    usage_loss = 0.0
+    for idx_layer in indices:
+        idx_flat = idx_layer.flatten()
+        count = torch.bincount(idx_flat, minlength=codebook_size).float()
+        prob = count / (count.sum() + 1e-8)
+        target = torch.ones_like(prob) / codebook_size
+        usage_loss += F.mse_loss(prob, target)
+    usage_loss /= num_layers
 
-    # ========== 2. 分层计算码本损失（核心：降低辅助损失权重） ==========
-    layer_gini_losses = []
-    layer_diversity_losses = []
-    layer_entropy_losses = []
+    # ===================== 总损失 =====================
+    total_loss = recon_loss +  usage_loss
 
-    for layer_idx in range(num_layers):
-        layer_code_probs = pos_code_probs[:, layer_idx, :] + 1e-8
-
-        # ---------- 2.1 分层Gini系数损失（权重从8.0→0.1，辅助约束） ----------
-        code_usage = layer_code_probs.mean(0)
-        sorted_usage = torch.sort(code_usage)[0]
-        n = len(sorted_usage)
-        cumsum = torch.cumsum(sorted_usage, dim=0)
-        cumsum_total = cumsum[-1] if cumsum[-1] > 1e-8 else 1e-8
-        gini = (n + 1 - 2 * torch.sum(cumsum) / cumsum_total) / n
-        layer_gini_losses.append(gini)
-
-        # ---------- 2.2 分层ID多样性损失（权重从3.0→0.1，方差惩罚保留） ----------
-        prob_threshold = getattr(config, "prob_threshold", 1e-6)
-        code_usage_count = (layer_code_probs > prob_threshold).float().sum(0)
-        usage_variance = torch.var(code_usage_count)
-        code_used = (code_usage_count > 0).float().mean()
-        usage_penalty = F.relu(0.8 - code_used) * getattr(config, "usage_weight", 0.1)  # usage_weight同步降为0.1
-        usage_variance_norm = usage_variance / (batch_size ** 2)
-        # diversity_weight从3.0→0.1，仅做弱约束
-        diversity_loss = (usage_variance_norm + usage_penalty) * getattr(config, "diversity_weight", 0.1)
-        layer_diversity_losses.append(diversity_loss)
-
-        # ---------- 2.3 分层熵损失（权重从0.05→0.01，保持弱辅助） ----------
-        entropy = -(layer_code_probs * layer_code_probs.log()).sum(-1).mean()
-        entropy_norm = 1 - (entropy / np.log(cb_size))
-        layer_entropy_losses.append(entropy_norm * getattr(config, "entropy_weight", 0.01))
-
-    # 汇总分层损失（核心：gini_weight从8.0→0.1，理论依据：多任务损失平衡）
-    avg_gini_loss = torch.stack(layer_gini_losses).mean() * getattr(config, "gini_weight", 0.1)
-    avg_diversity_loss = torch.stack(layer_diversity_losses).mean()
-    avg_entropy_loss = torch.stack(layer_entropy_losses).mean()
-
-    # ========== 3. 总损失（重构损失+范数约束为主，码本损失为辅） ==========
-    # 损失优先级：重构损失 → 范数约束 → 码本辅助损失
-    total_loss = recon_loss + norm_loss + avg_gini_loss + avg_diversity_loss + avg_entropy_loss
-
-    # ========== 4. 整理损失字典（保留监控，新增范数指标） ==========
     loss_dict = {
         "recon_loss": recon_loss.item(),
-        "norm_loss": norm_loss.item(),  # 新增范数损失监控
+        "usage_loss": usage_loss.item(),
         "total_loss": total_loss.item(),
-        "avg_gini_loss": avg_gini_loss.item(),
-        "avg_diversity_loss": avg_diversity_loss.item(),
-        "avg_entropy_loss": avg_entropy_loss.item(),
-        "avg_gini": np.mean([g.item() for g in layer_gini_losses]),
-        "feat_norm": feat_norm.item()  # 新增特征范数监控（便于调试）
     }
 
     return total_loss, loss_dict
