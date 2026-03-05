@@ -280,8 +280,8 @@ class AmazonBooksProcessor:
         return df
 
     def _generate_bert_text_features(self, meta_df: pd.DataFrame, item_mapping: Dict[str, int]) -> Dict[int, torch.Tensor]:
-        """使用BERT生成文本特征"""
-        self.logger.info("Generating BERT text features...")
+        """使用CLIP生成文本特征"""
+        self.logger.info("Generating CLIP text features (replacing BERT)...")
 
         batch_size = 100  # 增加批处理大小以提高效率
 
@@ -317,25 +317,25 @@ class AmazonBooksProcessor:
 
             # 合并文本并截断
             combined_text = ' '.join(text_parts)
-            # 限制文本长度以适应BERT
-            if len(combined_text) > 500:
-                combined_text = combined_text[:500]
+            # 限制文本长度以适应CLIP (CLIP支持77 tokens，约200字符)
+            if len(combined_text) > 200:
+                combined_text = combined_text[:200]
 
             texts_to_process.append(combined_text)
             item_indices.append(item_idx)
 
-        # 批处理生成BERT文本特征
-        text_features = self._extract_bert_features_batch(texts_to_process, item_indices, batch_size)
+        # 批处理生成CLIP文本特征
+        text_features = self._extract_clip_text_features_batch(texts_to_process, item_indices, batch_size)
 
-        self.logger.info(f"Generated BERT text features for {len(text_features)} items")
+        self.logger.info(f"Generated CLIP text features for {len(text_features)} items")
 
         # 记录内存使用
-        self._log_memory_usage("After BERT feature extraction")
+        self._log_memory_usage("After CLIP text feature extraction")
 
         return text_features
 
-    def _extract_bert_features_batch(self, texts: List[str], item_indices: List[int], batch_size: int) -> Dict[int, torch.Tensor]:
-        """批量提取BERT特征"""
+    def _extract_clip_text_features_batch(self, texts: List[str], item_indices: List[int], batch_size: int) -> Dict[int, torch.Tensor]:
+        """批量提取CLIP文本特征"""
         text_features = {}
 
         with torch.no_grad():
@@ -343,32 +343,29 @@ class AmazonBooksProcessor:
                 batch_texts = texts[i:i + batch_size]
                 batch_indices = item_indices[i:i + batch_size]
 
-                # 分词和编码
-                encoded = self.bert_tokenizer(
-                    batch_texts,
+                # 使用CLIP处理器编码文本
+                inputs = self.clip_processor(
+                    text=batch_texts,
                     padding=True,
                     truncation=True,
-                    max_length=512,
+                    max_length=77,  # CLIP最大77 tokens
                     return_tensors='pt'
                 )
 
                 # 移动到设备
-                input_ids = encoded['input_ids'].to(self.device)
-                attention_mask = encoded['attention_mask'].to(self.device)
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-                # 获取BERT输出
-                outputs = self.bert_model(input_ids=input_ids, attention_mask=attention_mask)
+                # 获取CLIP文本特征
+                outputs = self.clip_model.get_text_features(**inputs)
+                text_embeddings = outputs  # [batch_size, 512]
 
-                # 使用[CLS]标记的隐藏状态作为文本表示
-                cls_embeddings = outputs.last_hidden_state[:, 0, :]  # [batch_size, hidden_size]
-
-                # 存储特征（移动到CPU省份，使用float16减少内存）
+                # 存储特征（移动到CPU，使用float16减少内存）
                 for j, item_idx in enumerate(batch_indices):
-                    text_features[item_idx] = cls_embeddings[j].cpu().half()  # float16
+                    text_features[item_idx] = text_embeddings[j].cpu().half()  # float16
 
                 # 输出进度日志
                 if (i // batch_size + 1) % 10 == 0:
-                    self.logger.info(f"Processed {i + len(batch_texts)}/{len(texts)} BERT texts")
+                    self.logger.info(f"Processed {i + len(batch_texts)}/{len(texts)} CLIP texts")
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
 

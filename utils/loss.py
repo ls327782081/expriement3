@@ -44,7 +44,9 @@ def compute_quantization_loss(quantized, pos_raw, pos_code_probs, indices, confi
     usage_loss /= num_layers
 
     # ===================== 总损失 =====================
-    total_loss = recon_loss +  usage_loss
+    # 增强均匀性损失权重，强制码本均匀使用
+    usage_weight = 5.0  # 大幅提高权重，确保码本被充分使用
+    total_loss = recon_loss + usage_weight * usage_loss
 
     loss_dict = {
         "recon_loss": recon_loss.item(),

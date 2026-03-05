@@ -29,7 +29,7 @@ class BaseConfig:
     eta_min: float = 1e-5
 
     # 语义ID配置
-    id_length: int = 4  # ID长度
+    id_length: int = 8  # ID长度（增加以降低ID重复率）
     codebook_size: int = 32  # 码本规模
 
     # sasrec模型配置
@@ -171,17 +171,17 @@ class Config:
         self.sasrec_dropout = 0.1
 
         # AH-RQ量化配置（核心）
-        self.ahrq_hidden_dim = 64  # 需与SASRec/PMAT的hidden_dim一致
-        # 层次化配置：Topic(层0/1) + Style(层2/3)
+        self.ahrq_hidden_dim = 256  # 8层 × 32维 = 256
+        # 层次化配置：Topic(层0-3) + Style(层4-7)，共8层
         self.semantic_hierarchy = {
             "topic": {
-                "layers": [0, 1],
+                "layers": [0, 1, 2, 3],
                 "codebook_size": 32,
                 "loss_weight": 1.0,
                 "ema_decay": 0.99
             },
             "style": {
-                "layers": [2, 3],
+                "layers": [4, 5, 6, 7],
                 "codebook_size": 32,
                 "loss_weight": 0.8,
                 "ema_decay": 0.99
@@ -192,7 +192,7 @@ class Config:
         self.ahrq_use_ema = True
         self.ahrq_reset_unused_codes = True
         self.ahrq_reset_threshold = 50  # 死码阈值
-        self.ahrq_temperature = 0.05
+        self.ahrq_temperature = 1.0  # 调高temperature使分布更平滑，增加码本利用多样性
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
         self.text_dim: int = 768  # 文本特征维度 (BERT-base)

@@ -72,19 +72,21 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
         self.ema_codebooks = nn.ParameterDict()
         self.code_usage_count = {}
 
-        # Topic层码本
+        # Topic层码本 - 使用归一化初始化
         for layer in semantic_hierarchy["topic"]["layers"]:
             cb_size = semantic_hierarchy["topic"]["codebook_size"]
-            self.codebooks[f"topic_{layer}"] = nn.Parameter(torch.randn(cb_size, self.layer_dim))
-            self.ema_codebooks[f"topic_{layer}"] = nn.Parameter(torch.randn(cb_size, self.layer_dim),
-                                                                requires_grad=False)
+            codebook_init = torch.randn(cb_size, self.layer_dim)
+            codebook_init = F.normalize(codebook_init, p=2, dim=1)
+            self.codebooks[f"topic_{layer}"] = nn.Parameter(codebook_init)
+            self.ema_codebooks[f"topic_{layer}"] = nn.Parameter(codebook_init.clone(), requires_grad=False)
 
-        # Style层码本
+        # Style层码本 - 使用归一化初始化
         for layer in semantic_hierarchy["style"]["layers"]:
             cb_size = semantic_hierarchy["style"]["codebook_size"]
-            self.codebooks[f"style_{layer}"] = nn.Parameter(torch.randn(cb_size, self.layer_dim))
-            self.ema_codebooks[f"style_{layer}"] = nn.Parameter(torch.randn(cb_size, self.layer_dim),
-                                                                requires_grad=False)
+            codebook_init = torch.randn(cb_size, self.layer_dim)
+            codebook_init = F.normalize(codebook_init, p=2, dim=1)
+            self.codebooks[f"style_{layer}"] = nn.Parameter(codebook_init)
+            self.ema_codebooks[f"style_{layer}"] = nn.Parameter(codebook_init.clone(), requires_grad=False)
 
         self.temperature = nn.Parameter(torch.tensor(new_config.ahrq_temperature))
         self._last_quant_output = {}
@@ -158,10 +160,10 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
             similarity = torch.matmul(block, codebook.T) / torch.clamp(self.temperature, min=0.04)
 
             # Gumbel噪声：可调节（Stage1用0.05，Stage2用0.001）
-            gumbel_scale = getattr(self, '_gumbel_scale', 0.05)
-            if gumbel_scale > 0:
-                gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-8) + 1e-8)
-                similarity = similarity + gumbel_noise * gumbel_scale
+            # gumbel_scale = getattr(self, '_gumbel_scale', 0.05)
+            # if gumbel_scale > 0:
+            #     gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-8) + 1e-8)
+            #     similarity = similarity + gumbel_noise * gumbel_scale
 
             indices = torch.argmax(similarity, dim=-1)
             indices_list.append(indices)
