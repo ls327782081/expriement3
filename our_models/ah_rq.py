@@ -139,10 +139,11 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
 
             similarity = torch.matmul(block, codebook.T) / torch.clamp(self.temperature, min=0.04)
 
-            # Stage2时禁用Gumbel噪声，确保量化结果稳定
-            if not hasattr(self, '_disable_gumbel') or not self._disable_gumbel:
+            # Gumbel噪声：可调节（Stage1用0.05，Stage2用0.001）
+            gumbel_scale = getattr(self, '_gumbel_scale', 0.05)
+            if gumbel_scale > 0:
                 gumbel_noise = -torch.log(-torch.log(torch.rand_like(similarity) + 1e-8) + 1e-8)
-                similarity = similarity + gumbel_noise * 0.05
+                similarity = similarity + gumbel_noise * gumbel_scale
 
             indices = torch.argmax(similarity, dim=-1)
             indices_list.append(indices)

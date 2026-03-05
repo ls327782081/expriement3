@@ -189,6 +189,8 @@ class SASRecAHRQ(nn.Module):
         # 确保AH-RQ的EMA/死码重置逻辑生效（Stage1需要训练码本）
         self.ahrq.use_ema = new_config.ahrq_use_ema
         self.ahrq.reset_unused_codes = new_config.ahrq_reset_unused_codes
+        # Stage1使用较大的Gumbel噪声（0.05），促进码本充分探索
+        self.ahrq._gumbel_scale = 0.05
 
     def freeze_for_stage2(self):
         """
@@ -200,8 +202,8 @@ class SASRecAHRQ(nn.Module):
         # 关闭AH-RQ的EMA/死码重置（防止训练中篡改码本）
         self.ahrq.use_ema = False
         self.ahrq.reset_unused_codes = False
-        # 禁用Gumbel噪声，确保Stage2量化结果稳定（关键！）
-        self.ahrq._disable_gumbel = True
+        # Stage2保持极小的Gumbel噪声（0.001），维持随机性同时保证基本稳定
+        self.ahrq._gumbel_scale = 0.001
 
         # 2. 解冻SASRec全量模块
         for param in self.semantic_id_emb.parameters():
