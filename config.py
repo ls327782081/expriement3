@@ -45,7 +45,7 @@ class BaseConfig:
     # 多模态配置
     num_modalities: int = 2  # 视觉+文本（实际使用的模态数量）
     visual_dim: int = 512   # 视觉特征维度 (CLIP ViT-B/32)
-    text_dim: int = 768     # 文本特征维度 (BERT-base)
+    text_dim: int = 512     # 文本特征维度 (CLIP ViT-B/32)
     audio_dim: int = 128    # 音频特征维度（预留）
 
     # PMAT特定配置
@@ -195,7 +195,7 @@ class Config:
         self.ahrq_temperature = 1.0  # 调高temperature使分布更平滑，增加码本利用多样性
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
-        self.text_dim: int = 768  # 文本特征维度 (BERT-base)
+        self.text_dim: int = 512  # 文本特征维度 (CLIP ViT-B/32)
 
         # PMAT配置（复用你原有逻辑）
         self.pmat_hidden_dim = 256
