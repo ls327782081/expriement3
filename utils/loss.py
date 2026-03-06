@@ -25,27 +25,30 @@ def compute_quantization_loss(quantized, pos_raw, pos_code_probs, indices, confi
     真正 RQ-VAE 标准损失
     只做 2 件事：
     1) 重构（必须）
-    2) 码本均匀（必须）
-    不做：范数强压、Gini、熵、多样性惩罚
+    2) 码本均匀（必须）- 使用基于code_probs的熵损失，可导
     """
     batch_size, num_layers, codebook_size = pos_code_probs.shape
 
     # ===================== 1. 重构损失 (RQ-VAE 核心) =====================
     recon_loss = F.mse_loss(quantized, pos_raw)
 
-    # ===================== 2. 码本均匀使用损失 (RQ-VAE 标准) =====================
-    usage_loss = 0.0
-    for idx_layer in indices:
-        idx_flat = idx_layer.flatten()
-        count = torch.bincount(idx_flat, minlength=codebook_size).float()
-        prob = count / (count.sum() + 1e-8)
-        target = torch.ones_like(prob) / codebook_size
-        usage_loss += F.mse_loss(prob, target)
-    usage_loss /= num_layers
+    # ===================== 2. 码本均匀使用损失 (基于熵，可导) =====================
+    # 改用code_probs计算熵损失，让梯度能够流动
+    # 熵越大，分布越均匀
+    # pos_code_probs: [batch, num_layers, codebook_size]
+    # 对每个layer，计算batch平均后的熵
+    avg_probs = pos_code_probs.mean(dim=0)  # [num_layers, codebook_size]
+    layer_entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum(-1)  # [num_layers]
+    entropy_loss = layer_entropy.mean()
+
+    # 目标熵：均匀分布的熵 = log(cb_size)
+    target_entropy = torch.log(torch.tensor(codebook_size, dtype=torch.float32, device=pos_raw.device))
+    # 损失 = 均匀熵 - 实际熵 (实际熵越大，损失越小)
+    usage_loss = target_entropy - entropy_loss
 
     # ===================== 总损失 =====================
-    # 增强均匀性损失权重，强制码本均匀使用
-    usage_weight = 5.0  # 大幅提高权重，确保码本被充分使用
+    # 熵损失权重
+    usage_weight = 5.0
     total_loss = recon_loss + usage_weight * usage_loss
 
     loss_dict = {

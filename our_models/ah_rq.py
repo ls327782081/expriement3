@@ -30,13 +30,13 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
             # 多模态模式：分别投影后融合
             self.text_proj = nn.Sequential(
                 nn.Linear(text_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
+                # nn.LayerNorm(hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(0.1)
             )
             self.visual_proj = nn.Sequential(
                 nn.Linear(visual_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
+                # nn.LayerNorm(hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(0.1)
             )
@@ -63,6 +63,9 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
         self.ema_decay = ema_decay
         self.reset_unused_codes = reset_unused_codes
         self.reset_threshold = reset_threshold
+
+        # 码本使用均衡偏置（探索机制）
+        self.usage_bias_weight = 0.5  # 偏置强度，可调节
 
         self.num_layers = len(semantic_hierarchy["topic"]["layers"]) + len(semantic_hierarchy["style"]["layers"])
         self.layer_dim = hidden_dim // self.num_layers
