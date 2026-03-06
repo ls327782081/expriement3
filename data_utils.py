@@ -644,7 +644,7 @@ class AmazonBooksProcessor:
             self.logger.info(f"Converting text features to tensor ({num_items} items)...")
 
             # 创建张量（+1为padding item 0预留位置）
-            text_tensor = torch.zeros(num_items + 1, 768, dtype=torch.float16)  # BERT特征维度
+            text_tensor = torch.zeros(num_items + 1, 512, dtype=torch.float16)  # BERT特征维度
 
             # 填充特征
             for item_idx, feat in data['text_features'].items():
