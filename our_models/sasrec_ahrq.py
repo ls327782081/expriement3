@@ -69,8 +69,11 @@ class SASRecAHRQ(nn.Module):
                                                          num_layers=self.sasrec_num_layers,
                                                          enable_nested_tensor=False)
 
-        # 推荐打分层（保留）
+        # 推荐打分层：复用语义ID embedding权重（与原生SASRec一致）
         self.score_layer = nn.Linear(self.hidden_dim, 1)
+
+        # 新增：输出LayerNorm（与原生SASRec一致）
+        self.layer_norm = nn.LayerNorm(self.hidden_dim, eps=new_config.layer_norm_eps)
 
         self.alpha = nn.Parameter(torch.tensor(0.5))
 
@@ -181,6 +184,8 @@ class SASRecAHRQ(nn.Module):
         for param in self.transformer_encoder.parameters():
             param.requires_grad = False
         for param in self.score_layer.parameters():
+            param.requires_grad = True
+        for param in self.layer_norm.parameters():
             param.requires_grad = False
 
         # 2. 解冻AH-RQ全量参数（含多模态对齐层）
@@ -213,6 +218,8 @@ class SASRecAHRQ(nn.Module):
         for param in self.transformer_encoder.parameters():
             param.requires_grad = True
         for param in self.score_layer.parameters():
+            param.requires_grad = True
+        for param in self.layer_norm.parameters():
             param.requires_grad = True
 
 
@@ -296,6 +303,9 @@ class SASRecAHRQ(nn.Module):
         src_key_padding_mask = torch.zeros((batch_size, history_sem_feat.shape[1]), dtype=torch.bool, device=device)
         encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask, src_key_padding_mask=src_key_padding_mask)
 
+        # 新增：输出LayerNorm（与原生SASRec一致）
+        encoded_seq = self.layer_norm(encoded_seq)
+
         # 关键修复：从 batch 中获取真实的 history_len（在 encoded_seq 定义之后）
         history_lens = batch.get("history_len", None)
         if history_lens is not None:
@@ -313,12 +323,10 @@ class SASRecAHRQ(nn.Module):
         # 用户表征聚合
         user_emb = encoded_seq[torch.arange(batch_size, device=device), last_indices]  # (batch, hidden_dim)
 
-        # Step 5: 推荐分数计算（逻辑完全不变）
-        pos_interaction = user_emb * pos_sem_feat
-        pos_scores = self.score_layer(pos_interaction).squeeze(-1)  # (batch,)
+        # Step 5: 推荐分数计算（复用语义ID embedding权重点积，与原生SASRec一致）
+        pos_scores = (user_emb * pos_sem_feat).sum(dim=-1)  # (batch,)
 
-        neg_interaction = user_emb.unsqueeze(1) * neg_sem_feat
-        neg_scores = self.score_layer(neg_interaction).squeeze(-1)  # (batch, num_neg)
+        neg_scores = (user_emb.unsqueeze(1) * neg_sem_feat).sum(dim=-1)  # (batch, num_neg)
 
         # 返回结果（兼容原有接口）
         return (
@@ -358,6 +366,7 @@ class SASRecAHRQ(nn.Module):
                 torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
             mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
             encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask)
+            encoded_seq = self.layer_norm(encoded_seq)
 
             # Step 5: 聚合用户表征（关键修复：基于history_items确定有效序列长度）
             if history_items is not None:
@@ -402,10 +411,8 @@ class SASRecAHRQ(nn.Module):
             # 注意：semantic_id_to_feat 内部已经包含了完整的特征处理（gelu → normalize → scale → dropout）
             all_sem_feat = self.semantic_id_to_feat(all_indices)  # (item_num, hidden_dim)
 
-            # Step 3: 计算用户对所有物品的打分（和forward完全一致）
+            # Step 3: 计算用户对所有物品的打分（复用语义ID embedding权重点积，与原生SASRec一致）
             # 扩展维度：(batch, 1, hidden_dim) × (1, item_num, hidden_dim) → (batch, item_num, hidden_dim)
-            interaction = user_emb.unsqueeze(1) * all_sem_feat.unsqueeze(0)
-            # 打分：(batch, item_num, 1) → (batch, item_num)（和forward中的score_layer一致）
-            all_scores = self.score_layer(interaction).squeeze(-1)
+            all_scores = (user_emb.unsqueeze(1) * all_sem_feat.unsqueeze(0)).sum(dim=-1)  # (batch, item_num)
 
         return all_scores

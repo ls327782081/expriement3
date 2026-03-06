@@ -169,6 +169,7 @@ class Config:
         self.sasrec_num_layers = 2
         self.sasrec_max_len = 50
         self.sasrec_dropout = 0.1
+        self.layer_norm_eps: float = 1e-12
 
         # AH-RQ量化配置（核心）
         self.ahrq_hidden_dim = 256  # 8层 × 32维 = 256
