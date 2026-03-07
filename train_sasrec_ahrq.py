@@ -289,6 +289,8 @@ def train_sasrec_ahrq():
             # 前向传播（AH-RQ已冻结，仅更新SASRec）
             pos_scores, neg_scores, _, user_emb, indices_list, _, _, _ = model(batch)
 
+            score_diff = (pos_scores.detach().unsqueeze(1) - neg_scores.detach()).mean().item()
+            logger.info(f"Epoch {epoch}: BPR分数差 = {score_diff:.4f}")
             # Stage2损失：仅排序损失（BPR+分数正则，无量化损失）
 
             loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)

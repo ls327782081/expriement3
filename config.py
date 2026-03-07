@@ -188,7 +188,6 @@ class Config:
                 "ema_decay": 0.99
             }
         }
-        self.ahrq_hidden_dim = 256
         self.ahrq_beta = 0.25  # 量化损失权重
         self.ahrq_use_ema = True
         self.ahrq_reset_unused_codes = True
@@ -199,7 +198,7 @@ class Config:
         self.text_dim: int = 512  # 文本特征维度 (CLIP ViT-B/32)
 
         # PMAT配置（复用你原有逻辑）
-        self.pmat_hidden_dim = 256
+        self.pmat_hidden_dim = 64
         self.pmat_num_modalities = 2  # 文本+视觉
 
         self.pmat_drift_threshold = 0.3
