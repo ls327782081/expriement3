@@ -1391,7 +1391,7 @@ class PMATDataset(Dataset):
         user_items = set(user_items)  # 确保是集合类型，加速查找
 
         # 2. 计算可采样的负样本池（所有物品 - 已交互物品）
-        all_items = set(range(self.num_items))  # 全量物品ID集合
+        all_items = set(range(1, self.num_items + 1))  # 全量物品ID集合
         candidate_negatives = list(all_items - user_items)  # 可用负样本列表
         available_neg_num = len(candidate_negatives)
 
@@ -1432,12 +1432,17 @@ class PMATDataset(Dataset):
         history_len = len(history)
 
         # 获取历史物品的特征
+        history = np.array(history) - 1
+        if np.any(history == 0):
+            raise Exception("商品id应该从1开始")
         history_text_feat = self.text_features[history]
         history_vision_feat = self.image_features[history]
 
         # 获取目标物品的特征
-        target_text_feat = self.text_features[target]
-        target_vision_feat = self.image_features[target]
+        if target == 0:
+            raise Exception("商品id应该从1开始")
+        target_text_feat = self.text_features[target - 1]
+        target_vision_feat = self.image_features[target - 1]
 
         result = {
             'user_id': torch.tensor(user_id, dtype=torch.long),
@@ -1454,6 +1459,9 @@ class PMATDataset(Dataset):
         if not self.full_ranking:
             # 训练模式：采样负样本
             negative_items = self._sample_negatives(user_id, self.num_negative_samples)
+            if np.any(negative_items == 0):
+                raise Exception("商品id应该从1开始")
+            negative_items = np.array(negative_items) - 1
             neg_text_feat = self.text_features[negative_items]
             neg_vision_feat = self.image_features[negative_items]
             result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)

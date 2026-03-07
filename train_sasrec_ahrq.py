@@ -66,7 +66,7 @@ def evaluate_test_full(model, test_loader, all_item_features, topk=10, device="c
             # 4. 逐用户处理：排除已交互物品 + 计算指标
             for i in range(batch_size):
                 # 4.1 单个用户的已交互物品ID（排除padding/无效ID）
-                interacted_ids = [id for id in history_item_ids[i] if id != 0 and id < num_items]
+                interacted_ids = [id for id in history_item_ids[i] if id != 0 and id < num_items + 1]
                 # 4.2 排除已交互物品
                 if len(interacted_ids) > 0:
                     all_scores[i, interacted_ids] = -float('inf')
@@ -79,7 +79,7 @@ def evaluate_test_full(model, test_loader, all_item_features, topk=10, device="c
                 # 4.4 单个用户的正样本ID
                 target_id = target_item_ids[i]
                 # 跳过无效正样本ID
-                if target_id >= num_items or target_id == 0:
+                if target_id > num_items or target_id == 0:
                     continue
 
                 # 4.5 计算单个用户的HR@10/NDCG@10
