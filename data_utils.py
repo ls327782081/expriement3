@@ -1432,9 +1432,9 @@ class PMATDataset(Dataset):
         history_len = len(history)
 
         # 获取历史物品的特征
-        history = np.array(history) - 1
         if np.any(history == 0):
             raise Exception("商品id应该从1开始")
+        history = np.array(history) - 1
         history_text_feat = self.text_features[history]
         history_vision_feat = self.image_features[history]
 
