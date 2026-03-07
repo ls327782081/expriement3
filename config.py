@@ -149,7 +149,7 @@ class Config:
         self.seed = 42
         self.batch_size = 64
         self.epochs = 50
-        self.lr = 1e-4
+        self.lr = 1e-3  # 标准SASRec学习率
         self.weight_decay = 1e-5
         self.grad_clip = 1.0
 
@@ -159,12 +159,12 @@ class Config:
         self.stage1_epochs = 20  # 量化预训练轮数
         self.stage2_epochs = 30  # 排序训练轮数
         self.quant_uniform_weight = 0.1  # 码本均匀性损失权重
-        self.bpr_margin = 0.4  # BPR间距（降低排序难度）
+        self.bpr_margin = 0.2  # BPR间距（降低排序难度，从0.4降到0.2）
         self.reg_weight = 0.005          # 分数正则化损失权重
         self.quant_uniform_weight = 0.3  # 均匀性损失权重（从0.1调高，约束Gini）
 
         # SASRec配置
-        self.sasrec_hidden_dim = 256
+        self.sasrec_hidden_dim = 64
         self.sasrec_num_heads = 4
         self.sasrec_num_layers = 2
         self.sasrec_max_len = 50

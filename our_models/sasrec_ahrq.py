@@ -16,21 +16,6 @@ class SASRecAHRQ(nn.Module):
 
     def __init__(self):
         super().__init__()
-    
-
-        # 2. AH-RQ量化器（多模态模式）
-        self.ahrq = AdaptiveHierarchicalQuantizer(
-            hidden_dim=new_config.ahrq_hidden_dim,
-            semantic_hierarchy=new_config.semantic_hierarchy,
-            use_multimodal=True,  # 启用多模态融合
-            text_dim=new_config.text_dim,
-            visual_dim=new_config.visual_dim,
-            beta=new_config.ahrq_beta,
-            use_ema=new_config.ahrq_use_ema,
-            ema_decay=0.99,
-            reset_unused_codes=new_config.ahrq_reset_unused_codes,
-            reset_threshold=new_config.ahrq_reset_threshold
-        )
 
         # 3. 语义ID映射层（将多层次语义ID转为特征，替代原始Embedding）
         self.num_layers = len(new_config.semantic_hierarchy["topic"]["layers"]) + len(
@@ -171,57 +156,6 @@ class SASRecAHRQ(nn.Module):
         # 如果需要 dropout，应该在更上层（如 transformer 输入前）添加
         return semantic_feat
 
-    def freeze_for_stage1(self):
-        """
-        Stage 1 冻结：仅训练AH-RQ（含多模态对齐层），冻结SASRec所有模块
-        包括：semantic_id_emb/transformer/score_layer/position_embedding 全部冻结
-        """
-        # 1. 冻结SASRec核心模块（语义ID映射+序列建模+打分）
-        for param in self.semantic_id_emb.parameters():
-            param.requires_grad = False
-        for param in self.position_embedding.parameters():
-            param.requires_grad = False
-        for param in self.transformer_encoder.parameters():
-            param.requires_grad = False
-        for param in self.score_layer.parameters():
-            param.requires_grad = True
-        for param in self.layer_norm.parameters():
-            param.requires_grad = False
-
-        # 2. 解冻AH-RQ全量参数（含多模态对齐层）
-        for param in self.ahrq.parameters():
-            param.requires_grad = True
-        # 确保AH-RQ的EMA/死码重置逻辑生效（Stage1需要训练码本）
-        self.ahrq.use_ema = new_config.ahrq_use_ema
-        self.ahrq.reset_unused_codes = new_config.ahrq_reset_unused_codes
-        # Stage1使用较大的Gumbel噪声（0.05），促进码本充分探索
-        self.ahrq._gumbel_scale = 0.05
-
-    def freeze_for_stage2(self):
-        """
-        Stage 2 冻结：仅训练SASRec（语义ID映射+序列建模+打分），冻结AH-RQ全量参数
-        """
-        # 1. 冻结AH-RQ全量参数（核心：彻底锁死量化模块）
-        for param in self.ahrq.parameters():
-            param.requires_grad = False
-        # 关闭AH-RQ的EMA/死码重置（防止训练中篡改码本）
-        self.ahrq.use_ema = False
-        self.ahrq.reset_unused_codes = False
-        # Stage2保持极小的Gumbel噪声（0.001），维持随机性同时保证基本稳定
-        self.ahrq._gumbel_scale = 0.001
-
-        # 2. 解冻SASRec全量模块
-        for param in self.semantic_id_emb.parameters():
-            param.requires_grad = True
-        for param in self.position_embedding.parameters():
-            param.requires_grad = True
-        for param in self.transformer_encoder.parameters():
-            param.requires_grad = True
-        for param in self.score_layer.parameters():
-            param.requires_grad = True
-        for param in self.layer_norm.parameters():
-            param.requires_grad = True
-
 
     def forward(self, batch):
         """
@@ -245,37 +179,17 @@ class SASRecAHRQ(nn.Module):
             indices_list: list 正样本多层次语义ID
             quantized_layers: list 正样本分层量化结果
         """
-        # Step 1: 提取多模态特征（直接使用传入的文本/视觉特征，不再从ID加载）
-        # 历史序列多模态特征
-        history_text = batch["history_text_feat"].float()  # (batch, max_len, text_dim)
-        history_vision = batch["history_vision_feat"].float()  # (batch, max_len, visual_dim)
-        # 正样本多模态特征
-        target_text = batch["target_text_feat"].float()  # (batch, text_dim)
-        target_vision = batch["target_vision_feat"].float()  # (batch, visual_dim)
-        # 负样本多模态特征
-        neg_text = batch["neg_text_feat"].float()  # (batch, num_neg, text_dim)
-        neg_vision = batch["neg_vision_feat"].float()  # (batch, num_neg, visual_dim)
 
-        # Step 2: AH-RQ量化（启用多模态对齐，直接处理文本+视觉特征）
-        # 历史序列量化（多模态输入）
-        hist_quantized, hist_indices, hist_quant_layers, _, _ = self.ahrq(history_text, history_vision)
-        hist_quantized = F.normalize(hist_quantized, p=2, dim=-1)
-        # 正样本量化（多模态输入）
-        pos_quantized, pos_indices, pos_quant_layers,pos_code_probs, pos_raw = self.ahrq(target_text, target_vision)
-        pos_quantized = F.normalize(pos_quantized, p=2, dim=-1)
+        # 历史序列语义ID
+        hist_indices = batch["history_indices"]
+        # 正样本语义id
+        pos_indices = batch["target_indices"].float()
+        # 负样本语义id
+        neg_indices = batch["neg_indices_list"].float()
 
         # 负样本量化（展平处理多模态特征）
-        neg_batch = neg_text.shape[0]
-        neg_num = neg_text.shape[1]
-        # 展平负样本特征
-        neg_text_flat = neg_text.view(-1, neg_text.size(-1))  # (batch*num_neg, text_dim)
-        neg_vision_flat = neg_vision.view(-1, neg_vision.size(-1))  # (batch*num_neg, visual_dim)
-        # AH-RQ量化展平的负样本
-        neg_quantized_flat, neg_indices, neg_quant_layers, _, _ = self.ahrq(neg_text_flat, neg_vision_flat)
-        neg_quantized_flat = F.normalize(neg_quantized_flat, p=2, dim=-1)
-
-        # 恢复维度
-        # neg_quantized = neg_quantized_flat.view(neg_batch, neg_num, self.hidden_dim)  # (batch, num_neg, hidden_dim)
+        neg_batch = neg_indices.shape[0]
+        neg_num = neg_indices.shape[1]
 
 
         # Step 3: 多层次语义ID → 语义特征（替代原始Embedding）
@@ -330,27 +244,20 @@ class SASRecAHRQ(nn.Module):
 
         # 返回结果（兼容原有接口）
         return (
-            pos_scores, neg_scores,
-            pos_quantized, user_emb,
-            pos_indices, pos_quant_layers,
-            pos_code_probs, pos_raw
+            pos_scores, neg_scores, user_emb,
         )
 
-    def get_user_embedding(self, history_text, history_vision, history_items=None):
+    def get_user_embedding(self, hist_indices, history_items=None):
         """
         抽取用户表征（100%复用forward中的SASRec序列建模逻辑）
         Args:
-            history_text: (batch, max_len, text_dim) 历史序列文本特征
-            history_vision: (batch, max_len, visual_dim) 历史序列视觉特征
+            hist_indices 历史语义id
             history_items: (batch, max_len) 历史物品ID（可选，用于确定有效序列长度）
         Returns:
             user_emb: (batch, hidden_dim) 用户表征
         """
         self.eval()  # 评估模式，关闭Dropout/EMA
         with torch.no_grad():
-            # Step 1: AH-RQ量化历史序列（和forward完全一致）
-            hist_quantized, hist_indices, hist_quant_layers, _, _ = self.ahrq(history_text, history_vision)
-
             # Step 2: 语义ID → 语义特征（100%复用forward中的semantic_id_to_feat处理）
             # 注意：semantic_id_to_feat 内部已经包含了 gelu → normalize → scale → dropout
             history_sem_feat = self.semantic_id_to_feat(hist_indices)  # (batch, max_len, hidden_dim)
@@ -383,33 +290,29 @@ class SASRecAHRQ(nn.Module):
 
             return user_emb
 
-    def predict_all(self, history_text, history_vision, all_item_text, all_item_vision, history_items=None):
+    def predict_all(self, hist_indices, indices_list, history_items=None):
         """
         全量物品打分：100%对齐forward中的打分逻辑
         Args:
-            history_text: (batch, max_len, text_dim) 用户历史序列文本特征
-            history_vision: (batch, max_len, visual_dim) 用户历史序列视觉特征
-            all_item_text: (item_num, text_dim) 所有物品的文本特征
-            all_item_vision: (item_num, visual_dim) 所有物品的视觉特征
+            hist_indices 历史语义id
+            indices_list: 所有语义id
             history_items: (batch, max_len) 历史物品ID（可选，用于确定有效序列长度）
         Returns:
             all_scores: (batch, item_num) 每个用户对所有物品的打分
         """
         self.eval()  # 评估模式
-        device = history_text.device
-        batch_size = history_text.shape[0]
-        item_num = all_item_text.shape[0]
+        device = hist_indices.device
+        batch_size = hist_indices.shape[0]
+        item_num = indices_list.shape[0]
 
         with torch.no_grad():
             # Step 1: 抽取用户表征（和forward完全一致）
-            user_emb = self.get_user_embedding(history_text, history_vision, history_items)  # (batch, hidden_dim)
+            user_emb = self.get_user_embedding(hist_indices, history_items)  # (batch, hidden_dim)
 
-            # Step 2: 对所有物品做AH-RQ量化+语义特征映射（严格对齐forward中的正/负样本逻辑）
-            # AH-RQ量化所有物品（和forward中正样本量化逻辑一致）
-            all_quantized, all_indices, all_quant_layers, _, _ = self.ahrq(all_item_text, all_item_vision)
+
             # 语义ID → 语义特征（100%复用semantic_id_to_feat，和forward中正样本逻辑一致）
             # 注意：semantic_id_to_feat 内部已经包含了完整的特征处理（gelu → normalize → scale → dropout）
-            all_sem_feat = self.semantic_id_to_feat(all_indices)  # (item_num, hidden_dim)
+            all_sem_feat = self.semantic_id_to_feat(indices_list)  # (item_num, hidden_dim)
 
             # Step 3: 计算用户对所有物品的打分（复用语义ID embedding权重点积，与原生SASRec一致）
             # 扩展维度：(batch, 1, hidden_dim) × (1, item_num, hidden_dim) → (batch, item_num, hidden_dim)

@@ -1322,6 +1322,7 @@ class PMATDataset(Dataset):
             max_history_len: int = 50,
             num_negative_samples: int = 4,
             full_ranking: bool = False,
+            indices_list: torch.Tensor = None,
             logger: logging.Logger = None
     ):
         """
@@ -1331,6 +1332,7 @@ class PMATDataset(Dataset):
             max_history_len: 最大历史长度
             num_negative_samples: 每个正样本对应的负样本数量（仅训练时使用）
             full_ranking: 是否使用Full Ranking评估模式（评估时不采样负样本）
+            indices_list: 语义id
             logger: 日志记录器
         """
         self.logger = logger or logging.getLogger(__name__)
@@ -1345,6 +1347,7 @@ class PMATDataset(Dataset):
         self.text_features = data.get('text_features')
         self.image_features = data.get('image_features')
         self.num_items = data.get('num_items', self.text_features.shape[0])
+        self.indices_list = indices_list
 
         # 构建样本列表：每个用户的每个位置都是一个样本
         # 格式：(user_id, history_items, target_item)
@@ -1437,12 +1440,14 @@ class PMATDataset(Dataset):
         history = np.array(history) - 1
         history_text_feat = self.text_features[history]
         history_vision_feat = self.image_features[history]
+        history_indices = self.indices_list[history]
 
         # 获取目标物品的特征
         if target == 0:
             raise Exception("商品id应该从1开始")
         target_text_feat = self.text_features[target - 1]
         target_vision_feat = self.image_features[target - 1]
+        target_indices = self.indices_list[target - 1]
 
         result = {
             'user_id': torch.tensor(user_id, dtype=torch.long),
@@ -1453,6 +1458,8 @@ class PMATDataset(Dataset):
             'target_item': torch.tensor(target, dtype=torch.long),
             'target_text_feat': target_text_feat,
             'target_vision_feat': target_vision_feat,
+            'history_indices': history_indices,
+            'target_indices': target_indices,
         }
 
         # Full Ranking模式下不采样负样本，只返回目标物品ID
@@ -1464,9 +1471,12 @@ class PMATDataset(Dataset):
             negative_items = np.array(negative_items) - 1
             neg_text_feat = self.text_features[negative_items]
             neg_vision_feat = self.image_features[negative_items]
+            neg_indices_list = self.indices_list[negative_items]
+
             result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)
             result['neg_text_feat'] = neg_text_feat
             result['neg_vision_feat'] = neg_vision_feat
+            result['neg_indices_list'] = neg_indices_list
 
         return result
 
@@ -1564,6 +1574,7 @@ def get_pmat_dataloader(
     shuffle: bool = True,
     num_workers: int = 0,
     quick_mode: bool = False,
+    indices_list: torch.Tensor = None,
     logger: logging.Logger = None
 ) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[str, torch.Tensor]]:
     """
@@ -1582,6 +1593,7 @@ def get_pmat_dataloader(
         shuffle: 是否打乱
         num_workers: 工作进程数
         quick_mode: 快速模式
+        indices_list: 语义id
         logger: 日志记录器
 
     Returns:
@@ -1649,6 +1661,7 @@ def get_pmat_dataloader(
         max_history_len=max_history_len,
         num_negative_samples=num_negative_samples,
         full_ranking=False,  # 训练时使用负采样
+        indices_list=indices_list,
         logger=logger
     )
     # 验证集和测试集使用Full Ranking模式
@@ -1657,6 +1670,7 @@ def get_pmat_dataloader(
         max_history_len=max_history_len,
         num_negative_samples=9999,
         full_ranking=False,
+        indices_list=indices_list,
         logger=logger
     )
     test_dataset = PMATDataset(
@@ -1664,6 +1678,7 @@ def get_pmat_dataloader(
         max_history_len=max_history_len,
         num_negative_samples=0,  # Full Ranking模式不需要负样本
         full_ranking=True,
+        indices_list=indices_list,
         logger=logger
     )
 
