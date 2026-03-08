@@ -13,7 +13,7 @@ from utils.loss import compute_ranking_loss, compute_rqvae_recon_loss
 from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
 
 
-NUM_WORKS = 0 if os.name == 'nt' else 4
+NUM_WORKS = 0
 
 # 固定使用RQ-VAE风格残差量化
 
