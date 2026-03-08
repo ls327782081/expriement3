@@ -299,7 +299,6 @@ def train_sasrec_ahrq():
             train_metrics = []
 
             for batch in train_bar:
-                batch = batch.to(new_config.device)
                 pos_scores, neg_scores, user_emb = model(batch)
 
                 score_diff = (pos_scores.detach().unsqueeze(1) - neg_scores.detach()).mean().item()
@@ -334,7 +333,6 @@ def train_sasrec_ahrq():
             val_metrics = []
             with torch.no_grad():
                 for batch in val_loader:
-                    batch = batch.to(new_config.device)
                     pos_scores, neg_scores, _ = model(batch)
                     loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)
                     val_losses.append(loss.item())
