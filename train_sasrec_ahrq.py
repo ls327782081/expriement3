@@ -148,8 +148,8 @@ def train_sasrec_ahrq():
             train_rqvae_losses = []
 
             for batch in train_bar:
-                text_feat = batch['text_feat'].float()
-                vision_feat = batch['vision_feat'].float()
+                text_feat = batch['text_feat'].float().to(new_config.device)
+                vision_feat = batch['vision_feat'].float().to(new_config.device)
 
                 # 前向传播（8个返回值）
                 quantized, indices, raw, quant_loss = \
@@ -190,8 +190,8 @@ def train_sasrec_ahrq():
                 val_bar = tqdm(pretrain_loader, desc=f"Stage1 Val {epoch + 1}/{new_config.stage1_epochs}")
 
                 for batch in val_bar:
-                    text_feat = batch['text_feat'].float()
-                    vision_feat = batch['vision_feat'].float()
+                    text_feat = batch['text_feat'].float().to(new_config.device)
+                    vision_feat = batch['vision_feat'].float().to(new_config.device)
                     quantized, indices, raw, quant_loss = \
                         ahrq(text_feat, vision_feat)
                 # 新的返回值：quantized, indices, raw, quant_loss
@@ -299,6 +299,7 @@ def train_sasrec_ahrq():
             train_metrics = []
 
             for batch in train_bar:
+                batch = batch.to(new_config.device)
                 pos_scores, neg_scores, user_emb = model(batch)
 
                 score_diff = (pos_scores.detach().unsqueeze(1) - neg_scores.detach()).mean().item()
@@ -333,6 +334,7 @@ def train_sasrec_ahrq():
             val_metrics = []
             with torch.no_grad():
                 for batch in val_loader:
+                    batch = batch.to(new_config.device)
                     pos_scores, neg_scores, _ = model(batch)
                     loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)
                     val_losses.append(loss.item())
