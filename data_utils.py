@@ -1474,10 +1474,10 @@ class PMATDataset(Dataset):
             neg_vision_feat = self.image_features[negative_items]
             neg_indices_list = self.indices_list[negative_items]
 
-        result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)
-        result['neg_text_feat'] = neg_text_feat
-        result['neg_vision_feat'] = neg_vision_feat
-        result['neg_indices_list'] = neg_indices_list
+            result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)
+            result['neg_text_feat'] = neg_text_feat
+            result['neg_vision_feat'] = neg_vision_feat
+            result['neg_indices_list'] = neg_indices_list
 
         return result
 

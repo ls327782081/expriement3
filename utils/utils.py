@@ -231,94 +231,103 @@ def validate_semantic_id_uniqueness(model, all_item_loader, new_config):
     }
 
 
-def calculate_metrics(pos_scores, neg_scores, k_list=[5, 10, 20]):
-    """计算推荐指标：HR@k、NDCG@k、MRR"""
+def calculate_metrics(all_scores, target_idx, k_list=[5, 10, 20]):
+    """
+    适配全量物品打分的评价指标计算（HR@k、NDCG@k、MRR）
+    Args:
+        all_scores: (batch, num_items) 模型对全量物品的打分（logits）
+        target_idx: (batch,) 每个用户的目标物品索引（修正偏移后，0~num_items-1）
+        k_list: 计算Top-K指标的k值列表
+    Returns:
+        metrics: dict 包含HR@k、NDCG@k、MRR
+    """
     metrics = defaultdict(float)
-    pos_scores = pos_scores.unsqueeze(1)  # (batch, 1)
+    device = all_scores.device
+    batch_size = all_scores.shape[0]
 
-    # HR@k
+    # 对每个用户的打分降序排序，获取Top-K索引（shape=(batch, max_k)）
+    max_k = max(k_list)
+    _, topk_indices = torch.topk(all_scores, k=max_k, dim=1, largest=True, sorted=True)
+
+    # 标记目标物品是否在Top-K中（shape=(batch, max_k)）
+    target_expand = target_idx.unsqueeze(1).expand(-1, max_k)  # (batch, max_k)
+    hit_mask = (topk_indices == target_expand)  # (batch, max_k)
+
+    # 计算HR@k
     for k in k_list:
-        # 正样本分数 > 负样本分数的数量 / k
-        hr = calculate_hr(pos_scores, neg_scores, k)
+        # 取前k个位置的hit_mask，只要有一个True就是命中
+        hr = hit_mask[:, :k].any(dim=1).float().mean().item()
         metrics[f"HR@{k}"] = hr
 
-    # NDCG@k
+    # 计算NDCG@k
     for k in k_list:
-        ndcg = calculate_ndcg(pos_scores, neg_scores, k)
+        ndcg = calculate_ndcg_full(all_scores, target_idx, k, device)
         metrics[f"NDCG@{k}"] = ndcg
 
-    # MRR
-    all_scores = torch.cat([pos_scores, neg_scores], dim=1)
-    _, indices = torch.sort(all_scores, dim=1, descending=True)
-    pos_rank = (indices == 0).nonzero()[:, 1] + 1
-    mrr = (1 / pos_rank.float()).mean().item()
+    # 计算MRR
+    mrr = calculate_mrr_full(all_scores, target_idx, device)
     metrics["MRR"] = mrr
 
     return metrics
 
 
-def calculate_ndcg(pos_scores, neg_scores, k=10):
+def calculate_ndcg_full(all_scores, target_idx, k=10, device=None):
     """
-    适配pos_scores=(batch,1)、neg_scores=(batch,num_neg)的NDCG计算
-    理论依据：SIGIR 2022《RecNDCG》标准计算逻辑
+    全量物品打分的NDCG@k计算（兼容原逻辑，符合SIGIR 2022《RecNDCG》标准）
     """
-    batch_size = pos_scores.shape[0]
-    num_neg = neg_scores.shape[1]
-    actual_k = min(k, num_neg + 1)  # 正样本+负样本总数
+    if device is None:
+        device = all_scores.device
+    batch_size = all_scores.shape[0]
+    actual_k = min(k, all_scores.shape[1])
 
-    # 1. 拼接正/负样本分数（维度完全匹配：(256,1)+(256,99) → (256,100)）
-    all_scores = torch.cat([pos_scores, neg_scores], dim=1)  # (256, 100)
-
-    # 2. 按分数降序排序，获取每个样本的排名（从1开始）
-    _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)  # (256, 100)
-
-    # 3. 找到正样本在排序后的位置（正样本是第0列）
-    # 遍历每个batch，找到正样本的索引并+1（排名从1开始）
+    # 1. 获取每个用户目标物品的排名（从1开始）
+    # 对所有分数降序排序，获取索引
+    _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)  # (batch, num_items)
+    # 找到目标物品在排序后的位置
     pos_rank = []
     for i in range(batch_size):
-        # 找到第i个样本中值为0的索引（正样本列）
-        rank = torch.where(sorted_indices[i] == 0)[0].item() + 1
+        # 找到第i个用户的目标物品索引
+        rank = torch.where(sorted_indices[i] == target_idx[i])[0].item() + 1  # 排名从1开始
         pos_rank.append(rank)
-    pos_rank = torch.tensor(pos_rank, device=pos_scores.device)  # (256,)
+    pos_rank = torch.tensor(pos_rank, device=device)  # (batch,)
 
-    # 4. 计算DCG@k和IDCG@k
-    # DCG@k：正样本排名≤k时有效，否则为0
+    # 2. 计算DCG@k
+    # 排名≤k时有效，否则为0
     dcg = torch.where(
         pos_rank <= actual_k,
-        1 / torch.log2(pos_rank.float() + 1),  # 排名从1开始，log2(2)=1
-        torch.tensor(0.0, device=pos_scores.device)
+        1 / torch.log2(pos_rank.float() + 1),  # log2(排名+1)，排名=1时log2(2)=1
+        torch.tensor(0.0, device=device)
     )
 
-    # IDCG@k：理想情况正样本排名=1，DCG=1/log2(2)=1
-    idcg = torch.ones_like(dcg, device=pos_scores.device) / torch.log2(torch.tensor(2.0))
+    # 3. 计算IDCG@k（理想情况：目标物品排名=1）
+    idcg = torch.ones_like(dcg, device=device) / torch.log2(torch.tensor(2.0, device=device))
 
-    # 5. 计算平均NDCG
-    ndcg = (dcg / idcg).sum().item() / batch_size
+    # 4. 平均NDCG
+    ndcg = (dcg / idcg).mean().item()
     return ndcg
 
 
-def calculate_hr(pos_scores, neg_scores, k=10):
+def calculate_mrr_full(all_scores, target_idx, device=None):
     """
-    适配(256,1)+(256,99)的HR@k计算（核心推荐指标）
-    理论依据：RecSys 2021《HR-NDCG评估规范》
+    全量物品打分的MRR计算（兼容原逻辑）
     """
-    batch_size = pos_scores.shape[0]
-    num_neg = neg_scores.shape[1]
-    actual_k = min(k, num_neg + 1)
+    if device is None:
+        device = all_scores.device
+    batch_size = all_scores.shape[0]
 
-    # 拼接分数并排序
-    all_scores = torch.cat([pos_scores, neg_scores], dim=1)  # (256, 100)
-    _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)  # (256, 100)
+    # 1. 对所有分数降序排序
+    _, sorted_indices = torch.sort(all_scores, dim=1, descending=True)  # (batch, num_items)
 
-    # 统计正样本排名≤k的数量
-    hr_count = 0
+    # 2. 找到目标物品的排名
+    pos_rank = []
     for i in range(batch_size):
-        pos_rank = torch.where(sorted_indices[i] == 0)[0].item() + 1
-        if pos_rank <= actual_k:
-            hr_count += 1
+        rank = torch.where(sorted_indices[i] == target_idx[i])[0].item() + 1  # 排名从1开始
+        pos_rank.append(rank)
+    pos_rank = torch.tensor(pos_rank, device=device, dtype=torch.float32)
 
-    hr = hr_count / batch_size
-    return hr
+    # 3. 计算MRR
+    mrr = (1 / pos_rank).mean().item()
+    return mrr
 
 
 def calculate_id_metrics(indices_list):

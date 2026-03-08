@@ -121,6 +121,35 @@ class SASRecAHRQ(nn.Module):
         else:
             raise ValueError(f"indices_tensor 维度应为2或3，当前为{indices_tensor.dim()}")
 
+    def get_all_item_sem_feat(self, all_item_indices):
+        """
+        全量物品语义ID转特征（适配你原始的semantic_id_to_feat函数）
+        Args:
+            all_item_indices: (num_items, num_layers) 全量物品的多层次语义ID，如(18425,8)
+        Returns:
+            all_item_feat: (num_items, hidden_dim) 全量物品的语义特征，如(18425,256)
+        """
+        # 关键：将(num_items, num_layers)的语义ID拆分为indices_list
+        # indices_list是长度为num_layers的列表，每个元素shape=(num_items,)
+        indices_list = []
+        for layer in range(self.num_layers):
+            # 取第layer列的语义ID，shape=(num_items,)
+            layer_indices = all_item_indices[:, layer]
+            indices_list.append(layer_indices)
+
+        # 调用你原始的semantic_id_to_feat函数
+        # 你的函数会自动处理为(num_items, 1, hidden_dim)，之后挤压维度
+        all_item_feat = self.semantic_id_to_feat(indices_list)  # (num_items, 1, 256)
+
+        # 挤压多余的seq_len维度：(num_items, 1, 256) → (num_items, 256)
+        all_item_feat = all_item_feat.squeeze(1)
+
+        # 最终校验（可选，确保维度正确）
+        assert all_item_feat.shape == (all_item_indices.shape[0], self.hidden_dim), \
+            f"全量特征维度错误！预期({all_item_indices.shape[0]},{self.hidden_dim})，实际{all_item_feat.shape}"
+
+        return all_item_feat
+
     def semantic_id_to_feat(self, indices_list):
         """
         核心：将AH-RQ生成的多层次语义ID映射为特征
@@ -129,9 +158,6 @@ class SASRecAHRQ(nn.Module):
         Returns:
             semantic_feat: (batch, seq_len, hidden_dim) 语义特征
         """
-        # 校验：indices数量必须等于总层数（论文维度均分要求）
-        if len(indices_list) != self.num_layers:
-            raise ValueError(f"语义ID层数{len(indices_list)}≠配置层数{self.num_layers}（违反分层量化维度均分原则）")
 
         semantic_blocks = []
         layer_idx = 0
@@ -192,169 +218,66 @@ class SASRecAHRQ(nn.Module):
                 - neg_text_feat: (batch, num_neg, text_dim) 负样本文本特征
                 - neg_vision_feat: (batch, num_neg, visual_dim) 负样本视觉特征
         Returns:
-            pos_scores: (batch,) 正样本分数
-            neg_scores: (batch, num_neg) 负样本分数
-            quantized: (batch, hidden_dim) 正样本AH-RQ量化特征
             user_emb: (batch, hidden_dim) 用户表征
-            indices_list: list 正样本多层次语义ID
-            quantized_layers: list 正样本分层量化结果
+            pos_sem_feat: (batch, hidden_dim) 正样本语义特征
         """
-
+        device = next(self.parameters()).device
         # 历史序列语义ID: (batch, max_len, num_layers) -> list of (batch, max_len)
-        hist_indices = batch["history_indices"]
-        hist_indices_list = self._tensor_to_indices_list(hist_indices)
+        hist_indices = batch["history_indices"].to(device)
+        history_len = batch["history_len"].to(device)
+        # 1. 序列编码（复用核心函数）
+        user_emb = self.get_user_embedding(hist_indices, history_len)
 
-        # 正样本语义id: (batch, num_layers) -> list of (batch, 1)
+        # 2. 正样本特征
         pos_indices = batch["target_indices"]
         pos_indices_list = self._tensor_to_indices_list(pos_indices, seq_len=1)
+        pos_sem_feat = self.semantic_id_to_feat(pos_indices_list).squeeze(1)  # (B, D)
 
-        # 负样本语义id: (batch, num_neg, num_layers) -> list of (batch*num_neg, 1)
-        neg_indices = batch["neg_indices_list"]
-        neg_batch = neg_indices.shape[0]
-        neg_num = neg_indices.shape[1]
-        neg_indices_flat = neg_indices.view(-1, neg_indices.shape[2])  # (batch*num_neg, num_layers)
-        neg_indices_list = self._tensor_to_indices_list(neg_indices_flat, seq_len=1)
-
-
-        # Step 3: 多层次语义ID → 语义特征（替代原始Embedding）
-        # ==================== 诊断：语义ID距离 ====================
-        # 正负样本语义ID的距离分析
-        pos_indices_flat = batch["target_indices"]  # (batch, num_layers)
-        neg_indices_flat = neg_indices  # (batch, num_neg, num_layers)
-        neg_indices_flat = neg_indices_flat.view(-1, neg_indices_flat.shape[2])  # (batch*num_neg, num_layers)
-
-        # 计算正负样本语义ID的L2距离
-        pos_ids_expand = pos_indices_flat.unsqueeze(1).expand(-1, neg_num, -1)  # (batch, num_neg, num_layers)
-        pos_ids_flat = pos_ids_expand.reshape(-1, pos_indices_flat.shape[1])  # (batch*num_neg, num_layers)
-        id_distances = torch.norm(pos_ids_flat.float() - neg_indices_flat.float(), dim=1).reshape(neg_batch, neg_num)
-        print(f"  [Semantic ID] pos-neg ID距离: mean={id_distances.mean().item():.4f}, std={id_distances.std().item():.4f}, min={id_distances.min().item():.4f}, max={id_distances.max().item():.4f}")
-
-        history_sem_feat = self.semantic_id_to_feat(hist_indices_list)  # (batch, max_len, hidden_dim)
-        pos_sem_feat = self.semantic_id_to_feat(pos_indices_list)  # (batch, 1, hidden_dim)
-        pos_sem_feat = pos_sem_feat.squeeze(1)  # (batch, hidden_dim)
-        neg_sem_feat = self.semantic_id_to_feat(neg_indices_list)  # (batch*num_neg, 1, hidden_dim)
-        neg_sem_feat = neg_sem_feat.squeeze(1).view(neg_batch, neg_num, self.hidden_dim)  # (batch, num_neg, hidden_dim)
-
-        # ==================== 诊断：语义特征距离 ====================
-        pos_feat_expand = pos_sem_feat.unsqueeze(1).expand(-1, neg_num, -1)  # (batch, num_neg, hidden_dim)
-        feat_distances = torch.norm(pos_feat_expand - neg_sem_feat, dim=-1)  # (batch, num_neg)
-        print(f"  [Semantic Feat] pos-neg特征距离: mean={feat_distances.mean().item():.4f}, std={feat_distances.std().item():.4f}, min={feat_distances.min().item():.4f}, max={feat_distances.max().item():.4f}")
-
-        # Step 4: SASRec序列建模（输入为语义特征，逻辑完全不变）
-        batch_size = history_sem_feat.shape[0]
-        device = history_sem_feat.device
-
-        # 位置编码
-        positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
-        history_sem_feat = history_sem_feat + self.position_embedding(positions)
-        assert self.position_embedding.weight.requires_grad, "位置编码必须可训练"
-
-
-        # 掩码（防止看到未来）
-        bool_mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
-        # 2. 转换为数值型mask：True→0（保留），False→-1e9（屏蔽未来）
-        mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
-
-        # Transformer编码（先编码）
-        # 基于 history_len 判断 padding 位置（0 是 padding）
-        # 基于 history_len 计算 padding mask
-        history_lens_for_mask = batch["history_len"].to(device)
-        max_len = history_sem_feat.shape[1]
-        # 创建位置索引: (batch, max_len)
-        position_ids = torch.arange(max_len, device=device).unsqueeze(0).expand(batch_size, -1)
-        # position >= history_len 的位置是 padding (True，需要mask)
-        src_key_padding_mask = position_ids >= history_lens_for_mask.unsqueeze(1)
-
-        encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask, src_key_padding_mask=src_key_padding_mask)
-
-        # 新增：输出LayerNorm（与原生SASRec一致）
-        encoded_seq = self.layer_norm(encoded_seq)
-
-        # 关键修复：从 batch 中获取真实的 history_len（在 encoded_seq 定义之后）
-        history_lens = batch.get("history_len", None)
-        if history_lens is not None:
-            # 使用数据集中真实的序列长度
-            history_lens = history_lens.to(device)
-            last_indices = history_lens - 1
-            last_indices = torch.clamp(last_indices, min=0)
-        else:
-            # 备用方案：基于历史物品ID判断（假设0是padding）
-            history_items_batch = batch.get("history_items", torch.zeros(batch_size, history_sem_feat.shape[1], dtype=torch.long, device=device))
-            non_zero_mask = (history_items_batch != 0)  # 物品ID为0的是padding
-            last_indices = non_zero_mask.sum(dim=1) - 1
-            last_indices = torch.clamp(last_indices, min=0)
-
-        # 用户表征聚合
-        user_emb = encoded_seq[torch.arange(batch_size, device=device), last_indices]  # (batch, hidden_dim)
-        # ==================== 诊断日志 ====================
+        # 诊断日志（保留）
         print(f"  [Model] user_emb: mean={user_emb.mean().item():.4f}, std={user_emb.std().item():.4f}")
         print(f"  [Model] pos_sem_feat: mean={pos_sem_feat.mean().item():.4f}, std={pos_sem_feat.std().item():.4f}")
-        print(f"  [Model] neg_sem_feat: mean={neg_sem_feat.mean().item():.4f}, std={neg_sem_feat.std().item():.4f}")
 
-        # Step 5: 推荐分数计算（复用语义ID embedding权重点积，与原生SASRec一致）
-        pos_scores = (user_emb * pos_sem_feat).sum(dim=-1)  # (batch,)
+        return user_emb, pos_sem_feat
 
-        neg_scores = (user_emb.unsqueeze(1) * neg_sem_feat).sum(dim=-1)  # (batch, num_neg)
-        print(f"  [Model Output] pos_scores: mean={pos_scores.mean().item():.4f}, std={pos_scores.std().item():.4f}")
-        print(f"  [Model Output] neg_scores: mean={neg_scores.mean().item():.4f}, std={neg_scores.std().item():.4f}")
-
-        # 返回结果（兼容原有接口）
-        return (
-            pos_scores, neg_scores, user_emb,
-        )
-
-    def get_user_embedding(self, hist_indices, history_len, history_items=None):
+    def get_user_embedding(self, hist_indices, history_len):
         """
         抽取用户表征（100%复用forward中的SASRec序列建模逻辑）
         Args:
-            hist_indices 历史语义id，形状为 (batch, max_len, num_layers)
-            history_items: (batch, max_len) 历史物品ID（可选，用于确定有效序列长度）
+            hist_indices: (batch, max_len, num_layers) 历史语义ID
+            history_len: (batch,) 历史序列有效长度
         Returns:
             user_emb: (batch, hidden_dim) 用户表征
         """
-        self.eval()  # 评估模式，关闭Dropout/EMA
-        with torch.no_grad():
-            # Step 2: 语义ID → 语义特征（100%复用forward中的semantic_id_to_feat处理）
-            # 将 tensor 转换为 list 格式
-            hist_indices_list = self._tensor_to_indices_list(hist_indices)
-            history_sem_feat = self.semantic_id_to_feat(hist_indices_list)  # (batch, max_len, hidden_dim)
+        # 1. 语义ID转特征
+        hist_indices_list = self._tensor_to_indices_list(hist_indices)
+        history_sem_feat = self.semantic_id_to_feat(hist_indices_list)  # (B, L, D)
 
-            # Step 3: 位置编码（和forward完全一致）
-            batch_size = history_sem_feat.shape[0]
-            device = history_sem_feat.device
-            positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
-            history_sem_feat = history_sem_feat + self.position_embedding(positions)
+        device = history_sem_feat.device
+        # 2. 位置编码
+        batch_size = history_sem_feat.shape[0]
+        positions = torch.arange(history_sem_feat.shape[1], device=device).unsqueeze(0).expand(batch_size, -1)
+        history_sem_feat = history_sem_feat + self.position_embedding(positions)
 
-            # Step 4: Transformer编码（和forward完全一致）
-            bool_mask = torch.tril(
-                torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
-            mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
-            # 基于 history_len 判断 padding 位置
-            history_lens_for_mask = history_len.to(device)
-            max_len = history_sem_feat.shape[1]
-            # 创建位置索引: (batch, max_len)
-            position_ids = torch.arange(max_len, device=device).unsqueeze(0).expand(batch_size, -1)
-            # position >= history_len 的位置是 padding (True，需要mask)
-            src_key_padding_mask = position_ids >= history_lens_for_mask.unsqueeze(1)
-            encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask, src_key_padding_mask=src_key_padding_mask)
-            encoded_seq = self.layer_norm(encoded_seq)
+        # 3. 掩码构造
+        # 未来掩码
+        bool_mask = torch.tril(torch.ones((history_sem_feat.shape[1], history_sem_feat.shape[1]), device=device)).bool()
+        mask = torch.zeros_like(bool_mask, dtype=torch.float32).masked_fill(~bool_mask, -1e9)
+        # Padding掩码
+        max_len = history_sem_feat.shape[1]
+        position_ids = torch.arange(max_len, device=device).unsqueeze(0).expand(batch_size, -1)
+        src_key_padding_mask = position_ids >= history_len.unsqueeze(1)
 
-            # Step 5: 聚合用户表征（关键修复：基于history_items确定有效序列长度）
-            if history_items is not None:
-                # 使用真实的序列长度
-                non_zero_mask = (history_items != 0)  # 物品ID为0的是padding
-                last_indices = non_zero_mask.sum(dim=1) - 1
-                last_indices = torch.clamp(last_indices, min=0)
-            else:
-                # 备用方案：基于历史特征判断
-                non_zero_mask = (history_sem_feat.sum(dim=-1) != 0)
-                last_indices = non_zero_mask.sum(dim=1) - 1
-                last_indices = torch.clamp(last_indices, min=0)
-            user_emb = encoded_seq[torch.arange(batch_size, device=device), last_indices]  # (batch, hidden_dim)
+        # 4. Transformer编码
+        encoded_seq = self.transformer_encoder(history_sem_feat, mask=mask, src_key_padding_mask=src_key_padding_mask)
+        encoded_seq = self.layer_norm(encoded_seq)
 
-            return user_emb
+        # 5. 取最后有效位生成用户表征
+        last_indices = torch.clamp(history_len - 1, min=0)
+        user_emb = encoded_seq[torch.arange(batch_size, device=device), last_indices]  # (B, D)
 
-    def predict_all(self, hist_indices, indices_list, history_len, history_items=None):
+        return user_emb
+
+    def predict_all(self, hist_indices, indices_list, history_len):
         """
         全量物品打分：100%对齐forward中的打分逻辑
         Args:
@@ -365,13 +288,10 @@ class SASRecAHRQ(nn.Module):
             all_scores: (batch, item_num) 每个用户对所有物品的打分
         """
         self.eval()  # 评估模式
-        device = hist_indices.device
-        batch_size = hist_indices.shape[0]
-        item_num = indices_list.shape[0]
 
         with torch.no_grad():
             # Step 1: 抽取用户表征（和forward完全一致）
-            user_emb = self.get_user_embedding(hist_indices, history_len, history_items)  # (batch, hidden_dim)
+            user_emb = self.get_user_embedding(hist_indices, history_len)  # (batch, hidden_dim)
 
 
             # 语义ID → 语义特征（100%复用semantic_id_to_feat，和forward中正样本逻辑一致）

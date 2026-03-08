@@ -9,16 +9,16 @@ from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
 from log import Logger
 from our_models.ah_rq import AdaptiveHierarchicalQuantizer
 from our_models.sasrec_ahrq import SASRecAHRQ
-from utils.loss import compute_ranking_loss, compute_rqvae_recon_loss
+from utils.loss import compute_rqvae_recon_loss
 from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
-
+import torch.nn.functional as F
 
 NUM_WORKS = 0
 
 # 固定使用RQ-VAE风格残差量化
 
 
-def evaluate_test_full(model, test_loader, indices_list, topk=10, device="cuda"):
+def evaluate_test_full(model, test_loader, indices_list, topk=10):
     """测试集全量排序评估"""
     model.eval()
     total_hr = 0.0
@@ -27,46 +27,20 @@ def evaluate_test_full(model, test_loader, indices_list, topk=10, device="cuda")
     num_items = indices_list.shape[0]
 
     with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Full Ranking Evaluation on Test Set"):
-            batch_size = batch["history_indices"].shape[0]
-            hist_indices = batch["history_indices"]
-            target_item_ids = batch["target_item"].cpu().numpy()
-            history_item_ids = batch["history_items"].cpu().numpy()
+        all_item_feat = model.get_all_item_sem_feat(indices_list)
+        for batch in tqdm(test_loader, desc=f'Full Ranking Evaluation on Test Set'):
+            user_emb, _ = model(batch)
 
-            history_items = batch["history_items"].to(device)
-            history_len = batch["history_len"]
-            all_scores = model.predict_all(
-                hist_indices=hist_indices,
-                indices_list=indices_list,
-                history_items=history_items,
-                history_len=history_len,
-            )
+            # 4. 修正target_idx偏移（1~num_items+1 → 0~num_items）
+            target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
 
-            # 在 evaluate_test_full 里加
-            print(f"all_scores min: {all_scores.min():.4f}, max: {all_scores.max():.4f}")
-            print(f"score std: {all_scores.std():.4f}")
 
-            for i in range(batch_size):
-                interacted_ids = [id for id in history_item_ids[i] if id != 0 and id < num_items + 1]
-                if len(interacted_ids) > 0:
-                    all_scores[i, interacted_ids] = -float('inf')
+            all_scores = torch.matmul(user_emb, all_item_feat.T)
+            rec_metrics = calculate_metrics(all_scores, target_idx)
 
-                user_scores = all_scores[i:i + 1, :]
-                _, topk_indices = torch.topk(user_scores, k=topk, dim=1)
-                topk_ids = topk_indices.squeeze(0).cpu().numpy()
-
-                target_id = target_item_ids[i]
-                if target_id - 1 in topk_ids:
-                    hr = 1.0
-                    rank = np.where(topk_ids == target_id - 1)[0][0] + 1
-                    ndcg = 1.0 / np.log2(rank + 1)
-                else:
-                    hr = 0.0
-                    ndcg = 0.0
-
-                total_hr += hr
-                total_ndcg += ndcg
-                total_users += 1
+            total_hr += rec_metrics[f'HR@{topk}']
+            total_ndcg += rec_metrics[f'NDGC@{topk}']
+            total_users += 1
 
     if total_users == 0:
         return 0.0, 0.0
@@ -298,13 +272,21 @@ def train_sasrec_ahrq():
             train_losses = []
             train_metrics = []
 
+            with torch.no_grad():
+                all_item_feat = model.get_all_item_sem_feat(indices_list)
+                all_item_feat.requires_grad = False  # 标记无梯度，节省显存
+
             for batch in train_bar:
-                pos_scores, neg_scores, user_emb = model(batch)
+                user_emb, pos_sem_feat = model(batch)
 
-                score_diff = (pos_scores.detach().unsqueeze(1) - neg_scores.detach()).mean().item()
-                logger.info(f"Epoch {epoch}: BPR分数差 = {score_diff:.4f}")
+                # 3. 计算全量物品得分（logits）
+                logits = torch.matmul(user_emb, all_item_feat.T)  # (B, num_items)
 
-                loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)
+                # 4. 修正target_idx偏移（1~num_items+1 → 0~num_items）
+                target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
+
+                # 5. CE损失（ignore_index=-1 屏蔽原0值）
+                loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
 
                 optimizer_rec.zero_grad()
                 loss.backward()
@@ -312,9 +294,12 @@ def train_sasrec_ahrq():
                 optimizer_rec.step()
 
                 train_losses.append(loss.item())
-                rec_metrics = calculate_metrics(pos_scores.detach(), neg_scores.detach())
-                batch_metrics = {**loss_dict, **rec_metrics}
-                train_metrics.append(batch_metrics)
+                with torch.no_grad():
+                    # 计算全量物品打分（复用预计算的all_item_feat）
+                    all_scores = torch.matmul(user_emb, all_item_feat.T)
+                    rec_metrics = calculate_metrics(all_scores, target_idx)
+                    batch_metrics = {**rec_metrics}
+                    train_metrics.append(batch_metrics)
 
                 hr10 = batch_metrics.get("HR@10", 0.0)
                 ndgc10 = batch_metrics.get("NDCG@10", 0.0)
@@ -322,8 +307,7 @@ def train_sasrec_ahrq():
                 train_bar.set_postfix({
                     "loss": f"{avg_loss:.4f}",
                     "HR@10": f"{hr10:.4f}",
-                    "NDCG@10": f"{ndgc10:.4f}",
-                    **loss_dict
+                    "NDCG@10": f"{ndgc10:.4f}"
                 })
 
             scheduler_rec.step()
@@ -333,11 +317,20 @@ def train_sasrec_ahrq():
             val_metrics = []
             with torch.no_grad():
                 for batch in val_loader:
-                    pos_scores, neg_scores, _ = model(batch)
-                    loss, loss_dict = compute_ranking_loss(pos_scores, neg_scores, new_config)
+                    user_emb, pos_sem_feat = model(batch)
+
+                    # 3. 计算全量物品得分（logits）
+                    logits = torch.matmul(user_emb, all_item_feat.T)  # (B, num_items)
+
+                    # 4. 修正target_idx偏移（1~num_items+1 → 0~num_items）
+                    target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
+
+                    # 5. CE损失（ignore_index=-1 屏蔽原0值）
+                    loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
                     val_losses.append(loss.item())
-                    rec_metrics = calculate_metrics(pos_scores, neg_scores)
-                    val_metrics.append({**loss_dict, **rec_metrics})
+                    all_scores = torch.matmul(user_emb, all_item_feat.T)
+                    rec_metrics = calculate_metrics(all_scores, target_idx)
+                    val_metrics.append({**rec_metrics})
 
             avg_train_loss = np.mean(train_losses)
             avg_val_loss = np.mean(val_losses)
@@ -372,7 +365,6 @@ def train_sasrec_ahrq():
         test_loader=test_loader,
         indices_list=indices_list,
         topk=10,
-        device=new_config.device
     )
 
     print("\n========== Final Test Result (Full Ranking) ==========")
