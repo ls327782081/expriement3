@@ -1535,11 +1535,11 @@ def pmat_collate_fn(batch):
         if pad_len > 0:
             history_items = torch.cat([
                 history_items,  # 有效内容在前
-                torch.zeros(pad_len, dtype=torch.long)  # 后面补0（左对齐核心）
+                torch.zeros(pad_len, dtype=torch.long, device=history_items.device)  # 后面补0（左对齐核心）
             ])
             history_indices = torch.cat([
                 history_indices,  # 有效内容在前
-                torch.zeros(pad_len, history_indices.shape[1], dtype=torch.long)  # 后面补0（左对齐核心）
+                torch.zeros(pad_len, history_indices.shape[1], dtype=torch.long, device=history_indices.device)  # 后面补0（左对齐核心）
             ])
         history_items_list.append(history_items)
         history_indices_list.append(history_indices)
