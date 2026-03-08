@@ -357,7 +357,7 @@ class AmazonBooksProcessor:
 
                 # 获取CLIP文本特征
                 outputs = self.clip_model.get_text_features(**inputs)
-                text_embeddings = outputs  # [batch_size, 512]
+                text_embeddings = outputs[0] if isinstance(outputs, tuple) else outputs
 
                 # 存储特征（移动到CPU，使用float16减少内存）
                 for j, item_idx in enumerate(batch_indices):
