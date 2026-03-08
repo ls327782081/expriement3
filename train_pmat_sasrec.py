@@ -316,7 +316,7 @@ def run_experiment():
                 # 5. 测试阶段（加载最优模型）
                 logger.info("Starting testing...")
                 model.load_state_dict(
-                    torch.load(os.path.join(config.model_dir, "best_pmat_sasrec.pth"))["model_state_dict"])
+                    torch.load(os.path.join(config.model_dir, "best_pmat_sasrec.pth"), weights_only=False)["model_state_dict"])
                 model.eval()
 
                 test_losses = []

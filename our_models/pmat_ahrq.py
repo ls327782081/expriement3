@@ -138,7 +138,7 @@ class UserInterestEncoder(nn.Module):
         batch_size = history_text.shape[0]
 
         # 核心修改：用AH-RQ完成多模态对齐（替代原有的text/visual投影+融合）
-        fused_history, _, _ = self.ahrq_for_user(history_text, history_visual)
+        fused_history, _, _, _ = self.ahrq_for_user(history_text, history_visual)
 
         # 位置编码（保留）
         positions = torch.arange(self.max_seq_len, device=history_text.device).unsqueeze(0).expand(batch_size, -1)
@@ -329,7 +329,7 @@ class PMATAHRQEncoder(PMATAHRQ):
         base_output = super().forward(batch)
 
         # 计算history_emb（用户兴趣编码后的历史融合特征）
-        history_emb, _, _ = self.user_interest_encoder.ahrq_for_user(
+        history_emb, _, _, _ = self.user_interest_encoder.ahrq_for_user(
             batch["history_text"], batch["history_visual"]
         )
 

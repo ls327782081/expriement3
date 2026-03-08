@@ -371,31 +371,50 @@ def seed_everything(seed):
 
 
 def fast_codebook_reset(ahrq_model, text_feat, vision_feat, config):
-    ahrq_model.code_usage_count = {}
-    ahrq_model.eval()
+    """
+    重置未使用的码字（适配新版ah_rq）
+    使用 ahrq_model.rq.vq_layers[i].embedding.weight 访问码本
+    """
+    if hasattr(ahrq_model, 'code_usage_count') and ahrq_model.code_usage_count:
+        ahrq_model.eval()
 
+        with torch.no_grad():
+            output = ahrq_model(text_feat, vision_feat)
+            # 新版本返回8个值，旧版本返回4个值
+            quantized = output[0]
 
-    with torch.no_grad():
-        quantized, _, _, _, _ = ahrq_model(text_feat, vision_feat)
-    feat_mean = quantized.mean(dim=0).detach()  # 训练集特征均值（更稳定）
+        feat_mean = quantized.mean(dim=0).detach()
+        total_reset = 0
 
-    total_reset = 0
-    for cb_key, usage in ahrq_model.code_usage_count.items():
-        codebook = ahrq_model.codebooks[cb_key]
-        cb_size = codebook.size(0)
-        dead_codes = [k for k in range(cb_size) if usage.get(k, 0) < config.ahrq_reset_threshold]
+        # 遍历所有量化层
+        for layer_idx, quantizer in enumerate(ahrq_model.rq.vq_layers):
+            codebook = quantizer.embedding.weight
+            cb_size = codebook.size(0)
 
-        if len(dead_codes) > 0:
-            # 用训练集特征均值+小噪声重置（保持语义一致性）
-            noise = torch.randn(len(dead_codes), codebook.size(-1)).to(codebook.device) * 0.01
-            reset_feat = feat_mean.unsqueeze(0).repeat(len(dead_codes), 1) + noise
+            # 获取当前层的使用统计
+            cb_type = ahrq_model.layer_types[layer_idx] if hasattr(ahrq_model, 'layer_types') else 'unknown'
+            cb_key = f"{cb_type}_{layer_idx}"
 
-            for i, code_idx in enumerate(dead_codes):
-                # 小幅更新：90%原有值 + 10%特征均值（避免大幅扰动）
-                codebook.data[code_idx] = codebook.data[code_idx] * 0.9 + reset_feat[i] * 0.1
-                ahrq_model.code_usage_count[cb_key][code_idx] = config.ahrq_reset_threshold
-            total_reset += len(dead_codes)
-    print(f"Global codebook reset completed! Reset {total_reset} dead codes (stable update)")
+            usage = ahrq_model.code_usage_count.get(cb_key, {})
+            dead_codes = [k for k in range(cb_size) if usage.get(k, 0) < config.ahrq_reset_threshold]
+
+            if len(dead_codes) > 0:
+                noise = torch.randn(len(dead_codes), codebook.size(-1)).to(codebook.device) * 0.01
+                reset_feat = feat_mean.unsqueeze(0).repeat(len(dead_codes), 1) + noise
+
+                for i, code_idx in enumerate(dead_codes):
+                    codebook.data[code_idx] = codebook.data[code_idx] * 0.9 + reset_feat[i] * 0.1
+
+                    if cb_key not in ahrq_model.code_usage_count:
+                        ahrq_model.code_usage_count[cb_key] = {}
+                    ahrq_model.code_usage_count[cb_key][code_idx] = config.ahrq_reset_threshold
+
+                total_reset += len(dead_codes)
+
+        print(f"Global codebook reset completed! Reset {total_reset} dead codes (stable update)")
+    else:
+        print("No code usage count found, skipping reset.")
+
 
 class EarlyStopping:
     """早停工具类：支持「越大越好」（如NDCG）和「越小越好」（如Gini）的指标"""

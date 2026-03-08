@@ -1496,6 +1496,8 @@ def pmat_collate_fn(batch):
     target_items = []
     target_text_feat_list = []
     target_vision_feat_list = []
+    target_indices=[]
+    history_indices_list = []
 
     # 检查是否是Full Ranking模式（没有负样本）
     has_negatives = 'negative_items' in batch[0]
@@ -1504,6 +1506,7 @@ def pmat_collate_fn(batch):
         negative_items_list = []
         neg_text_feat_list = []
         neg_vision_feat_list = []
+        neg_indices_list = []
 
     # 找到最大历史长度
     max_history_len = max(item['history_len'].item() for item in batch)
@@ -1514,11 +1517,13 @@ def pmat_collate_fn(batch):
         target_items.append(item['target_item'])
         target_text_feat_list.append(item['target_text_feat'])
         target_vision_feat_list.append(item['target_vision_feat'])
+        target_indices.append(item['target_indices'])
 
         if has_negatives:
             negative_items_list.append(item['negative_items'])
             neg_text_feat_list.append(item['neg_text_feat'])
             neg_vision_feat_list.append(item['neg_vision_feat'])
+            neg_indices_list.append(item['neg_indices_list'])
 
         # ==================== 核心修改：左对齐Padding ====================
         history_len = item['history_len'].item()
@@ -1526,12 +1531,18 @@ def pmat_collate_fn(batch):
 
         # Padding history items（左对齐：有效内容在前，后面补0）
         history_items = item['history_items']
+        history_indices = item['history_indices']
         if pad_len > 0:
             history_items = torch.cat([
                 history_items,  # 有效内容在前
                 torch.zeros(pad_len, dtype=torch.long)  # 后面补0（左对齐核心）
             ])
+            history_indices = torch.cat([
+                history_indices,  # 有效内容在前
+                torch.zeros(pad_len, history_indices.shape[1], dtype=torch.long)  # 后面补0（左对齐核心）
+            ])
         history_items_list.append(history_items)
+        history_indices_list.append(history_indices)
 
         # Padding history features（左对齐：有效特征在前，后面补0）
         history_text = item['history_text_feat']
@@ -1555,12 +1566,15 @@ def pmat_collate_fn(batch):
         'target_item': torch.stack(target_items),
         'target_text_feat': torch.stack(target_text_feat_list),
         'target_vision_feat': torch.stack(target_vision_feat_list),
+        'target_indices': torch.stack(target_indices),
+        'history_indices': torch.stack(history_indices_list),
     }
 
     if has_negatives:
         result['negative_items'] = torch.stack(negative_items_list)
         result['neg_text_feat'] = torch.stack(neg_text_feat_list)
         result['neg_vision_feat'] = torch.stack(neg_vision_feat_list)
+        result['neg_indices_list'] = torch.stack(neg_indices_list)
 
     return result
 

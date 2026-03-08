@@ -89,7 +89,7 @@ class AbstractTrainableModel(nn.Module, abc.ABC):
             strict: 是否严格匹配模型参数。默认False，允许加载不完全匹配的checkpoint
                    （例如动态创建的模块可能有不同的键名）
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         # 使用strict=False允许加载不完全匹配的checkpoint
         # 这对于动态创建模块（如alignment_nets）很重要
         missing_keys, unexpected_keys = self.load_state_dict(checkpoint["model_state_dict"], strict=strict)

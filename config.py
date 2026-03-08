@@ -149,7 +149,7 @@ class Config:
         self.seed = 42
         self.batch_size = 64
         self.epochs = 50
-        self.lr = 1e-3  # 标准SASRec学习率
+        self.lr = 1e-4  # 标准SASRec学习率
         self.weight_decay = 1e-5
         self.grad_clip = 1.0
 
@@ -164,7 +164,7 @@ class Config:
         self.quant_uniform_weight = 0.3  # 均匀性损失权重（从0.1调高，约束Gini）
 
         # SASRec配置
-        self.sasrec_hidden_dim = 64
+        self.sasrec_hidden_dim = 256
         self.sasrec_num_heads = 4
         self.sasrec_num_layers = 2
         self.sasrec_max_len = 50
@@ -198,7 +198,7 @@ class Config:
         self.text_dim: int = 512  # 文本特征维度 (CLIP ViT-B/32)
 
         # PMAT配置（复用你原有逻辑）
-        self.pmat_hidden_dim = 64
+        self.pmat_hidden_dim = 256
         self.pmat_num_modalities = 2  # 文本+视觉
 
         self.pmat_drift_threshold = 0.3
