@@ -233,10 +233,6 @@ class SASRecAHRQ(nn.Module):
         pos_indices_list = self._tensor_to_indices_list(pos_indices, seq_len=1)
         pos_sem_feat = self.semantic_id_to_feat(pos_indices_list).squeeze(1)  # (B, D)
 
-        # 诊断日志（保留）
-        print(f"  [Model] user_emb: mean={user_emb.mean().item():.4f}, std={user_emb.std().item():.4f}")
-        print(f"  [Model] pos_sem_feat: mean={pos_sem_feat.mean().item():.4f}, std={pos_sem_feat.std().item():.4f}")
-
         return user_emb, pos_sem_feat
 
     def get_user_embedding(self, hist_indices, history_len):
