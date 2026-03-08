@@ -994,7 +994,7 @@ def get_dataloader(cache_dir: str,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_fn_pad,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     val_dataloader = DataLoader(
@@ -1003,7 +1003,7 @@ def get_dataloader(cache_dir: str,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_fn_pad,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     test_dataloader = DataLoader(
@@ -1012,7 +1012,7 @@ def get_dataloader(cache_dir: str,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=collate_fn_pad,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     return train_dataloader, val_dataloader, test_dataloader
@@ -1211,7 +1211,7 @@ def get_pctx_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=pctx_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     val_loader = DataLoader(
@@ -1220,7 +1220,7 @@ def get_pctx_dataloader(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=pctx_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     test_loader = DataLoader(
@@ -1229,7 +1229,7 @@ def get_pctx_dataloader(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=pctx_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     logger.info("PctxAligned dataloaders created successfully!")
@@ -1703,7 +1703,7 @@ def get_pmat_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=pmat_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     val_loader = DataLoader(
@@ -1712,7 +1712,7 @@ def get_pmat_dataloader(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=pmat_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     test_loader = DataLoader(
@@ -1721,7 +1721,7 @@ def get_pmat_dataloader(
         shuffle=False,
         num_workers=num_workers,
         collate_fn=pmat_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}, Test samples: {len(test_dataset)}")
@@ -2012,7 +2012,7 @@ def get_dgmrec_dataloader(cache_dir: str,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=dgmrec_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     val_loader = DataLoader(
@@ -2021,7 +2021,7 @@ def get_dgmrec_dataloader(cache_dir: str,
         shuffle=False,
         num_workers=num_workers,
         collate_fn=dgmrec_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     test_loader = DataLoader(
@@ -2030,7 +2030,7 @@ def get_dgmrec_dataloader(cache_dir: str,
         shuffle=False,
         num_workers=num_workers,
         collate_fn=dgmrec_collate_fn,
-        pin_memory=torch.cuda.is_available()
+        pin_memory=False
     )
 
     logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}, Test samples: {len(test_dataset)}")
@@ -2195,7 +2195,7 @@ def get_all_item_pretrain_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=all_item_pretrain_collate_fn,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=False
         drop_last=True  # 预训练丢弃最后不完整批次，避免维度错误
     )
 
