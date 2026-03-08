@@ -2195,7 +2195,7 @@ def get_all_item_pretrain_dataloader(
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=all_item_pretrain_collate_fn,
-        pin_memory=False
+        pin_memory=False,
         drop_last=True  # 预训练丢弃最后不完整批次，避免维度错误
     )
 
