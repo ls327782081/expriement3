@@ -1381,6 +1381,28 @@ class PMATDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _all_negatives(self, user_id:int) -> List[int]:
+        """
+            Args:
+                user_id: 用户ID
+                num_samples: 兼容原有参数，无实际作用
+            Returns:
+                全量负样本列表（所有用户未交互的商品ID）
+            """
+        # 1. 获取用户已交互物品集合
+        user_items = self.user_item_set.get(user_id, set())
+        user_items = set(user_items)  # 确保是集合类型，加速查找
+
+        # 2. 计算全量负样本池（所有物品 - 已交互物品）
+        all_items = set(range(1, self.num_items + 1))  # 全量物品ID集合（1~num_items）
+        all_negatives = list(all_items - user_items)  # 所有用户未交互的商品 = 全量负样本
+
+        # 3. 日志输出负样本规模
+        self.logger.info(
+            f"用户{user_id}全量负样本数：{len(all_negatives)} (已交互{len(user_items)}个，全量{self.num_items}个)")
+
+        return all_negatives
+
     def _sample_negatives(self, user_id: int, num_samples: int) -> List[int]:
         """
         采样负样本（用户未交互过的物品）
@@ -1466,17 +1488,19 @@ class PMATDataset(Dataset):
         if not self.full_ranking:
             # 训练模式：采样负样本
             negative_items = self._sample_negatives(user_id, self.num_negative_samples)
-            if np.any(negative_items == 0):
-                raise Exception("商品id应该从1开始")
-            negative_items = np.array(negative_items) - 1
-            neg_text_feat = self.text_features[negative_items]
-            neg_vision_feat = self.image_features[negative_items]
-            neg_indices_list = self.indices_list[negative_items]
+        else:
+            negative_items = self._all_negatives(user_id)
+        if np.any(negative_items == 0):
+            raise Exception("商品id应该从1开始")
+        negative_items = np.array(negative_items) - 1
+        neg_text_feat = self.text_features[negative_items]
+        neg_vision_feat = self.image_features[negative_items]
+        neg_indices_list = self.indices_list[negative_items]
 
-            result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)
-            result['neg_text_feat'] = neg_text_feat
-            result['neg_vision_feat'] = neg_vision_feat
-            result['neg_indices_list'] = neg_indices_list
+        result['negative_items'] = torch.tensor(negative_items, dtype=torch.long)
+        result['neg_text_feat'] = neg_text_feat
+        result['neg_vision_feat'] = neg_vision_feat
+        result['neg_indices_list'] = neg_indices_list
 
         return result
 
@@ -1669,21 +1693,19 @@ def get_pmat_dataloader(
     logger.info(f"  - Visual features: {image_features.shape}")
 
     # 创建数据集
-    # 训练集使用负采样（BPR损失）
     train_dataset = PMATDataset(
         data, "train_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=num_negative_samples,
-        full_ranking=False,  # 训练时使用负采样
+        num_negative_samples=0,
+        full_ranking=True,
         indices_list=indices_list,
         logger=logger
     )
-    # 验证集和测试集使用Full Ranking模式
     val_dataset = PMATDataset(
         data, "val_sequences",
         max_history_len=max_history_len,
-        num_negative_samples=9999,
-        full_ranking=False,
+        num_negative_samples=0,
+        full_ranking=True,
         indices_list=indices_list,
         logger=logger
     )
