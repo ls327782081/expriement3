@@ -39,7 +39,7 @@ def evaluate_test_full(model, test_loader, indices_list, topk=10):
             rec_metrics = calculate_metrics(all_scores, target_idx)
 
             total_hr += rec_metrics[f'HR@{topk}']
-            total_ndcg += rec_metrics[f'NDGC@{topk}']
+            total_ndcg += rec_metrics[f'NDCG@{topk}']
             total_users += 1
 
     if total_users == 0:

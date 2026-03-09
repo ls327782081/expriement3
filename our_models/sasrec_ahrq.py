@@ -38,6 +38,8 @@ class SASRecAHRQ(nn.Module):
         self.sasrec_num_layers = new_config.sasrec_num_layers
         self.dropout = new_config.sasrec_dropout
 
+        self.dropout_proj = nn.Dropout(new_config.sasrec_dropout)
+
         # 位置编码（保留）
         self.position_embedding = nn.Embedding(self.max_len, self.hidden_dim)
 
@@ -194,10 +196,10 @@ class SASRecAHRQ(nn.Module):
         # 1. 先激活，再归一化（顺序调换，避免先压缩）
         semantic_feat = F.gelu(semantic_feat)
         # 2. 归一化（保留方向信息）
-        # semantic_feat = F.normalize(semantic_feat, p=2, dim=-1)
+        semantic_feat = F.normalize(semantic_feat, p=2, dim=-1)
         # 3. 尺度恢复（《Transformer》论文标准操作，提升方差）
         # hidden_dim=256 → √256=16，直接提升方差16倍
-        # semantic_feat = semantic_feat * (self.hidden_dim ** 0.5)
+        semantic_feat = semantic_feat * (self.hidden_dim ** 0.5)
         # 注意：这里不再添加 dropout，避免训练/评估行为不一致
         # 如果需要 dropout，应该在更上层（如 transformer 输入前）添加
         return semantic_feat
@@ -247,6 +249,7 @@ class SASRecAHRQ(nn.Module):
         # 1. 语义ID转特征
         hist_indices_list = self._tensor_to_indices_list(hist_indices)
         history_sem_feat = self.semantic_id_to_feat(hist_indices_list)  # (B, L, D)
+        history_sem_feat = self.dropout_proj(history_sem_feat)
 
         device = history_sem_feat.device
         # 2. 位置编码
