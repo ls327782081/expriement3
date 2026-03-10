@@ -172,19 +172,25 @@ class Config:
         self.layer_norm_eps: float = 1e-12
 
         # AH-RQ量化配置（核心）
-        self.ahrq_hidden_dim = 256  # 8层 × 32维 = 256
+        self.ahrq_hidden_dim = 192
         # 层次化配置：Topic(层0-3) + Style(层4-7)，共8层
         self.semantic_hierarchy = {
             "topic": {
-                "layers": [0, 1, 2, 3],
-                "codebook_size": 32,
+                "layers": [0, 1],
+                "codebook_size": 1024,
                 "loss_weight": 1.0,
                 "ema_decay": 0.99
             },
             "style": {
-                "layers": [4, 5, 6, 7],
-                "codebook_size": 32,
+                "layers": [2, 3],
+                "codebook_size": 512,
                 "loss_weight": 0.8,
+                "ema_decay": 0.99
+            },
+            "emotion": {
+                "layers": [4, 5],
+                "codebook_size": 256,
+                "loss_weight": 0.6,
                 "ema_decay": 0.99
             }
         }

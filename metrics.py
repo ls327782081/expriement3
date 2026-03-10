@@ -281,3 +281,22 @@ def auc_at_k(scores, ground_truth):
             auc_scores.append(auc)
 
     return sum(auc_scores) / len(auc_scores) if auc_scores else 0.0
+
+
+def codebook_usage_rate(indices_list, codebook_sizes):
+    """计算各层码本使用率
+
+    Args:
+        indices_list: torch.Tensor, 形状为 (num_items, num_layers)，各层的码本索引
+        codebook_sizes: List[int]，各层的码本大小
+
+    Returns:
+        usage_rates: List[float]，各层的码本使用率
+    """
+    import torch
+    usage_rates = []
+    for layer_idx, cb_size in enumerate(codebook_sizes):
+        unique_indices = torch.unique(indices_list[:, layer_idx])
+        rate = len(unique_indices) / cb_size
+        usage_rates.append(float(rate))
+    return usage_rates

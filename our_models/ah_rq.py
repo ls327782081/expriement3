@@ -426,35 +426,47 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
             bn=bn
         )
 
-        # 量化器初始化
-        self.num_layers = len(semantic_hierarchy["topic"]["layers"]) + len(semantic_hierarchy["style"]["layers"])
+        # 量化器初始化 - 动态计算总层数（支持任意配置的语义层级）
+        self.num_layers = sum(
+            len(config["layers"])
+            for config in semantic_hierarchy.values()
+        )
         self.layer_dim = hidden_dim // self.num_layers
         assert hidden_dim % self.num_layers == 0, "hidden_dim必须是总层数的整数倍"
 
         # 构建 n_e_list 和 sk_epsilons（用于 ResidualVectorQuantizer）
+        # 动态遍历所有语义层级，支持任意配置
         n_e_list = []
         sk_epsilons_list = []
 
-        # Topic层
-        for layer in semantic_hierarchy["topic"]["layers"]:
-            n_e_list.append(semantic_hierarchy["topic"]["codebook_size"])
-            sk_epsilons_list.append(sk_epsilon)
+        for semantic_type, config in semantic_hierarchy.items():
+            for layer in config["layers"]:
+                n_e_list.append(config["codebook_size"])
+                sk_epsilons_list.append(sk_epsilon)
 
-        # Style层
-        for layer in semantic_hierarchy["style"]["layers"]:
-            n_e_list.append(semantic_hierarchy["style"]["codebook_size"])
-            sk_epsilons_list.append(sk_epsilon)
-
-        # 使用 ResidualVectorQuantizer（和 SimpleRQVAE 相同的方式）
-        self.rq = ResidualVectorQuantizer(
-            n_e_list=n_e_list,
-            e_dim=hidden_dim,
-            sk_epsilons=sk_epsilons_list,
-            beta=beta,
-            kmeans_init=kmeans_init,
-            kmeans_iters=kmeans_iters,
-            sk_iters=sk_iters
-        )
+        # 根据use_ema参数选择使用带EMA的量化器或普通量化器
+        if use_ema:
+            # 使用带EMA更新和死码重置的量化器
+            self.rq = ResidualVectorQuantizerEMA(
+                n_e_list=n_e_list,
+                e_dim=hidden_dim,
+                beta=beta,
+                use_ema=True,
+                ema_decay=ema_decay,
+                reset_unused_codes=reset_unused_codes,
+                reset_threshold=reset_threshold
+            )
+        else:
+            # 使用普通残差量化器（无EMA功能）
+            self.rq = ResidualVectorQuantizer(
+                n_e_list=n_e_list,
+                e_dim=hidden_dim,
+                sk_epsilons=sk_epsilons_list,
+                beta=beta,
+                kmeans_init=kmeans_init,
+                kmeans_iters=kmeans_iters,
+                sk_iters=sk_iters
+            )
 
         # 码本使用统计
         self.code_usage_count = {}
@@ -487,10 +499,14 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
 
     def collect_code_usage(self, indices_list):
         for layer_idx, indices in enumerate(indices_list):
-            if layer_idx in self.semantic_hierarchy["topic"]["layers"]:
-                cb_type = "topic"
-            else:
-                cb_type = "style"
+            # 动态查找该 layer 属于哪个语义层级
+            cb_type = None
+            for semantic_type, config in self.semantic_hierarchy.items():
+                if layer_idx in config["layers"]:
+                    cb_type = semantic_type
+                    break
+            if cb_type is None:
+                cb_type = f"layer_{layer_idx}"
             cb_key = f"{cb_type}_{layer_idx}"
 
             if cb_key not in self.code_usage_count:
@@ -499,3 +515,253 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
             for idx, cnt in zip(unique_indices, counts):
                 idx_item = idx.item()
                 self.code_usage_count[cb_key][idx_item] = self.code_usage_count[cb_key].get(idx_item, 0) + cnt.item()
+
+# ========== 新增：VectorQuantizerEMA（带EMA更新的量化器） ==========
+
+class VectorQuantizerEMA(nn.Module):
+    """
+    带EMA更新的向量量化器
+
+    特性：
+    - EMA更新码本（避免梯度消失）
+    - 死码重置（解决码本崩溃）
+    - 码本使用率跟踪
+    """
+
+    def __init__(
+        self,
+        codebook_size: int,
+        embedding_dim: int,
+        beta: float = 0.25,
+        use_ema: bool = True,
+        decay: float = 0.99,
+        reset_unused: bool = True,
+        reset_threshold: int = 100,
+    ):
+        super().__init__()
+        self.codebook_size = codebook_size
+        self.embedding_dim = embedding_dim
+        self.beta = beta
+        self.use_ema = use_ema
+        self.decay = decay
+        self.reset_unused = reset_unused
+        self.reset_threshold = reset_threshold
+
+        # 码本
+        self.embedding = nn.Embedding(codebook_size, embedding_dim)
+        self.embedding.weight.data.uniform_(-1.0 / codebook_size, 1.0 / codebook_size)
+
+        if use_ema:
+            # EMA统计量
+            self.register_buffer('ema_cluster_size', torch.zeros(codebook_size))
+            self.register_buffer('ema_w', self.embedding.weight.data.clone())
+            self.register_buffer('codebook_usage', torch.zeros(codebook_size))
+
+        # 死码跟踪
+        if reset_unused:
+            self.register_buffer('steps_since_used', torch.zeros(codebook_size))
+
+    def forward(self, x: torch.Tensor) -> dict:
+        """前向传播"""
+        batch_size = x.size(0)
+
+        # 计算距离
+        distances = torch.cdist(x, self.embedding.weight)
+
+        # 找到最近的码本向量
+        indices = torch.argmin(distances, dim=1)
+        quantized = self.embedding(indices)
+
+        # Straight-through estimator
+        quantized = x + (quantized - x).detach()
+
+        # 计算损失
+        commitment_loss = F.mse_loss(x, quantized.detach())
+        final_loss = self.beta * commitment_loss
+
+        # EMA更新（仅在训练时）
+        if self.training and self.use_ema:
+            self._ema_update(x, indices)
+            if self.reset_unused:
+                self._reset_dead_codes(x)
+
+        # 计算码本使用率
+        usage_rate = (self.codebook_usage > 0).float().mean().item() if self.use_ema else 0.0
+
+        return {
+            'quantized': quantized,
+            'indices': indices,
+            'loss': final_loss,
+            'usage_rate': usage_rate
+        }
+
+    def _ema_update(self, x: torch.Tensor, indices: torch.Tensor):
+        """EMA更新码本"""
+        encodings = F.one_hot(indices, self.codebook_size).float()
+        self.ema_cluster_size.data.mul_(self.decay).add_(
+            encodings.sum(0), alpha=1 - self.decay
+        )
+        dw = encodings.t() @ x
+        self.ema_w.data.mul_(self.decay).add_(dw, alpha=1 - self.decay)
+        n = self.ema_cluster_size.sum()
+        cluster_size = (self.ema_cluster_size + 1e-5) / (n + self.codebook_size * 1e-5) * n
+        self.embedding.weight.data.copy_(self.ema_w / cluster_size.unsqueeze(1))
+        self.codebook_usage.data.mul_(0.99).add_(encodings.sum(0), alpha=0.01)
+
+    def _reset_dead_codes(self, x: torch.Tensor):
+        """重置死码"""
+        used_codes = torch.unique(torch.argmin(
+            torch.cdist(x, self.embedding.weight), dim=1
+        ))
+        self.steps_since_used += 1
+        self.steps_since_used[used_codes] = 0
+        dead_codes = (self.steps_since_used > self.reset_threshold).nonzero(as_tuple=True)[0]
+        if len(dead_codes) > 0:
+            random_indices = torch.randint(0, x.size(0), (len(dead_codes),), device=x.device)
+            self.embedding.weight.data[dead_codes] = x[random_indices].detach()
+            self.steps_since_used[dead_codes] = 0
+
+
+# ========== 新增：层次化语义一致性模块 (HSCL) ==========
+
+class HierarchicalSemanticConsistency(nn.Module):
+    """
+    层次化语义一致性学习模块 (HSCL)
+    解决MACRec指出的深层语义损失问题
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        semantic_hierarchy: dict,
+        predictor_type: str = "mlp",
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.semantic_hierarchy = semantic_hierarchy
+
+        # 构建层次预测器：Topic -> Style, Style -> Emotion
+        self.predictors = nn.ModuleDict()
+
+        semantic_types = list(semantic_hierarchy.keys())
+        for i in range(len(semantic_types) - 1):
+            source_type = semantic_types[i]
+            target_type = semantic_types[i + 1]
+
+            source_layers = semantic_hierarchy[source_type]['layers']
+            target_codebook_size = semantic_hierarchy[target_type]['codebook_size']
+            input_dim = len(source_layers) * hidden_dim
+
+            predictor_name = f"{source_type}_to_{target_type}"
+
+            if predictor_type == "mlp":
+                self.predictors[predictor_name] = nn.Sequential(
+                    nn.Linear(input_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, target_codebook_size)
+                )
+
+    def compute_consistency_loss(
+        self,
+        quantized_layers: List[torch.Tensor],
+        indices: torch.Tensor
+    ) -> dict:
+        """计算层次一致性损失"""
+        losses = {}
+        semantic_types = list(self.semantic_hierarchy.keys())
+
+        for i in range(len(semantic_types) - 1):
+            source_type = semantic_types[i]
+            target_type = semantic_types[i + 1]
+
+            source_layers = self.semantic_hierarchy[source_type]['layers']
+            target_layers = self.semantic_hierarchy[target_type]['layers']
+
+            source_quantized = [quantized_layers[idx] for idx in source_layers]
+            source_concat = torch.cat(source_quantized, dim=-1)
+
+            predictor_name = f"{source_type}_to_{target_type}"
+            target_pred = self.predictors[predictor_name](source_concat)
+
+            target_idx = target_layers[0]
+            target_true = indices[:, target_idx]
+
+            consistency_loss = F.cross_entropy(target_pred, target_true)
+            losses[f"consistency_{source_type}_to_{target_type}"] = consistency_loss
+
+        total_consistency_loss = sum(losses.values())
+        losses['total_consistency_loss'] = total_consistency_loss
+
+        return losses
+
+
+# ========== 新增：基于EMA的残差量化器 ==========
+
+class ResidualVectorQuantizerEMA(nn.Module):
+    """基于EMA的残差向量量化器"""
+
+    def __init__(
+        self,
+        n_e_list: List[int],
+        e_dim: int,
+        beta: float = 0.25,
+        use_ema: bool = True,
+        ema_decay: float = 0.99,
+        reset_unused_codes: bool = True,
+        reset_threshold: int = 100,
+    ):
+        super().__init__()
+        self.n_e_list = n_e_list
+        self.e_dim = e_dim
+        self.num_quantizers = len(n_e_list)
+        self.beta = beta
+        self.use_ema = use_ema
+        self.ema_decay = ema_decay
+        self.reset_unused_codes = reset_unused_codes
+        self.reset_threshold = reset_threshold
+
+        self.vq_layers = nn.ModuleList([
+            VectorQuantizerEMA(
+                n_e, e_dim,
+                beta=self.beta,
+                use_ema=self.use_ema,
+                decay=self.ema_decay,
+                reset_unused=self.reset_unused_codes,
+                reset_threshold=self.reset_threshold
+            )
+            for n_e in n_e_list
+        ])
+
+    def get_codebook(self) -> torch.Tensor:
+        all_codebook = []
+        for quantizer in self.vq_layers:
+            codebook = quantizer.embedding.weight.data
+            all_codebook.append(codebook)
+        return torch.stack(all_codebook)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        all_losses = []
+        all_indices = []
+
+        x_q = 0
+        residual = x
+
+        for quantizer in self.vq_layers:
+            quant_output = quantizer(residual)
+            x_res = quant_output['quantized']
+            loss = quant_output['loss']
+            indices = quant_output['indices']
+
+            residual = residual - x_res
+            x_q = x_q + x_res
+
+            all_losses.append(loss)
+            all_indices.append(indices)
+
+        mean_losses = torch.stack(all_losses).mean()
+        all_indices = torch.stack(all_indices, dim=-1)
+
+        return x_q, mean_losses, all_indices
