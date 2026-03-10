@@ -488,7 +488,7 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
         raw_feat = x.clone()
 
         # Step 2: 使用ResidualVectorQuantizer进行量化
-        x_q, quant_loss, indices = self.rq(x, use_sk=(self.rq.sk_epsilons[0] > 0))
+        x_q, quant_loss, indices = self.rq(x, use_sk=(getattr(self.rq, 'sk_epsilons', [0])[0] > 0))
 
         self._last_quant_output = {
             "quantized": x_q,
