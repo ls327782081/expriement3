@@ -49,13 +49,13 @@ class AblationConfig:
     use_hscl: bool = False
     use_emotion: bool = False
     use_hierarchy_weight: bool = True
-    # 码本配置
-    topic_codebook: int = 1024
-    style_codebook: int = 512
-    emotion_codebook: int = 256
+    # 码本配置 - 反转设计：根据实际使用率分配码本大小
+    topic_codebook: int = 256      # 原1024→256，使用率低，减少冗余
+    style_codebook: int = 512      # 保持不变
+    emotion_codebook: int = 512   # 原1024→512，减少对重建的干扰
     baseline_codebook: int = 512
-    # 损失权重
-    hscl_weight: float = 0.5
+    # 损失权重 - 降低HSCL权重减少对重构的干扰
+    hscl_weight: float = 0.03      # 原0.1→0.03，降低对重建的干扰
     quant_weight: float = 1.0
 
 
@@ -342,6 +342,17 @@ def run_ablation_experiment(
 
     usage_rates = codebook_usage_rate(indices_list, n_e_list)
 
+    # 分析各层码本的聚类质量
+    print("  Analyzing codebook clusters...")
+    cluster_results = analyze_codebook_clusters(model, device, pretrain_loader, num_clusters=10)
+    if cluster_results:
+        print("  Silhouette Scores:")
+        for layer, info in cluster_results.items():
+            if info.get("silhouette_score") is not None:
+                print(f"    {layer}: {info['silhouette_score']:.4f}")
+            else:
+                print(f"    {layer}: {info.get('note', 'N/A')}")
+
     # 按语义层次分组统计
     layer_usage_by_group = {}
     for semantic_type, cfg in semantic_hierarchy.items():
@@ -368,7 +379,8 @@ def run_ablation_experiment(
                 "overall": np.mean(usage_rates),
                 "by_layer": usage_rates,
                 "by_group": layer_usage_by_group
-            }
+            },
+            "cluster_analysis": cluster_results
         }
     }
 
@@ -408,6 +420,14 @@ def save_results(all_results: List[Dict], output_dir: str = "./results/ahrq_abla
         # 添加各层使用率
         for i, rate in enumerate(result['metrics']['codebook_usage']['by_layer']):
             row[f"L{i}_Usage"] = f"{rate:.4f}"
+
+        # 添加各层Silhouette Score
+        cluster_analysis = result['metrics'].get('cluster_analysis', {})
+        for layer in ['L0', 'L1', 'L2', 'L3', 'L4', 'L5']:
+            if layer in cluster_analysis:
+                score = cluster_analysis[layer].get('silhouette_score')
+                row[f"{layer}_Silhouette"] = f"{score:.4f}" if score is not None else "N/A"
+
         summary_data.append(row)
 
     df = pd.DataFrame(summary_data)
@@ -416,6 +436,73 @@ def save_results(all_results: List[Dict], output_dir: str = "./results/ahrq_abla
     print(f"Saved summary: {summary_path}")
 
     return df
+
+
+def analyze_codebook_clusters(model, device, test_loader, num_clusters=10):
+    """
+    分析各层码本的聚类质量
+
+    使用K-means对各层码本向量进行聚类，计算Silhouette Score来评估聚类质量。
+    Silhouette Score范围[-1,1]，越接近1表示聚类质量越好。
+
+    Args:
+        model: 训练好的模型（AdaptiveHierarchicalQuantizer）
+        device: 设备
+        test_loader: 测试数据加载器
+        num_clusters: 聚类数量
+
+    Returns:
+        dict: 各层的Silhouette Score
+    """
+    try:
+        from sklearn.cluster import KMeans
+        from sklearn.metrics import silhouette_score
+    except ImportError:
+        print("Warning: sklearn not installed, skipping cluster analysis")
+        return {}
+
+    model.eval()
+    layer_results = {}
+
+    # 通过model.rq获取码本（ResidualVectorQuantizer或ResidualVectorQuantizerEMA）
+    if not hasattr(model, 'rq'):
+        print("Warning: model does not have rq attribute")
+        return {}
+
+    # 直接访问每个量化层的码本（避免 torch.stack 失败）
+    if not hasattr(model.rq, 'vq_layers'):
+        print("Warning: model.rq does not have vq_layers attribute")
+        return {}
+
+    num_layers = len(model.rq.vq_layers)
+
+    with torch.no_grad():
+        for layer_idx in range(num_layers):
+            # 直接获取该层的码本向量
+            layer_codebook = model.rq.vq_layers[layer_idx].embedding.weight.data.cpu().numpy()  # [codebook_size, dim]
+            codebook_size = layer_codebook.shape[0]
+
+            # 如果码本大小小于聚类数，跳过
+            if codebook_size < num_clusters:
+                layer_results[f"L{layer_idx}"] = {
+                    "silhouette_score": None,
+                    "note": f"codebook_size ({codebook_size}) < num_clusters ({num_clusters})"
+                }
+                continue
+
+            # 使用K-means聚类
+            kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
+            labels = kmeans.fit_predict(layer_codebook)
+
+            # 计算Silhouette Score
+            score = silhouette_score(layer_codebook, labels)
+            layer_results[f"L{layer_idx}"] = {
+                "silhouette_score": float(score),
+                "codebook_size": codebook_size,
+                "num_clusters": num_clusters
+            }
+
+    return layer_results
 
 
 def main():
@@ -466,6 +553,19 @@ def main():
             use_hscl=True,
             use_emotion=True,
             use_hierarchy_weight=True,
+        ),
+        # 6. AHRQ-Inverted: 反转码本设计 + 降低HSCL权重
+        # 基于消融实验结果：Topic(1024→256), Emotion(256→1024), hscl_weight(0.5→0.1)
+        AblationConfig(
+            experiment_name="AHRQ-Inverted",
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=True,
+            use_hierarchy_weight=True,
+            topic_codebook=256,       # 反转：变小（原1024）
+            style_codebook=512,       # 保持
+            emotion_codebook=512,     # 调整（原1024）
+            hscl_weight=0.03,         # 降低（原0.5）
         ),
     ]
 

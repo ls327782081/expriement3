@@ -628,6 +628,10 @@ class HierarchicalSemanticConsistency(nn.Module):
     """
     层次化语义一致性学习模块 (HSCL)
     解决MACRec指出的深层语义损失问题
+
+    核心思想：将各层特征投影到统一语义空间后进行层次对齐
+    - 不破坏残差量化的独立优化目标
+    - 保留"粗粒度层能预测细粒度层"的语义关系
     """
 
     def __init__(
@@ -645,58 +649,52 @@ class HierarchicalSemanticConsistency(nn.Module):
         num_layers = sum(len(c['layers']) for c in semantic_hierarchy.values())
         self.layer_dim = layer_dim if layer_dim is not None else (hidden_dim // num_layers)
 
-        # 构建层次预测器：Topic -> Style, Style -> Emotion
-        self.predictors = nn.ModuleDict()
+        # 为每个语义层构建特征投影器（投影到统一语义空间）
+        self.projectors = nn.ModuleDict()
 
-        semantic_types = list(semantic_hierarchy.keys())
-        for i in range(len(semantic_types) - 1):
-            source_type = semantic_types[i]
-            target_type = semantic_types[i + 1]
-
-            source_layers = semantic_hierarchy[source_type]['layers']
-            target_codebook_size = semantic_hierarchy[target_type]['codebook_size']
-            # 使用 layer_dim 而不是 hidden_dim
-            input_dim = len(source_layers) * self.layer_dim
-
-            predictor_name = f"{source_type}_to_{target_type}"
-
-            if predictor_type == "mlp":
-                self.predictors[predictor_name] = nn.Sequential(
-                    nn.Linear(input_dim, self.layer_dim),
-                    nn.ReLU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(self.layer_dim, self.layer_dim),
-                    nn.ReLU(),
-                    nn.Linear(self.layer_dim, target_codebook_size)
-                )
+        for semantic_type, config in semantic_hierarchy.items():
+            layers = config['layers']
+            input_dim = len(layers) * self.layer_dim
+            # 投影到 layer_dim 维的统一语义空间
+            self.projectors[semantic_type] = nn.Sequential(
+                nn.Linear(input_dim, self.layer_dim),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(self.layer_dim, self.layer_dim)
+            )
 
     def compute_consistency_loss(
         self,
         quantized_layers: List[torch.Tensor],
         indices: torch.Tensor
     ) -> dict:
-        """计算层次一致性损失"""
+        """
+        计算层次一致性损失
+
+        原理：将各层特征投影到统一语义空间后，计算粗粒度->细粒度的对齐损失
+        例如：Topic投影后应该与Style投影后的语义空间对齐
+        """
         losses = {}
         semantic_types = list(self.semantic_hierarchy.keys())
 
+        # 步骤1: 将各层特征投影到统一语义空间
+        projected = {}
+        for semantic_type in semantic_types:
+            layers = self.semantic_hierarchy[semantic_type]['layers']
+            layer_feats = [quantized_layers[idx] for idx in layers]
+            concat_feat = torch.cat(layer_feats, dim=-1)
+            projected[semantic_type] = self.projectors[semantic_type](concat_feat)
+
+        # 步骤2: 计算层次对齐损失（从粗粒度到细粒度）
+        # Topic -> Style, Style -> Emotion
         for i in range(len(semantic_types) - 1):
-            source_type = semantic_types[i]
-            target_type = semantic_types[i + 1]
+            coarse_type = semantic_types[i]      # 如 "topic" (粗粒度)
+            fine_type = semantic_types[i + 1]     # 如 "style" (细粒度)
 
-            source_layers = self.semantic_hierarchy[source_type]['layers']
-            target_layers = self.semantic_hierarchy[target_type]['layers']
-
-            source_quantized = [quantized_layers[idx] for idx in source_layers]
-            source_concat = torch.cat(source_quantized, dim=-1)
-
-            predictor_name = f"{source_type}_to_{target_type}"
-            target_pred = self.predictors[predictor_name](source_concat)
-
-            target_idx = target_layers[0]
-            target_true = indices[:, target_idx]
-
-            consistency_loss = F.cross_entropy(target_pred, target_true)
-            losses[f"consistency_{source_type}_to_{target_type}"] = consistency_loss
+            # MSE对齐：让粗粒度层包含细粒度层的语义信息
+            # 即：如果Topic是"科技"，Style应该体现出"科技"相关的风格
+            align_loss = F.mse_loss(projected[coarse_type], projected[fine_type])
+            losses[f"align_{coarse_type}_to_{fine_type}"] = align_loss
 
         total_consistency_loss = sum(losses.values())
         losses['total_consistency_loss'] = total_consistency_loss

@@ -173,23 +173,24 @@ class Config:
 
         # AH-RQ量化配置（核心）
         self.ahrq_hidden_dim = 192
-        # 层次化配置：Topic(层0-3) + Style(层4-7)，共8层
+        # 层次化配置：Topic(层0-1) + Style(层2-3) + Emotion(层4-5)，共6层
+        # 反转设计：根据实际使用率分配码本大小（使用率高的层分配更大码本）
         self.semantic_hierarchy = {
             "topic": {
                 "layers": [0, 1],
-                "codebook_size": 1024,
+                "codebook_size": 256,   # 原1024→256，使用率低，减少冗余
                 "loss_weight": 1.0,
                 "ema_decay": 0.99
             },
             "style": {
                 "layers": [2, 3],
-                "codebook_size": 512,
+                "codebook_size": 512,   # 保持不变，使用率适中
                 "loss_weight": 0.8,
                 "ema_decay": 0.99
             },
             "emotion": {
                 "layers": [4, 5],
-                "codebook_size": 256,
+                "codebook_size": 1024,  # 原256→1024，使用率高，需要更大码本
                 "loss_weight": 0.6,
                 "ema_decay": 0.99
             }
