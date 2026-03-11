@@ -1,10 +1,19 @@
 import os
+import argparse
 
 import numpy as np
 import torch
 from tqdm import tqdm
 
 from config import new_config
+
+
+# 命令行参数解析
+parser = argparse.ArgumentParser(description='Train SASRec with AHRQ')
+parser.add_argument('--ahrq_model', type=str, default='ahrq_full',
+                    choices=['baseline_rq', 'ahrq_hiercodebook', 'ahrq_ema', 'ahrq_hscl', 'ahrq_full', 'ahrq_inverted'],
+                    help='AHRQ model to load from results/ahrq_ablation')
+args = parser.parse_args()
 from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
 from log import Logger
 from our_models.ah_rq import AdaptiveHierarchicalQuantizer
@@ -53,21 +62,42 @@ def train_sasrec_ahrq():
     logger = Logger("./logs/train_sasrec_ahrq.log")
     seed_everything(new_config.seed)
 
-    ahrq = AdaptiveHierarchicalQuantizer(
-        hidden_dim=new_config.ahrq_hidden_dim,
-        semantic_hierarchy=new_config.semantic_hierarchy,
-        use_multimodal=True,
-        text_dim=new_config.text_dim,
-        visual_dim=new_config.visual_dim,
-        beta=new_config.ahrq_beta,
-        use_ema=new_config.ahrq_use_ema,
-        ema_decay=0.99,
-        reset_unused_codes=new_config.ahrq_reset_unused_codes,
-        reset_threshold=new_config.ahrq_reset_threshold
-    ).to(new_config.device)
+    # 输出目录
+    OUTPUT_DIR = "./results/sasrec_ahrq"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    # 从 results/ahrq_ablation/models/ 加载预训练的AHRQ模型
+    ahrq_model_path = f"./results/ahrq_ablation/models/{args.ahrq_model}_model.pth"
+    if os.path.exists(ahrq_model_path):
+        print(f"\n========== Loading AHRQ model from {ahrq_model_path} ==========")
+        checkpoint = torch.load(ahrq_model_path, map_location=new_config.device, weights_only=False)
 
-    mode_name = "RQ-VAE Residual"
+        # 从保存的配置重建模型结构
+        saved_config = checkpoint['config']
+
+        # 重建语义层次配置
+        semantic_hierarchy = saved_config['semantic_hierarchy']
+
+        # 重新创建AHRQ模型，使用保存的配置
+        ahrq = AdaptiveHierarchicalQuantizer(
+            hidden_dim=new_config.ahrq_hidden_dim,
+            semantic_hierarchy=semantic_hierarchy,
+            use_multimodal=True,
+            text_dim=new_config.text_dim,
+            visual_dim=new_config.visual_dim,
+            beta=new_config.ahrq_beta,
+            use_ema=saved_config.get('use_ema', False),
+            ema_decay=0.99,
+            reset_unused_codes=saved_config.get('use_ema', False),
+            reset_threshold=new_config.ahrq_reset_threshold
+        ).to(new_config.device)
+
+        # 加载模型权重
+        ahrq.load_state_dict(checkpoint['model_state_dict'])
+        print(f"AHRQ model loaded! Using model: {args.ahrq_model}")
+        best_recon_loss = checkpoint.get('metrics', {}).get('val_recon_loss', float('inf'))
+    else:
+        raise FileNotFoundError(f"AHRQ model not found at {ahrq_model_path}. Please run train_ahrq_ablation.py first.")
 
     # 获取数据加载器和物品元数据
     pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
@@ -80,158 +110,14 @@ def train_sasrec_ahrq():
         logger=logger
     )
 
-
-    # 检查是否已存在训练好的AHRQ模型
-    ahrq_model_path = "./ahrq_final.pth"
-    if os.path.exists(ahrq_model_path):
-        print(f"\n========== Loading existing AHRQ model from {ahrq_model_path} ==========")
-        checkpoint = torch.load(ahrq_model_path, map_location=new_config.device, weights_only=False)
-        ahrq.load_state_dict(checkpoint['model_state_dict'])
-        print(f"AHRQ model loaded! Skipping Stage 1 training.")
-        best_recon_loss = checkpoint.get('best_recon_loss', float('inf'))
-    else:
-        print(f"\n========== Stage 1: Quantization Pre-training ({mode_name}) ==========")
-
-        optimizer_quant = torch.optim.AdamW(
-            ahrq.parameters(),
-            lr=1e-4,
-            weight_decay=1e-5,
-            betas=(0.9, 0.999)
-        )
-        scheduler_quant = torch.optim.lr_scheduler.StepLR(
-            optimizer_quant,
-            step_size=10,
-            gamma=0.9
-        )
-
-        early_stopping_quant = EarlyStopping(
-            patience=getattr(new_config, "stage1_patience", 5),
-            verbose=True,
-            delta=1e-6,
-            path="./best_ahrq.pth",
-            mode='min'
-        )
-
-        best_recon_loss = float('inf')
-
-        for epoch in range(new_config.stage1_epochs):
-            ahrq.train()
-            train_bar = tqdm(pretrain_loader, desc=f"Stage1 Epoch {epoch + 1}/{new_config.stage1_epochs}")
-            train_losses = []
-            train_id_metrics = []
-            train_rqvae_losses = []
-
-            for batch in train_bar:
-                text_feat = batch['text_feat'].float().to(new_config.device)
-                vision_feat = batch['vision_feat'].float().to(new_config.device)
-
-                # 前向传播（8个返回值）
-                quantized, indices, raw, quant_loss = \
-                    ahrq(text_feat, vision_feat)
-                # 新的返回值：quantized, indices, raw, quant_loss
-
-                # 使用RQ-VAE风格的重构损失
-                loss, loss_dict = compute_rqvae_recon_loss(
-                    quantized, raw, None, None, new_config, [quant_loss]
-                )
-                train_rqvae_losses.append(loss_dict)
-
-                optimizer_quant.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(ahrq.parameters(), new_config.grad_clip)
-                optimizer_quant.step()
-
-                train_losses.append(loss.item())
-
-                with torch.no_grad():
-                    id_metrics = calculate_id_metrics(indices)
-                train_id_metrics.append(id_metrics)
-
-                avg_loss = np.mean(train_losses)
-                train_bar.set_postfix({
-                    "loss": f"{avg_loss:.4f}",
-                    "recon": f"{loss_dict.get('rqvae_recon_loss', 0):.6f}",
-                    "vq": f"{loss_dict.get('rqvae_vq_loss', 0):.6f}",
-                })
-
-            scheduler_quant.step()
-
-            # 验证
-            ahrq.eval()
-            val_recon_losses = []
-            val_id_metrics = []
-            with torch.no_grad():
-                val_bar = tqdm(pretrain_loader, desc=f"Stage1 Val {epoch + 1}/{new_config.stage1_epochs}")
-
-                for batch in val_bar:
-                    text_feat = batch['text_feat'].float().to(new_config.device)
-                    vision_feat = batch['vision_feat'].float().to(new_config.device)
-                    quantized, indices, raw, quant_loss = \
-                        ahrq(text_feat, vision_feat)
-                # 新的返回值：quantized, indices, raw, quant_loss
-
-                    loss, loss_dict = compute_rqvae_recon_loss(
-                        quantized, raw, None, None, new_config, [quant_loss]
-                    )
-                    val_recon_losses.append(loss_dict['rqvae_recon_loss'])
-
-                    v_id_metrics = calculate_id_metrics(indices)
-                    val_id_metrics.append(v_id_metrics)
-                    val_bar.set_postfix({
-                        "val_recon_loss": f"{np.mean(val_recon_losses):.6f}",
-                        "id_repeat_rate": f"{v_id_metrics['id_repeat_rate']:.4f}"
-                    })
-                val_bar.close()
-
-            avg_train_loss = np.mean(train_losses)
-            avg_val_recon_loss = np.mean(val_recon_losses)
-            avg_train_id_repeat = np.mean([m["id_repeat_rate"] for m in train_id_metrics]) if train_id_metrics else 0.0
-            avg_val_id_repeat = np.mean([m["id_repeat_rate"] for m in val_id_metrics]) if val_id_metrics else 0.0
-
-            avg_rqvae = {}
-            if train_rqvae_losses:
-                for key in train_rqvae_losses[0].keys():
-                    avg_rqvae[key] = np.mean([d[key] for d in train_rqvae_losses])
-
-            print(f"\nStage1 Epoch {epoch + 1} Summary ({mode_name}):")
-            print(f"Train Loss: {avg_train_loss:.4f} | Val Recon Loss: {avg_val_recon_loss:.6f}")
-            print(f"Train ID Repeat Rate: {avg_train_id_repeat:.4f} | Val ID Repeat Rate: {avg_val_id_repeat:.4f}")
-            print(f"  RQ-VAE: recon={avg_rqvae.get('rqvae_recon_loss', 0):.6f}, vq={avg_rqvae.get('rqvae_vq_loss', 0):.6f}")
-
-            early_stopping_quant(avg_val_recon_loss, ahrq, optimizer_quant)
-
-            if avg_val_recon_loss < best_recon_loss:
-                best_recon_loss = avg_val_recon_loss
-
-            if early_stopping_quant.early_stop:
-                print(f"Stage1 Early stop at epoch {epoch + 1}! Best Val Recon Loss: {early_stopping_quant.best_score:.6f}")
-                break
-
-            if (epoch + 1) % 5 == 0 and epoch > 0:
-                fast_codebook_reset(
-                    ahrq,
-                    all_item_meta['text_features'].float().to(new_config.device),
-                    all_item_meta['image_features'].float().to(new_config.device),
-                    new_config
-                )
-        # 保存AHRQ模型
-        torch.save({
-            "stage": 1,
-            "epoch": epoch + 1,
-            "model_state_dict": ahrq.state_dict(),
-            "best_recon_loss": best_recon_loss
-        }, "./ahrq_final.pth")
-        print(f"AHRQ model saved to ahrq_final.pth")
-
-
-    # Stage 1结束后重新计算indices_list
+    # 重新计算indices_list
     print("\nRecomputing all item semantics after Stage 1...")
     all_item_text = all_item_meta['text_features'].float().to(new_config.device)
     all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
     _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
 
     # 检查是否已存在训练好的SASRec_AHRQ模型
-    model = SASRecAHRQ().to(new_config.device)
+    model = SASRecAHRQ(ahrq_model=ahrq).to(new_config.device)
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category='Video_Games',
@@ -245,7 +131,7 @@ def train_sasrec_ahrq():
         logger=logger
     )
     
-    sasrec_ahrq_model_path = "./final_sasrec_ahrq.pth"
+    sasrec_ahrq_model_path = f"{OUTPUT_DIR}/final_sasrec_ahrq.pth"
     if os.path.exists(sasrec_ahrq_model_path):
         print(f"\n========== Loading existing SASRec_AHRQ model from {sasrec_ahrq_model_path} ==========")
         checkpoint = torch.load(sasrec_ahrq_model_path, map_location=new_config.device, weights_only=False)
@@ -356,10 +242,10 @@ def train_sasrec_ahrq():
                     "model_state_dict": model.state_dict(),
                     "optimizer_rec_state_dict": optimizer_rec.state_dict(),
                     "best_ndcg": best_ndcg
-                }, "./best_sasrec_ahrq.pth")
+                }, f"{OUTPUT_DIR}/best_sasrec_ahrq.pth")
                 print(f"Stage2 Best model saved! NDCG@10: {best_ndcg:.4f}")
 
-        torch.save({"model_state_dict": model.state_dict()}, "./final_sasrec_ahrq.pth")
+        torch.save({"model_state_dict": model.state_dict()}, f"{OUTPUT_DIR}/final_sasrec_ahrq.pth")
     test_hr_full, test_ndcg_full = evaluate_test_full(
         model=model,
         test_loader=test_loader,

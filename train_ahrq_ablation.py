@@ -390,6 +390,27 @@ def run_ablation_experiment(
     for group, info in layer_usage_by_group.items():
         print(f"  {group} Usage: {info['avg']:.4f}")
 
+    # 保存模型到 results/ahrq_ablation/models 目录
+    model_save_dir = "./results/ahrq_ablation/models"
+    os.makedirs(model_save_dir, exist_ok=True)
+
+    model_filename = f"{config.experiment_name.lower().replace('-', '_')}_model.pth"
+    model_path = os.path.join(model_save_dir, model_filename)
+
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": {
+            "experiment_name": config.experiment_name,
+            "use_ema": config.use_ema,
+            "use_hscl": config.use_hscl,
+            "use_emotion": config.use_emotion,
+            "semantic_hierarchy": semantic_hierarchy,
+            "n_e_list": n_e_list
+        },
+        "metrics": results['metrics']
+    }, model_path)
+    print(f"  Model saved to: {model_path}")
+
     return results
 
 
