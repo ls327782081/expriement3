@@ -488,7 +488,7 @@ class AdaptiveHierarchicalQuantizer(nn.Module):
         raw_feat = x.clone()
 
         # Step 2: 使用ResidualVectorQuantizer进行量化
-        x_q, quant_loss, indices = self.rq(x, use_sk=(getattr(self.rq, 'sk_epsilons', [0])[0] > 0))
+        x_q, quant_loss, indices = self.rq(x)
 
         self._last_quant_output = {
             "quantized": x_q,
@@ -635,10 +635,15 @@ class HierarchicalSemanticConsistency(nn.Module):
         hidden_dim: int,
         semantic_hierarchy: dict,
         predictor_type: str = "mlp",
+        layer_dim: Optional[int] = None,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.semantic_hierarchy = semantic_hierarchy
+
+        # 计算每层的维度（hidden_dim 除以总层数）
+        num_layers = sum(len(c['layers']) for c in semantic_hierarchy.values())
+        self.layer_dim = layer_dim if layer_dim is not None else (hidden_dim // num_layers)
 
         # 构建层次预测器：Topic -> Style, Style -> Emotion
         self.predictors = nn.ModuleDict()
@@ -650,18 +655,19 @@ class HierarchicalSemanticConsistency(nn.Module):
 
             source_layers = semantic_hierarchy[source_type]['layers']
             target_codebook_size = semantic_hierarchy[target_type]['codebook_size']
-            input_dim = len(source_layers) * hidden_dim
+            # 使用 layer_dim 而不是 hidden_dim
+            input_dim = len(source_layers) * self.layer_dim
 
             predictor_name = f"{source_type}_to_{target_type}"
 
             if predictor_type == "mlp":
                 self.predictors[predictor_name] = nn.Sequential(
-                    nn.Linear(input_dim, hidden_dim),
+                    nn.Linear(input_dim, self.layer_dim),
                     nn.ReLU(),
                     nn.Dropout(0.1),
-                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.Linear(self.layer_dim, self.layer_dim),
                     nn.ReLU(),
-                    nn.Linear(hidden_dim, target_codebook_size)
+                    nn.Linear(self.layer_dim, target_codebook_size)
                 )
 
     def compute_consistency_loss(
