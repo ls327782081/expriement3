@@ -172,26 +172,21 @@ class Config:
         self.layer_norm_eps: float = 1e-12
 
         # AH-RQ量化配置（核心）
-        self.ahrq_hidden_dim = 264
-        # 层次化配置：Topic(层0-1) + Style(层2-3) + Emotion(层4-5)，共6层
-        # 反转设计：根据实际使用率分配码本大小（使用率高的层分配更大码本）
+        # 2024-修改：隐藏维度264→512，每层维度从44→128，减少信息损失
+        self.ahrq_hidden_dim = 512
+        # 层次化配置：Topic(层0-1) + Style(层2-3)，共4层（移除emotion简化结构）
+        # 采用方案2：4层码本 + 隐藏维度512 + 融合方案
         self.semantic_hierarchy = {
             "topic": {
                 "layers": [0, 1],
-                "codebook_size": 256,   # 原1024→256，使用率低，减少冗余
+                "codebook_size": 256,
                 "loss_weight": 1.0,
                 "ema_decay": 0.99
             },
             "style": {
                 "layers": [2, 3],
-                "codebook_size": 512,   # 保持不变，使用率适中
+                "codebook_size": 512,
                 "loss_weight": 0.8,
-                "ema_decay": 0.99
-            },
-            "emotion": {
-                "layers": [4, 5],
-                "codebook_size": 1024,  # 原256→1024，使用率高，需要更大码本
-                "loss_weight": 0.6,
                 "ema_decay": 0.99
             }
         }
@@ -200,6 +195,11 @@ class Config:
         self.ahrq_reset_unused_codes = True
         self.ahrq_reset_threshold = 50  # 死码阈值
         self.ahrq_temperature = 1.0  # 调高temperature使分布更平滑，增加码本利用多样性
+
+        # SASRecAHRQ 融合配置（新增）
+        self.sasrec_ahrq_fusion = "add"  # 融合方式: "add" | "concat" | "attention"
+        self.sasrec_ahrq_alpha = 0.5  # 融合权重: alpha * id_emb + (1-alpha) * quant_feat
+        self.sasrec_ahrq_num_items = 18425  # 物品数量（从数据集加载）
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
         self.text_dim: int = 512  # 文本特征维度 (CLIP ViT-B/32)
