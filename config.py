@@ -172,7 +172,7 @@ class Config:
         self.layer_norm_eps: float = 1e-12
 
         # AH-RQ量化配置（核心）
-        self.ahrq_hidden_dim = 192
+        self.ahrq_hidden_dim = 264
         # 层次化配置：Topic(层0-1) + Style(层2-3) + Emotion(层4-5)，共6层
         # 反转设计：根据实际使用率分配码本大小（使用率高的层分配更大码本）
         self.semantic_hierarchy = {

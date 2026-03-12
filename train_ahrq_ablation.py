@@ -574,20 +574,7 @@ def main():
             use_hscl=True,
             use_emotion=True,
             use_hierarchy_weight=True,
-        ),
-        # 6. AHRQ-Inverted: 反转码本设计 + 降低HSCL权重
-        # 基于消融实验结果：Topic(1024→256), Emotion(256→1024), hscl_weight(0.5→0.1)
-        AblationConfig(
-            experiment_name="AHRQ-Inverted",
-            use_ema=True,
-            use_hscl=True,
-            use_emotion=True,
-            use_hierarchy_weight=True,
-            topic_codebook=256,       # 反转：变小（原1024）
-            style_codebook=512,       # 保持
-            emotion_codebook=512,     # 调整（原1024）
-            hscl_weight=0.03,         # 降低（原0.5）
-        ),
+        )
     ]
 
     all_results = []
