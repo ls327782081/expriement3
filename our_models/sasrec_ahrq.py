@@ -22,8 +22,21 @@ class SASRecAHRQ(nn.Module):
         ahrq_model: AdaptiveHierarchicalQuantizer,
         num_items: int = None,
         fusion_type: str = "add",
-        fixed_alpha: float = None
+        fixed_alpha: float = None,
+        dynamic_params: dict = None
     ):
+        """
+        Args:
+            ahrq_model: AHRQ量化器模型
+            num_items: 物品数量
+            fusion_type: 融合类型 ("add", "concat", "none")
+            fixed_alpha: 固定融合权重（可选）
+            dynamic_params: 动态参数dict，包含：
+                - num_heads: 注意力头数
+                - sasrec_num_layers: Transformer层数
+                - dropout: Dropout比率
+                - dim_feedforward: FFN隐藏层维度
+        """
         super().__init__()
 
         # 从 AHRQ 模型动态读取层次配置
@@ -59,23 +72,35 @@ class SASRecAHRQ(nn.Module):
             self.alpha = nn.Parameter(torch.tensor(0.5))
             self.learnable_alpha = True
 
-        # SASRec核心配置
+        # SASRec核心配置 - 使用动态参数或默认配置
         self.max_len = new_config.sasrec_max_len
-        self.num_heads = new_config.sasrec_num_heads
-        self.sasrec_num_layers = new_config.sasrec_num_layers
-        self.dropout = new_config.sasrec_dropout
 
-        self.dropout_proj = nn.Dropout(new_config.sasrec_dropout)
-        self.dropout_id = nn.Dropout(new_config.sasrec_dropout)
+        if dynamic_params is not None:
+            # 使用动态参数（根据码本配置调整）
+            self.num_heads = dynamic_params.get("num_heads", new_config.sasrec_num_heads)
+            self.sasrec_num_layers = dynamic_params.get("sasrec_num_layers", new_config.sasrec_num_layers)
+            self.dropout = dynamic_params.get("dropout", new_config.sasrec_dropout)
+            self.dim_feedforward = dynamic_params.get("dim_feedforward", self.hidden_dim * 4)
+            self.dynamic_params_used = dynamic_params
+        else:
+            # 使用默认配置
+            self.num_heads = new_config.sasrec_num_heads
+            self.sasrec_num_layers = new_config.sasrec_num_layers
+            self.dropout = new_config.sasrec_dropout
+            self.dim_feedforward = self.hidden_dim * 4
+            self.dynamic_params_used = None
+
+        self.dropout_proj = nn.Dropout(self.dropout)
+        self.dropout_id = nn.Dropout(self.dropout)
 
         # 位置编码
         self.position_embedding = nn.Embedding(self.max_len, self.hidden_dim)
 
-        # Transformer编码器
+        # Transformer编码器 - 使用动态dim_feedforward
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hidden_dim,
             nhead=self.num_heads,
-            dim_feedforward=self.hidden_dim * 4,
+            dim_feedforward=self.dim_feedforward,
             dropout=self.dropout,
             activation="gelu",
             batch_first=True,
