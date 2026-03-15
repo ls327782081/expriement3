@@ -149,7 +149,7 @@ class Config:
         self.seed = 42
         self.batch_size = 64
         self.epochs = 50
-        self.lr = 1e-4  # 标准SASRec学习率
+        self.lr = 1e-3  # 匹配hp_search最佳实验
         self.weight_decay = 1e-5
         self.grad_clip = 1.0
 
@@ -157,18 +157,18 @@ class Config:
 
         # 两阶段训练参数
         self.stage1_epochs = 20  # 量化预训练轮数
-        self.stage2_epochs = 30  # 排序训练轮数
+        self.stage2_epochs = 50  # 排序训练轮数 (匹配hp_search最佳实验)
         self.quant_uniform_weight = 0.1  # 码本均匀性损失权重
         self.bpr_margin = 0.2  # BPR间距（降低排序难度，从0.4降到0.2）
         self.reg_weight = 0.005          # 分数正则化损失权重
         self.quant_uniform_weight = 0.3  # 均匀性损失权重（从0.1调高，约束Gini）
 
-        # SASRec配置
-        self.sasrec_hidden_dim = 256
-        self.sasrec_num_heads = 4
-        self.sasrec_num_layers = 2
+        # SASRec配置 (匹配hp_search raw_fusion最佳实验)
+        self.sasrec_hidden_dim = 64  # 匹配hp_search使用64维
+        self.sasrec_num_heads = 1    # 最佳: 1头
+        self.sasrec_num_layers = 2  # 最佳: 2层
         self.sasrec_max_len = 50
-        self.sasrec_dropout = 0.1
+        self.sasrec_dropout = 0.4   # 最佳: 0.4
         self.layer_norm_eps: float = 1e-12
 
         # AH-RQ量化配置（核心）

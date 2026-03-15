@@ -1,379 +1,266 @@
 import os
-import torch
-import torch.nn as nn
+import argparse
+
 import numpy as np
+import torch
 from tqdm import tqdm
-from torch.utils.data import Dataset, DataLoader
-import warnings
 
-warnings.filterwarnings("ignore")
+from config import new_config
 
-# 导入配置和核心模块
-from config import config
-from our_models.pmat_sasrec import PMATSASRec  # 完整推荐模型
-from utils.loss import total_loss
+
+# 命令行参数解析
+parser = argparse.ArgumentParser(description='Train PMAT-SASRec with AHRQ')
+parser.add_argument('--ahrq_model', type=str, default='ahrq_full',
+                    choices=['baseline_rq', 'ahrq_hiercodebook', 'ahrq_ema', 'ahrq_hscl', 'ahrq_full', 'ahrq_inverted'],
+                    help='AHRQ model to load from results/ahrq_ablation')
+args = parser.parse_args()
+
+from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
 from log import Logger
-from utils.utils import seed_everything, EarlyStopping, calculate_metrics, calculate_id_metrics
+from our_models.ah_rq import AdaptiveHierarchicalQuantizer
+from our_models.pmat_sasrec import PMATSASRec
+from utils.loss import compute_rqvae_recon_loss
+from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
+import torch.nn.functional as F
+
+NUM_WORKS = 0
 
 
-# ===================== 多模态数据集定义（适配PMAT输入） =====================
-class PMATSASRecDataset(Dataset):
-    """
-    多模态序列推荐数据集
-    输入：用户-物品交互序列 + 物品多模态特征（文本/视觉）
-    输出：PMAT-SASRec所需的多模态特征batch
-    """
+def evaluate_test_full(model, test_loader, indices_list, topk=10):
+    """测试集全量排序评估"""
+    model.eval()
+    total_hr = 0.0
+    total_ndcg = 0.0
+    total_users = 0
+    num_items = indices_list.shape[0]
 
-    def __init__(self, data_path, feat_root, max_len=50, num_neg=4, phase="train"):
-        self.max_len = max_len
-        self.num_neg = num_neg
-        self.phase = phase
+    with torch.no_grad():
+        all_item_feat = model.get_all_item_sem_feat(indices_list)
+        for batch in tqdm(test_loader, desc=f'Full Ranking Evaluation on Test Set'):
+            user_emb, _ = model(batch)
 
-        # 1. 加载多模态特征（文本/视觉）
-        self.text_feat = np.load(os.path.join(feat_root, "item_text_feat.npy"))  # (num_items, text_dim)
-        self.visual_feat = np.load(os.path.join(feat_root, "item_visual_feat.npy"))  # (num_items, visual_dim)
-        self.num_items = self.text_feat.shape[0]
+            # 修正target_idx偏移（1~num_items+1 → 0~num_items）
+            target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
 
-        # 2. 加载用户-物品交互序列
-        self.user_seq = self._load_user_sequence(data_path)
+            all_scores = torch.matmul(user_emb, all_item_feat.T)
+            rec_metrics = calculate_metrics(all_scores, target_idx)
 
-        # 3. 生成训练/验证/测试样本
-        self.samples = self._generate_samples()
+            total_hr += rec_metrics[f'HR@{topk}']
+            total_ndcg += rec_metrics[f'NDCG@{topk}']
+            total_users += 1
 
-    def _load_user_sequence(self, data_path):
-        """加载用户交互序列，格式：{user_id: [item1, item2, ...]}"""
-        user_seq = {}
-        with open(data_path, "r", encoding="utf-8") as f:
-            header = f.readline()  # 跳过表头
-            for line in f:
-                user_id, item_id, timestamp = line.strip().split(",")
-                user_id, item_id = int(user_id), int(item_id)
-                if user_id not in user_seq:
-                    user_seq[user_id] = []
-                user_seq[user_id].append(item_id)
-        return user_seq
-
-    def _generate_samples(self):
-        """生成样本：(历史序列ID, 正样本ID, 负样本ID, 历史长度)"""
-        samples = []
-        for user_id, seq in self.user_seq.items():
-            if len(seq) < 2:
-                continue
-
-            # 训练/验证：用前n-1个物品预测第n个；测试：用全部历史预测最后一个
-            if self.phase == "test":
-                seq = seq[:-1]  # 测试集用最后一个物品作为标签
-                if len(seq) < 1:
-                    continue
-
-            for i in range(1, len(seq)):
-                # 历史序列（截断/补零到max_len）
-                hist_ids = seq[:i][-self.max_len:]
-                hist_len = len(hist_ids)
-                hist_ids = [0] * (self.max_len - hist_len) + hist_ids  # 补零padding
-
-                # 正样本
-                pos_id = seq[i]
-
-                # 负样本（保证负样本≠正样本）
-                neg_ids = np.random.choice(
-                    [x for x in range(self.num_items) if x != pos_id],
-                    size=self.num_neg,
-                    replace=False
-                )
-
-                samples.append((hist_ids, pos_id, neg_ids, hist_len))
-        return samples
-
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        """将ID转换为多模态特征，返回模型输入"""
-        hist_ids, pos_id, neg_ids, hist_len = self.samples[idx]
-
-        # 1. 历史序列多模态特征
-        history_text = self.text_feat[hist_ids]  # (max_len, text_dim)
-        history_visual = self.visual_feat[hist_ids]  # (max_len, visual_dim)
-
-        # 2. 正样本多模态特征
-        target_text = self.text_feat[pos_id]  # (text_dim,)
-        target_visual = self.visual_feat[pos_id]  # (visual_dim,)
-
-        # 3. 负样本多模态特征
-        neg_text = self.text_feat[neg_ids]  # (num_neg, text_dim)
-        neg_visual = self.visual_feat[neg_ids]  # (num_neg, visual_dim)
-
-        # 转换为tensor
-        return {
-            "history_text": torch.tensor(history_text, dtype=torch.float),
-            "history_visual": torch.tensor(history_visual, dtype=torch.float),
-            "history_len": torch.tensor(hist_len, dtype=torch.long),
-            "target_text": torch.tensor(target_text, dtype=torch.float),
-            "target_visual": torch.tensor(target_visual, dtype=torch.float),
-            "neg_text": torch.tensor(neg_text, dtype=torch.float),
-            "neg_visual": torch.tensor(neg_visual, dtype=torch.float)
-        }
+    if total_users == 0:
+        return 0.0, 0.0
+    avg_hr = total_hr / total_users
+    avg_ndcg = total_ndcg / total_users
+    return avg_hr, avg_ndcg
 
 
-# ===================== 核心实验流程 =====================
-def run_experiment():
-    # 1. 初始化配置
-    seed_everything(config.seed)  # 固定随机种子
-    os.makedirs(config.log_dir, exist_ok=True)
-    os.makedirs(config.model_dir, exist_ok=True)
+def train_pmat_sasrec():
+    logger = Logger("./logs/train_pmat_sasrec.log")
+    seed_everything(new_config.seed)
 
-    # 初始化日志和早停
-    logger = Logger(os.path.join(config.log_dir, "pmat_sasrec_experiment.log"))
-    early_stopping = EarlyStopping(patience=config.patience, verbose=True,
-                                   path=os.path.join(config.model_dir, "best_pmat_sasrec.pth"))
+    # 输出目录
+    OUTPUT_DIR = "./results/pmat_sasrec"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 2. 加载数据集
-    logger.info("Loading datasets...")
-    train_dataset = PMATSASRecDataset(
-        data_path=config.train_data_path,
-        feat_root=config.feat_root,
-        max_len=config.sasrec_max_len,
-        num_neg=config.num_neg,
-        phase="train"
-    )
-    val_dataset = PMATSASRecDataset(
-        data_path=config.val_data_path,
-        feat_root=config.feat_root,
-        max_len=config.sasrec_max_len,
-        num_neg=config.num_neg,
-        phase="val"
-    )
-    test_dataset = PMATSASRecDataset(
-        data_path=config.test_data_path,
-        feat_root=config.feat_root,
-        max_len=config.sasrec_max_len,
-        num_neg=config.num_neg,
-        phase="test"
-    )
+    # 从 results/ahrq_ablation/models/ 加载预训练的AHRQ模型
+    ahrq_model_path = f"./results/ahrq_ablation/models/{args.ahrq_model}_model.pth"
+    if os.path.exists(ahrq_model_path):
+        print(f"\n========== Loading AHRQ model from {ahrq_model_path} ==========")
+        checkpoint = torch.load(ahrq_model_path, map_location=new_config.device, weights_only=False)
 
-    # 构建DataLoader
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.batch_size,
+        # 从保存的配置重建模型结构
+        saved_config = checkpoint['config']
+
+        # 重建语义层次配置
+        semantic_hierarchy = saved_config['semantic_hierarchy']
+
+        # 重新创建AHRQ模型，使用保存的配置
+        ahrq = AdaptiveHierarchicalQuantizer(
+            hidden_dim=new_config.ahrq_hidden_dim,
+            semantic_hierarchy=semantic_hierarchy,
+            use_multimodal=True,
+            text_dim=new_config.text_dim,
+            visual_dim=new_config.visual_dim,
+            beta=new_config.ahrq_beta,
+            use_ema=saved_config.get('use_ema', False),
+            ema_decay=0.99,
+            reset_unused_codes=saved_config.get('use_ema', False),
+            reset_threshold=new_config.ahrq_reset_threshold
+        ).to(new_config.device)
+
+        # 加载模型权重
+        ahrq.load_state_dict(checkpoint['model_state_dict'])
+        print(f"AHRQ model loaded! Using model: {args.ahrq_model}")
+        best_recon_loss = checkpoint.get('metrics', {}).get('val_recon_loss', float('inf'))
+    else:
+        raise FileNotFoundError(f"AHRQ model not found at {ahrq_model_path}. Please run train_ahrq_ablation.py first.")
+
+    # 获取数据加载器和物品元数据
+    pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
+        cache_dir="./data",
+        category='Video_Games',
+        batch_size=new_config.batch_size,
         shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=True
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=True
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=True
+        quick_mode=True,
+        num_workers=NUM_WORKS,
+        logger=logger
     )
 
-    # 3. 初始化模型和优化器
-    logger.info("Initializing model...")
-    model = PMATSASRec().to(config.device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.lr,
-        weight_decay=config.weight_decay
+    # 重新计算indices_list
+    print("\nRecomputing all item semantics after Stage 1...")
+    all_item_text = all_item_meta['text_features'].float().to(new_config.device)
+    all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
+    _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
+
+    # 创建PMAT-SASRec模型
+    model = PMATSASRec(ahrq_model=ahrq).to(new_config.device)
+
+    train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
+        cache_dir="./data",
+        category='Video_Games',
+        batch_size=new_config.batch_size,
+        max_history_len=new_config.sasrec_max_len,
+        num_negative_samples=new_config.num_negative_samples,
+        shuffle=True,
+        quick_mode=True,
+        num_workers=NUM_WORKS,
+        indices_list=indices_list,
+        logger=logger
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=config.epochs,
-        eta_min=1e-6
-    )
 
-    # 4. 训练循环
-    logger.info("Starting training...")
-    for epoch in range(config.epochs):
-        # ========== 训练阶段 ==========
-        model.train()
-        train_losses = []
-        train_hr10_list = []
-        train_ndcg10_list = []
-        train_id_repeat_list = []
+    pmat_sasrec_model_path = f"{OUTPUT_DIR}/final_pmat_sasrec.pth"
+    if os.path.exists(pmat_sasrec_model_path):
+        print(f"\n========== Loading existing PMAT-SASRec model from {pmat_sasrec_model_path} ==========")
+        checkpoint = torch.load(pmat_sasrec_model_path, map_location=new_config.device, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        print(f"PMAT-SASRec model loaded! Skipping training.")
+    else:
+        print("\n========== Stage 2: Recommendation Training (PMAT-SASRec) ==========")
 
-        train_bar = tqdm(train_loader, desc=f"Epoch [{epoch + 1}/{config.epochs}] Train")
-        for batch in train_bar:
-            # 数据移到设备
-            batch = {k: v.to(config.device) for k, v in batch.items()}
+        rec_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer_rec = torch.optim.AdamW(
+            rec_params,
+            lr=new_config.lr,
+            weight_decay=new_config.weight_decay
+        )
+        scheduler_rec = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_rec,
+            T_max=new_config.stage2_epochs
+        )
 
-            # 前向传播
-            pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers = model(batch)
-
-            # 计算损失（复用total_loss，与sasrec_ahrq一致）
-            loss, loss_dict = total_loss(
-                pos_scores=pos_scores,
-                neg_scores=neg_scores,
-                quantized=quantized,
-                user_emb=user_emb,
-                quantized_layers=quantized_layers,
-                indices_list=indices_list,
-                semantic_hierarchy=config.semantic_hierarchy
-            )
-
-            # 反向传播
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)  # 梯度裁剪
-            optimizer.step()
-
-            # 记录指标
-            train_losses.append(loss.item())
-
-            # 推荐指标（HR@10, NDCG@10）
-            rec_metrics = calculate_metrics(pos_scores.detach(), neg_scores.detach(), k=10)
-            train_hr10_list.append(rec_metrics["HR@10"])
-            train_ndcg10_list.append(rec_metrics["NDCG@10"])
-
-            # ID质量指标（重复率）
-            id_metrics = calculate_id_metrics(indices_list)
-            train_id_repeat_list.append(id_metrics["id_repeat_rate"])
-
-            # 更新进度条
-            train_bar.set_postfix(
-                loss=f"{np.mean(test_losses):.4f}",
-                HR10=f"{np.mean(test_hr10_list):.4f}",
-                NDCG10=f"{np.mean(test_ndcg10_list):.4f}",
-                ID_Repeat=f"{np.mean(test_id_repeat_list):.4f}"
-            )
-
-            # 学习率调度
-            scheduler.step()
-
-            # ========== 验证阶段 ==========
-            model.eval()
-            val_losses = []
-            val_hr10_list = []
-            val_ndcg10_list = []
-            val_id_repeat_list = []
+        best_ndcg = 0.0
+        for epoch in range(new_config.stage2_epochs):
+            model.train()
+            train_bar = tqdm(train_loader, desc=f"Stage2 Epoch {epoch + 1}/{new_config.stage2_epochs}")
+            train_losses = []
+            train_metrics = []
 
             with torch.no_grad():
-                val_bar = tqdm(val_loader, desc=f"Epoch [{epoch + 1}/{config.epochs}] Val")
-                for batch in val_bar:
-                    batch = {k: v.to(config.device) for k, v in batch.items()}
+                all_item_feat = model.get_all_item_sem_feat(indices_list)
+                all_item_feat.requires_grad = False  # 标记无梯度，节省显存
 
-                    # 前向传播
-                    pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers = model(batch)
+            for batch in train_bar:
+                user_emb, pos_sem_feat = model(batch)
 
-                    # 计算损失
-                    loss, _ = total_loss(
-                        pos_scores=pos_scores,
-                        neg_scores=neg_scores,
-                        quantized=quantized,
-                        user_emb=user_emb,
-                        quantized_layers=quantized_layers,
-                        indices_list=indices_list,
-                        semantic_hierarchy=config.semantic_hierarchy
-                    )
-                    val_losses.append(loss.item())
+                # 计算全量物品得分（logits）
+                logits = torch.matmul(user_emb, all_item_feat.T)  # (B, num_items)
 
-                    # 计算指标
-                    rec_metrics = calculate_metrics(pos_scores, neg_scores, k=10)
-                    id_metrics = calculate_id_metrics(indices_list)
+                # 修正target_idx偏移（1~num_items+1 → 0~num_items）
+                target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
 
-                    val_hr10_list.append(rec_metrics["HR@10"])
-                    val_ndcg10_list.append(rec_metrics["NDCG@10"])
-                    val_id_repeat_list.append(id_metrics["id_repeat_rate"])
+                # CE损失（ignore_index=-1 屏蔽原0值）
+                loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
 
-                    # 更新进度条
-                    val_bar.set_postfix(
-                        loss=f"{np.mean(test_losses):.4f}",
-                        HR10=f"{np.mean(test_hr10_list):.4f}",
-                        NDCG10=f"{np.mean(test_ndcg10_list):.4f}",
-                        ID_Repeat=f"{np.mean(test_id_repeat_list):.4f}"
-                    )
+                optimizer_rec.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(rec_params, new_config.grad_clip)
+                optimizer_rec.step()
 
-                    # ========== 日志记录 ==========
-                    avg_train_loss = np.mean(train_losses)
-                    avg_train_hr10 = np.mean(train_hr10_list)
-                    avg_train_ndcg10 = np.mean(train_ndcg10_list)
-                    avg_train_id_repeat = np.mean(train_id_repeat_list)
-
-                    avg_val_loss = np.mean(val_losses)
-                    avg_val_hr10 = np.mean(val_hr10_list)
-                    avg_val_ndcg10 = np.mean(val_ndcg10_list)
-                    avg_val_id_repeat = np.mean(val_id_repeat_list)
-
-                    logger.info(f"Epoch [{epoch + 1}/{config.epochs}]")
-                    logger.info(
-                        f"Train - Loss: {avg_train_loss:.4f}, HR@10: {avg_train_hr10:.4f}, NDCG@10: {avg_train_ndcg10:.4f}, ID_Repeat: {avg_train_id_repeat:.4f}")
-                    logger.info(
-                        f"Val   - Loss: {avg_val_loss:.4f}, HR@10: {avg_val_hr10:.4f}, NDCG@10: {avg_val_ndcg10:.4f}, ID_Repeat: {avg_val_id_repeat:.4f}")
-
-                    # ========== 早停和模型保存 ==========
-                    early_stopping(avg_val_ndcg10, model, optimizer)
-                    if early_stopping.early_stop:
-                        logger.info("Early stopping triggered!")
-                        break
-
-                # 5. 测试阶段（加载最优模型）
-                logger.info("Starting testing...")
-                model.load_state_dict(
-                    torch.load(os.path.join(config.model_dir, "best_pmat_sasrec.pth"), weights_only=False)["model_state_dict"])
-                model.eval()
-
-                test_losses = []
-                test_hr10_list = []
-                test_ndcg10_list = []
-                test_id_repeat_list = []
-
+                train_losses.append(loss.item())
                 with torch.no_grad():
-                    test_bar = tqdm(test_loader, desc="Testing")
-                    for batch in test_bar:
-                        batch = {k: v.to(config.device) for k, v in batch.items()}
+                    # 计算全量物品打分（复用预计算的all_item_feat）
+                    all_scores = torch.matmul(user_emb, all_item_feat.T)
+                    rec_metrics = calculate_metrics(all_scores, target_idx)
+                    batch_metrics = {**rec_metrics}
+                    train_metrics.append(batch_metrics)
 
-                        pos_scores, neg_scores, quantized, user_emb, indices_list, quantized_layers = model(batch)
+                hr10 = batch_metrics.get("HR@10", 0.0)
+                ndgc10 = batch_metrics.get("NDCG@10", 0.0)
+                avg_loss = np.mean(train_losses)
+                train_bar.set_postfix({
+                    "loss": f"{avg_loss:.4f}",
+                    "HR@10": f"{hr10:.4f}",
+                    "NDCG@10": f"{ndgc10:.4f}"
+                })
 
-                        # 计算损失
-                        loss, _ = total_loss(
-                            pos_scores=pos_scores,
-                            neg_scores=neg_scores,
-                            quantized=quantized,
-                            user_emb=user_emb,
-                            quantized_layers=quantized_layers,
-                            indices_list=indices_list,
-                            semantic_hierarchy=config.semantic_hierarchy
-                        )
-                        test_losses.append(loss.item())
+            scheduler_rec.step()
 
-                        # 计算指标
-                        rec_metrics = calculate_metrics(pos_scores, neg_scores, k=10)
-                        id_metrics = calculate_id_metrics(indices_list)
+            model.eval()
+            val_losses = []
+            val_metrics = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    user_emb, pos_sem_feat = model(batch)
 
-                        test_hr10_list.append(rec_metrics["HR@10"])
-                        test_ndcg10_list.append(rec_metrics["NDCG@10"])
-                        test_id_repeat_list.append(id_metrics["id_repeat_rate"])
+                    # 计算全量物品得分（logits）
+                    logits = torch.matmul(user_emb, all_item_feat.T)  # (B, num_items)
 
-                        test_bar.set_postfix(
-                            loss=f"{np.mean(test_losses):.4f}",
-                            HR10=f"{np.mean(test_hr10_list):.4f}",
-                            NDCG10=f"{np.mean(test_ndcg10_list):.4f}",
-                            ID_Repeat=f"{np.mean(test_id_repeat_list):.4f}"
-                        )
+                    # 修正target_idx偏移（1~num_items+1 → 0~num_items）
+                    target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
 
-                        # 记录测试结果
-                        avg_test_loss = np.mean(test_losses)
-                        avg_test_hr10 = np.mean(test_hr10_list)
-                        avg_test_ndcg10 = np.mean(test_ndcg10_list)
-                        avg_test_id_repeat = np.mean(test_id_repeat_list)
+                    # CE损失（ignore_index=-1 屏蔽原0值）
+                    loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
+                    val_losses.append(loss.item())
+                    all_scores = torch.matmul(user_emb, all_item_feat.T)
+                    rec_metrics = calculate_metrics(all_scores, target_idx)
+                    val_metrics.append({**rec_metrics})
 
-                        logger.info("=" * 50)
-                        logger.info("Final Test Results:")
-                        logger.info(f"Test Loss: {avg_test_loss:.4f}")
-                        logger.info(f"Test HR@10: {avg_test_hr10:.4f}")
-                        logger.info(f"Test NDCG@10: {avg_test_ndcg10:.4f}")
-                        logger.info(f"Test ID Repeat Rate: {avg_test_id_repeat:.4f}")
-                        logger.info("=" * 50)
+            avg_train_loss = np.mean(train_losses)
+            avg_val_loss = np.mean(val_losses)
+
+            avg_train_metrics = {}
+            for key in train_metrics[0].keys():
+                avg_train_metrics[key] = np.mean([m[key] for m in train_metrics])
+
+            avg_val_metrics = {}
+            for key in val_metrics[0].keys():
+                avg_val_metrics[key] = np.mean([m[key] for m in val_metrics])
+
+            print(f"\nStage2 Epoch {epoch + 1} Summary:")
+            print(f"Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+            print(f"Train HR@10: {avg_train_metrics['HR@10']:.4f} | Val HR@10: {avg_val_metrics['HR@10']:.4f}")
+            print(f"Train NDCG@10: {avg_train_metrics['NDCG@10']:.4f} | Val NDCG@10: {avg_val_metrics['NDCG@10']:.4f}")
+
+            if avg_val_metrics["NDCG@10"] > best_ndcg:
+                best_ndcg = avg_val_metrics["NDCG@10"]
+                torch.save({
+                    "stage": 2,
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_rec_state_dict": optimizer_rec.state_dict(),
+                    "best_ndcg": best_ndcg
+                }, f"{OUTPUT_DIR}/best_pmat_sasrec.pth")
+                print(f"Stage2 Best model saved! NDCG@10: {best_ndcg:.4f}")
+
+        torch.save({"model_state_dict": model.state_dict()}, f"{OUTPUT_DIR}/final_pmat_sasrec.pth")
+
+    test_hr_full, test_ndcg_full = evaluate_test_full(
+        model=model,
+        test_loader=test_loader,
+        indices_list=indices_list,
+        topk=10,
+    )
+
+    print("\n========== Final Test Result (Full Ranking) ==========")
+    print(f"Test HR@10 (Full): {test_hr_full:.4f}")
+    print(f"Test NDCG@10 (Full): {test_ndcg_full:.4f}")
+
+    print("\n========== Two-Stage Training Completed! ==========")
+    print(f"Best Quant Recon Loss: {best_recon_loss:.6f} | Best Recommendation NDCG (Val): {best_ndcg:.4f}")
+    print(f"Final Test HR@10 (Full): {test_hr_full:.4f} | Final Test NDCG@10 (Full): {test_ndcg_full:.4f}")
 
 
-
-                    # ===================== 运行实验 =====================
-                    if __name__ == "__main__":
-                        run_experiment()
+if __name__ == "__main__":
+    train_pmat_sasrec()

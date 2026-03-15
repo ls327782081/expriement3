@@ -110,14 +110,36 @@ def train_sasrec_ahrq():
         logger=logger
     )
 
-    # 重新计算indices_list
+    # 重新计算indices_list和原始特征
     print("\nRecomputing all item semantics after Stage 1...")
     all_item_text = all_item_meta['text_features'].float().to(new_config.device)
     all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
-    _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
+    quantized_feat, indices_list, raw_feat, _ = ahrq(all_item_text, all_item_vision)
 
-    # 检查是否已存在训练好的SASRec_AHRQ模型
-    model = SASRecAHRQ(ahrq_model=ahrq).to(new_config.device)
+    # 构建dynamic_params以匹配hp_search最佳实验
+    dynamic_params = {
+        "num_heads": new_config.sasrec_num_heads,      # 1
+        "sasrec_num_layers": new_config.sasrec_num_layers,  # 2
+        "dropout": new_config.sasrec_dropout,           # 0.4
+        "dim_feedforward": new_config.sasrec_hidden_dim * 4,  # 256
+    }
+
+    # 使用raw_fusion (最佳实验配置)
+    raw_feat_tensor = raw_feat.detach().clone()
+
+    # 创建SASRecAHRQ模型，使用最佳实验配置
+    model = SASRecAHRQ(
+        ahrq_model=ahrq,
+        num_items=new_config.sasrec_ahrq_num_items,
+        fusion_type="add",
+        fixed_alpha=0.5,
+        dynamic_params=dynamic_params,
+        use_quantized_fusion=False,
+        use_raw_fusion=True,  # 启用原始特征融合（最佳实验配置）
+        use_semantic_id=True,
+        quantized_features=quantized_feat,
+        raw_features=raw_feat_tensor
+    ).to(new_config.device)
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category='Video_Games',

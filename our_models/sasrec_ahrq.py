@@ -21,9 +21,15 @@ class SASRecAHRQ(nn.Module):
         self,
         ahrq_model: AdaptiveHierarchicalQuantizer,
         num_items: int = None,
+        hidden_dim: int = None,
         fusion_type: str = "add",
         fixed_alpha: float = None,
-        dynamic_params: dict = None
+        dynamic_params: dict = None,
+        use_quantized_fusion: bool = False,
+        use_raw_fusion: bool = False,
+        use_semantic_id: bool = True,
+        quantized_features = None,
+        raw_features = None
     ):
         """
         Args:
@@ -44,12 +50,26 @@ class SASRecAHRQ(nn.Module):
         self.num_layers = ahrq_model.num_layers
         self.layer_dim = ahrq_model.layer_dim
 
-        # 动态计算隐藏维度（总层数 * 每层维度）
-        self.hidden_dim = self.num_layers * self.layer_dim
+        # 隐藏维度：优先使用传入值，否则使用 AHRQ 计算值
+        if hidden_dim is not None:
+            self.hidden_dim = hidden_dim
+        else:
+            self.hidden_dim = self.num_layers * self.layer_dim
+
+        # 连续特征融合配置（新增）
+        self.use_quantized_fusion = use_quantized_fusion
+        self.use_raw_fusion = use_raw_fusion
+        self.use_semantic_id = use_semantic_id
+        self.quantized_features = quantized_features
+        self.raw_features = raw_features
 
         # 融合配置
         self.fusion_type = fusion_type
         self.use_fusion = fusion_type != "none"
+
+        # concat 融合投影层
+        if fusion_type == "concat":
+            self.concat_proj = nn.Linear(self.hidden_dim * 2, self.hidden_dim)
 
         # 动态创建语义ID Embedding层
         self.semantic_id_emb = nn.ModuleDict()
@@ -155,6 +175,11 @@ class SASRecAHRQ(nn.Module):
         # 初始化 item_embedding
         nn.init.normal_(self.item_embedding.weight, mean=0.0, std=0.02)
 
+        # 初始化 concat_proj
+        if hasattr(self, 'concat_proj'):
+            nn.init.xavier_uniform_(self.concat_proj.weight)
+            nn.init.zeros_(self.concat_proj.bias)
+
         nn.init.constant_(self.alpha, 0.5)
 
     def get_item_id_emb(self, item_ids):
@@ -189,7 +214,7 @@ class SASRecAHRQ(nn.Module):
         elif self.fusion_type == "concat":
             # 拼接后投影
             fused = torch.cat([id_emb, sem_emb], dim=-1)
-            fused = F.linear(fused, torch.eye(self.hidden_dim, self.hidden_dim * 2, device=fused.device)[:, :self.hidden_dim])
+            fused = self.concat_proj(fused)
         else:
             fused = sem_emb
 
@@ -217,7 +242,7 @@ class SASRecAHRQ(nn.Module):
 
     def get_all_item_sem_feat(self, all_item_indices):
         """
-        全量物品语义ID转特征
+        全量物品语义ID转特征（不含连续特征融合）
         Args:
             all_item_indices: (num_items, num_layers) 全量物品的多层次语义ID
         Returns:
@@ -237,6 +262,40 @@ class SASRecAHRQ(nn.Module):
 
         assert all_item_feat.shape == (all_item_indices.shape[0], self.hidden_dim), \
             f"全量特征维度错误！预期({all_item_indices.shape[0]},{self.hidden_dim})，实际{all_item_feat.shape}"
+
+        return all_item_feat
+
+    def get_all_item_full_feat(self, all_item_indices):
+        """
+        全量物品完整特征（含连续特征融合）
+        用于训练阶段，包含语义ID特征+连续特征融合
+
+        Args:
+            all_item_indices: (num_items, num_layers) 全量物品的多层次语义ID
+        Returns:
+            all_item_feat: (num_items, hidden_dim) 全量物品的完整特征
+        """
+        # 语义ID特征
+        all_item_feat = self.get_all_item_sem_feat(all_item_indices)
+
+        # 连续特征融合
+        if self.use_quantized_fusion or self.use_raw_fusion:
+            # 构造indices_list用于get_continuous_feat
+            indices_list_tensor = all_item_indices.unsqueeze(1)  # (num_items, 1, num_layers)
+            all_indices_list = self._tensor_to_indices_list(indices_list_tensor, seq_len=1)
+
+            # 使用物品ID索引连续特征（而非语义ID）
+            all_item_ids = torch.arange(all_item_indices.shape[0], device=all_item_indices.device).unsqueeze(1)
+            all_cont_feat = self.get_continuous_feat(all_indices_list, item_ids=all_item_ids)  # (num_items, 1, hidden_dim)
+            if all_cont_feat is not None:
+                all_cont_feat = all_cont_feat.squeeze(1)  # (num_items, hidden_dim)
+
+                # 融合语义ID特征和连续特征
+                alpha = torch.sigmoid(self.alpha)
+                if self.use_semantic_id:
+                    all_item_feat = alpha * all_item_feat + (1 - alpha) * all_cont_feat
+                else:
+                    all_item_feat = all_cont_feat
 
         return all_item_feat
 
@@ -282,6 +341,43 @@ class SASRecAHRQ(nn.Module):
 
         return semantic_feat
 
+    def get_continuous_feat(self, indices_list, item_ids=None):
+        """
+        从物品ID查询对应的连续特征（量化特征或原始特征）
+
+        Args:
+            indices_list: list of tensor，每层语义ID (batch, seq_len) - 仅用于占位
+            item_ids: (batch, seq_len) 物品ID，用于索引连续特征
+        Returns:
+            continuous_feat: (batch, seq_len, hidden_dim) 连续特征
+        """
+        batch_size = indices_list[0].shape[0]
+        seq_len = indices_list[0].shape[1]
+        device = indices_list[0].device
+
+        # 确定使用哪种连续特征
+        if self.use_quantized_fusion and self.quantized_features is not None:
+            continuous_feat = self.quantized_features  # (num_items, hidden_dim)
+        elif self.use_raw_fusion and self.raw_features is not None:
+            continuous_feat = self.raw_features  # (num_items, hidden_dim)
+        else:
+            return None
+
+        # 使用传入的物品ID索引连续特征，而不是语义ID
+        if item_ids is None:
+            raise ValueError("get_continuous_feat 需要传入 item_ids 参数来索引连续特征")
+        item_indices = item_ids.to(device)
+        continuous_feat = continuous_feat.to(device)
+
+        # 提取对应物品的连续特征
+        feat = continuous_feat[item_indices]  # (batch, seq_len, hidden_dim)
+
+        # 归一化
+        feat = F.normalize(feat, p=2, dim=-1)
+        feat = feat * (self.hidden_dim ** 0.5)
+
+        return feat
+
     def forward(self, batch):
         """
         前向传播：历史语义ID → 语义特征 → SASRec → 用户表征
@@ -309,10 +405,29 @@ class SASRecAHRQ(nn.Module):
         # 正样本特征
         pos_indices = batch["target_indices"]
         pos_indices_list = self._tensor_to_indices_list(pos_indices, seq_len=1)
-        pos_sem_feat = self.semantic_id_to_feat(pos_indices_list).squeeze(1)  # (B, D)
-
-        # 融合：目标物品ID特征 + 语义特征
-        if self.use_fusion and "target_item" in batch:
+        
+        # 语义ID特征
+        if self.use_semantic_id:
+            pos_sem_feat = self.semantic_id_to_feat(pos_indices_list).squeeze(1)  # (B, D)
+        else:
+            pos_sem_feat = None
+        
+        # 连续特征（量化特征或原始特征）
+        if self.use_quantized_fusion or self.use_raw_fusion:
+            pos_item = batch["target_item"].unsqueeze(1) if "target_item" in batch else None
+            pos_cont_feat = self.get_continuous_feat(pos_indices_list, item_ids=pos_item).squeeze(1) if pos_item is not None else None
+        else:
+            pos_cont_feat = None
+        
+        # 融合语义ID特征和连续特征
+        if pos_sem_feat is not None and pos_cont_feat is not None:
+            alpha = torch.sigmoid(self.alpha)
+            pos_sem_feat = alpha * pos_sem_feat + (1 - alpha) * pos_cont_feat
+        elif pos_cont_feat is not None:
+            pos_sem_feat = pos_cont_feat
+        
+        # 融合：目标物品ID特征 + 语义特征（原有逻辑）
+        if self.use_fusion and "target_item" in batch and pos_sem_feat is not None:
             target_item = batch["target_item"].to(device)
             pos_id_feat = self.get_item_id_emb(target_item.unsqueeze(1)).squeeze(1)  # (B, D)
             pos_id_feat = self.dropout_id(pos_id_feat)
@@ -338,10 +453,31 @@ class SASRecAHRQ(nn.Module):
 
         # 语义ID转特征
         hist_indices_list = self._tensor_to_indices_list(hist_indices)
-        history_sem_feat = self.semantic_id_to_feat(hist_indices_list)  # (B, L, D)
+        
+        # 语义ID特征
+        if self.use_semantic_id:
+            history_sem_feat = self.semantic_id_to_feat(hist_indices_list)  # (B, L, D)
+        else:
+            history_sem_feat = torch.zeros(hist_indices.shape[0], hist_indices.shape[1], self.hidden_dim, device=device)
+        
+        # 连续特征（量化特征或原始特征）
+        if self.use_quantized_fusion or self.use_raw_fusion:
+            history_items = batch.get("history_items", None)
+            if history_items is not None:
+                history_cont_feat = self.get_continuous_feat(hist_indices_list, item_ids=history_items)  # (B, L, D)
+            else:
+                history_cont_feat = None
+            if history_cont_feat is not None:
+                # 融合语义ID特征和连续特征
+                alpha = torch.sigmoid(self.alpha)
+                if self.use_semantic_id:
+                    history_sem_feat = alpha * history_sem_feat + (1 - alpha) * history_cont_feat
+                else:
+                    history_sem_feat = history_cont_feat
+        
         history_sem_feat = self.dropout_proj(history_sem_feat)
 
-        # 融合：添加ID Embedding
+        # 融合：添加ID Embedding（原有逻辑）
         if self.use_fusion and "history_items" in batch:
             history_items = batch["history_items"].to(device)
             history_id_feat = self.get_item_id_emb(history_items)  # (B, L, D)
@@ -373,37 +509,17 @@ class SASRecAHRQ(nn.Module):
         return user_emb
 
     def predict_all(self, batch, indices_list):
-        """
-        全量物品打分
-
-        Args:
-            batch: dict，包含:
-                - history_indices: (batch, max_len, num_layers) 历史语义ID
-                - history_items: (batch, max_len) 历史物品ID
-                - history_len: (batch,) 历史序列有效长度
-            indices_list: 所有物品的语义id，形状为 (item_num, num_layers)
-        Returns:
-            all_scores: (batch, item_num) 每个用户对所有物品的打分
-        """
         self.eval()
-
         with torch.no_grad():
             # 抽取用户表征
             user_emb = self.get_user_embedding(batch)  # (batch, hidden_dim)
-
-            # 语义ID → 语义特征
-            indices_list_tensor = indices_list.unsqueeze(1)  # (item_num, 1, num_layers)
-            all_indices_list = self._tensor_to_indices_list(indices_list_tensor, seq_len=1)
-            all_sem_feat = self.semantic_id_to_feat(all_indices_list)  # (item_num, 1, hidden_dim)
-            all_sem_feat = all_sem_feat.squeeze(1)  # (item_num, hidden_dim)
-
+            # 复用get_all_item_full_feat，避免重复计算
+            all_sem_feat = self.get_all_item_full_feat(indices_list)  # (item_num, hidden_dim)
             # 融合：添加物品ID特征
             if self.use_fusion:
                 all_item_ids = torch.arange(self.num_items, device=indices_list.device)
                 all_id_feat = self.get_item_id_emb(all_item_ids.unsqueeze(1)).squeeze(1)  # (item_num, D)
                 all_sem_feat = self.fuse_features(all_id_feat, all_sem_feat)
-
             # 计算打分
             all_scores = (user_emb.unsqueeze(1) * all_sem_feat.unsqueeze(0)).sum(dim=-1)  # (batch, item_num)
-
         return all_scores

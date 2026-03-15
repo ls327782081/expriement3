@@ -92,73 +92,6 @@ def analyze_codebook_clusters(model, device, num_clusters=10):
     return layer_results
 
 
-def calculate_dynamic_sasrec_params(codebook_sizes: List[int], base_hidden_dim: int = 512) -> dict:
-    """
-    根据码本大小动态调整SASRec参数
-
-    核心思想：语义ID的信息密度不同，需要不同复杂度的SASRec模型
-    - 总bits越多（信息密度高）→ 需要更复杂的模型避免欠拟合
-    - 总bits越少（信息密度低）→ 需要更简单的模型避免过拟合
-
-    Args:
-        codebook_sizes: 每层的码本大小列表
-        base_hidden_dim: 基础隐藏维度
-
-    Returns:
-        dict: 动态调整的SASRec参数
-    """
-    total_bits = sum([np.log2(cb) for cb in codebook_sizes])
-    num_layers = len(codebook_sizes)
-
-    # 基准：假设36bits是baseline（对应[256,512,512,512]配置）
-    baseline_bits = 36.0
-    # 使用更敏感的scale计算
-    scale = total_bits / baseline_bits
-
-    # 动态调整参数 - 放大差异
-    # 1. Transformer层数：基于总bits绝对值 + scale
-    # bits >= 35: 2-3层; bits 30-35: 2层; bits < 30: 1-2层
-    if total_bits >= 35:
-        sasrec_num_layers = 2
-    elif total_bits >= 32:
-        sasrec_num_layers = 2
-    elif total_bits >= 28:
-        sasrec_num_layers = 1
-    else:
-        sasrec_num_layers = 1
-
-    # 2. FFN维度：基于bits数量线性缩放，范围更大
-    # 36bits -> 2048, 29bits -> 1024
-    dim_feedforward = int(512 + (total_bits - 28) * 128)
-    dim_feedforward = max(512, min(2048, dim_feedforward))
-
-    # 3. Dropout：信息少需要更大的dropout防止过拟合
-    # 36bits -> 0.1, 29bits -> 0.15
-    dropout = 0.1 + (35 - total_bits) * 0.005
-    dropout = min(0.2, max(0.05, dropout))
-
-    # 4. 注意力头数：基于总bits绝对值，必须是hidden_dim的约数
-    # 信息密度越高，使用越多的head
-    if total_bits >= 34:
-        num_heads = 4
-    elif total_bits >= 30:
-        num_heads = 2
-    else:
-        num_heads = 1
-
-    # 5. 学习率微调：信息少时用更小的学习率
-    lr_scale = max(0.5, min(1.2, scale))
-
-    return {
-        "sasrec_num_layers": sasrec_num_layers,
-        "dim_feedforward": dim_feedforward,
-        "dropout": dropout,
-        "num_heads": num_heads,
-        "lr_scale": lr_scale,
-        "total_bits": total_bits,
-        "scale": scale
-    }
-
 
 @dataclass
 class HPSearchConfig:
@@ -175,9 +108,15 @@ class HPSearchConfig:
     # 模型融合参数（固定）
     fusion_type: str = "add"
     alpha: float = 0.5
+    # 连续特征融合参数（新增）
+    use_quantized_fusion: bool = False
+    use_raw_fusion: bool = False
+    use_semantic_id: bool = True
     # 训练参数
     stage1_epochs: int = 20  # AHRQ预训练轮数
     stage2_epochs: int = 50  # SASRec训练轮数
+    patience: int = 5
+    dropout: float = 0.0
     lr: float = 1e-4
     # 动态SASRec参数（由calculate_dynamic_sasrec_params计算）
     dynamic_sasrec_params: dict = None
@@ -486,7 +425,7 @@ def train_single_config(
     ahrq.eval()
     all_item_text = all_item_meta['text_features'].float().to(device)
     all_item_vision = all_item_meta['image_features'].float().to(device)
-    _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
+    quantized_feat, indices_list, raw_feat, _ = ahrq(all_item_text, all_item_vision)
 
     # 计算码本使用率
     n_e_list = hp_config.codebook_sizes
@@ -526,7 +465,9 @@ def train_single_config(
         "stage1_results": stage1_results,
         "codebook_usage": usage_rates,
         "semantic_id_quality": semantic_id_quality,
-        "cluster_analysis": cluster_results
+        "cluster_analysis": cluster_results,
+        "quantized_feat": quantized_feat.detach().cpu(),
+        "raw_feat": raw_feat.detach().cpu()
     }, stage1_save_path)
     print(f"Stage 1 model saved to: {stage1_save_path}")
 
@@ -538,25 +479,45 @@ def train_single_config(
     # 创建SASRecAHRQ模型
     num_items = all_item_meta['text_features'].shape[0]
 
-    # 计算动态SASRec参数（基于码本配置）
-    dynamic_sasrec_params = calculate_dynamic_sasrec_params(
-        codebook_sizes=hp_config.codebook_sizes,
-        base_hidden_dim=hp_config.hidden_dim
-    )
-
+    dynamic_sasrec_params = {
+        # 核心基线参数（对齐Pure SASRec）
+        "sasrec_num_layers": 2,  # 基线2层
+        "dim_feedforward": hp_config.hidden_dim * 4,  # 64*4=256（基线FFN）
+        "num_heads": 1,  # 基线1头（修改为1以对齐基线）
+        "dropout": hp_config.dropout,  # 从配置读取
+        "lr_scale": 1.0,  # 学习率不缩放
+        # 补充缺失的字段（避免KeyError）
+        "total_bits": sum([np.log2(cb) for cb in hp_config.codebook_sizes]),
+        "scale": 1.0,  # 基线scale=1.0
+    }
     # 打印动态参数配置
     print(f"\n>>> Dynamic SASRec Parameters (based on codebook {hp_config.codebook_sizes}):")
-    print(f"    Total bits: {dynamic_sasrec_params['total_bits']:.2f}, Scale: {dynamic_sasrec_params['scale']:.2f}")
-    print(f"    Transformer layers: {dynamic_sasrec_params['sasrec_num_layers']}, FFN dim: {dynamic_sasrec_params['dim_feedforward']}")
+    print(f"    FFN dim: {dynamic_sasrec_params['dim_feedforward']}")
     print(f"    Dropout: {dynamic_sasrec_params['dropout']:.3f}, Num heads: {dynamic_sasrec_params['num_heads']}")
     print(f"    Learning rate scale: {dynamic_sasrec_params['lr_scale']:.2f}")
+
+    # 准备连续特征 - 确保完全detach，避免梯度图保留导致backward错误
+    if hp_config.use_quantized_fusion:
+        quantized_feat_tensor = quantized_feat.detach().clone() if quantized_feat is not None else None
+    else:
+        quantized_feat_tensor = None
+
+    if hp_config.use_raw_fusion:
+        raw_feat_tensor = raw_feat.detach().clone() if raw_feat is not None else None
+    else:
+        raw_feat_tensor = None
 
     model = SASRecAHRQ(
         ahrq_model=ahrq,
         num_items=num_items,
         fusion_type=hp_config.fusion_type,
         fixed_alpha=hp_config.alpha,
-        dynamic_params=dynamic_sasrec_params
+        dynamic_params=dynamic_sasrec_params,
+        use_quantized_fusion=hp_config.use_quantized_fusion,
+        use_raw_fusion=hp_config.use_raw_fusion,
+        use_semantic_id=hp_config.use_semantic_id,
+        quantized_features=quantized_feat_tensor,
+        raw_features=raw_feat_tensor
     ).to(device)
 
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
@@ -599,8 +560,9 @@ def train_single_config(
         train_metrics = []
 
         with torch.no_grad():
-            all_item_feat = model.get_all_item_sem_feat(indices_list)
-            all_item_feat.requires_grad = False
+            # 使用完整特征（含连续特征融合）
+            all_item_feat = model.get_all_item_full_feat(indices_list)
+            all_item_feat = all_item_feat.detach()  # 显式分离梯度
 
         for batch in train_bar:
             user_emb, pos_sem_feat = model(batch)
@@ -832,77 +794,128 @@ def main():
 
     # 定义搜索配置 - 基于金字塔设计理念
     # 第一层小（捕获基础类别），后续层大（捕获变体）
+    # ========== 第一阶段: 对齐基线参数 ==========
+    # 先验证语义ID本身的效果，不使用连续特征融合
     search_configs = [
-        # 1. Baseline: 当前配置（对比基准）- 使用AHRQ-Full（所有创新点）
+        # 1. 对齐基线: hidden_dim=64, lr=1e-3, dropout=0.4
         HPSearchConfig(
-            experiment_name="ahrq_full_baseline",
+            experiment_name="align_baseline_d04",
             codebook_sizes=[256, 512, 512, 512],
-            hidden_dim=512,
-            use_ema=True,       # EMA更新+死码重置
-            use_hscl=True,      # 层次化语义一致性学习
-            use_emotion=True,   # 情感编码
-            hscl_weight=0.03,
-            stage1_epochs=20,
-            stage2_epochs=30,
-            lr=1e-4
-        ),
-        # 2. 第一层减小（AHRQ-Full模式）
-        HPSearchConfig(
-            experiment_name="ahrq_full_small_first",
-            codebook_sizes=[64, 512, 512, 512],
-            hidden_dim=512,
+            hidden_dim=64,
             use_ema=True,
             use_hscl=True,
             use_emotion=True,
             hscl_weight=0.03,
             stage1_epochs=20,
-            stage2_epochs=30,
-            lr=1e-4
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.4
         ),
-        # 3. 第一层小，后续层大（AHRQ-Full模式）
+
+        # 2. 2层结构（对齐基线层数）
         HPSearchConfig(
-            experiment_name="ahrq_full_small_first_large_rest",
-            codebook_sizes=[64, 1024, 1024, 1024],
-            hidden_dim=512,
+            experiment_name="align_baseline_2layer",
+            codebook_sizes=[256, 512],
+            hidden_dim=64,
+            use_ema=True,
+            use_hscl=False,
+            use_emotion=False,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.4
+        ),
+        # 3. 3层结构（修复：hidden_dim=69可被3整除）
+        HPSearchConfig(
+            experiment_name="align_baseline_3layer",
+            codebook_sizes=[256, 256, 512],
+            hidden_dim=69,  # 修复：原64%3=1会触发断言错误，改为69可被3整除
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=False,
+            hscl_weight=0.03,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.4
+        ),
+        HPSearchConfig(
+            experiment_name="dropout_035",
+            codebook_sizes=[256, 512, 512, 512],
+            hidden_dim=64,
             use_ema=True,
             use_hscl=True,
             use_emotion=True,
             hscl_weight=0.03,
             stage1_epochs=20,
-            stage2_epochs=30,
-            lr=1e-4
-        ),
-        # 4. 金字塔结构（AHRQ-Full模式）
-        HPSearchConfig(
-            experiment_name="ahrq_full_pyramid",
-            codebook_sizes=[64, 256, 512, 1024],
-            hidden_dim=512,
-            use_ema=True,
-            use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
-            stage1_epochs=20,
-            stage2_epochs=30,
-            lr=1e-4
-        ),
-        # 5. 小型金字塔（AHRQ-Full模式）
-        HPSearchConfig(
-            experiment_name="ahrq_full_small_pyramid",
-            codebook_sizes=[32, 128, 256, 512],
-            hidden_dim=512,
-            use_ema=True,
-            use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
-            stage1_epochs=20,
-            stage2_epochs=30,
-            lr=1e-4
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.35
         ),
     ]
 
+    # ========== 第三阶段: 连续特征融合实验 ==========
+    fusion_configs = [
+        # 9. 使用原始连续特征融合
+        HPSearchConfig(
+            experiment_name="raw_fusion",
+            codebook_sizes=[256, 512, 512, 512],
+            hidden_dim=64,
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=True,
+            hscl_weight=0.03,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.4,
+            use_raw_fusion=True,
+            use_quantized_fusion=False,
+            use_semantic_id=True
+        ),
+        # 10. 使用量化特征融合
+        HPSearchConfig(
+            experiment_name="quantized_fusion",
+            codebook_sizes=[256, 512, 512, 512],
+            hidden_dim=64,
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=True,
+            hscl_weight=0.03,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.4,
+            use_raw_fusion=False,
+            use_quantized_fusion=True,
+            use_semantic_id=True
+        ),
+        # 11. 同时使用原始和量化特征融合
+        HPSearchConfig(
+            experiment_name="both_fusion",
+            codebook_sizes=[256, 512, 512, 512],
+            hidden_dim=64,
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=True,
+            hscl_weight=0.03,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.4,
+            use_raw_fusion=True,
+            use_quantized_fusion=True,
+            use_semantic_id=True
+        ),
+    ]
+
+    # 合并所有配置
+    all_configs = search_configs + fusion_configs
+
     all_results = []
 
-    for hp_config in search_configs:
+    # 运行所有实验
+    for hp_config in all_configs:
         try:
             result = train_single_config(hp_config, device, logger)
             all_results.append(result)
