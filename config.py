@@ -199,7 +199,6 @@ class Config:
         # SASRecAHRQ 融合配置（新增）
         self.sasrec_ahrq_fusion = "add"  # 融合方式: "add" | "concat" | "attention"
         self.sasrec_ahrq_alpha = 0.5  # 融合权重: alpha * id_emb + (1-alpha) * quant_feat
-        self.sasrec_ahrq_num_items = 18425  # 物品数量（从数据集加载）
 
         self.visual_dim: int = 512  # 视觉特征维度 (CLIP ViT-B/32)
         self.text_dim: int = 512  # 文本特征维度 (CLIP ViT-B/32)

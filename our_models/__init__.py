@@ -29,16 +29,6 @@ Author: Graduate Student
 Date: 2026-01-21
 """
 
-from .pmat import (
-    PMAT,
-    UserModalAttention,
-    MultiModalEncoder,
-    PersonalizedFusion,
-    DynamicIDUpdater,
-    SemanticIDQuantizer,
-    get_pmat_ablation_model
-)
-
 from .mcrl import (
     MCRL,
     UserPreferenceContrastive,
@@ -48,14 +38,6 @@ from .mcrl import (
 
 
 __all__ = [
-    # PMAT components
-    'PMAT',
-    'UserModalAttention',
-    'MultiModalEncoder',
-    'PersonalizedFusion',
-    'DynamicIDUpdater',
-    'SemanticIDQuantizer',
-    'get_pmat_ablation_model',
 
     # MCRL components
     'MCRL',
@@ -63,9 +45,6 @@ __all__ = [
     'IntraModalContrastive',
     'InterModalContrastive',
 
-    # PMAT_SASRec components
-    'PMAT_SASRec',
-    'PMATItemEncoder',
 ]
 
 __version__ = '1.0.0'

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from config import new_config
 from our_models.ah_rq import AdaptiveHierarchicalQuantizer
 import torch.nn.functional as F

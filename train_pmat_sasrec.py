@@ -19,8 +19,7 @@ from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
 from log import Logger
 from our_models.ah_rq import AdaptiveHierarchicalQuantizer
 from our_models.pmat_sasrec import PMATSASRec
-from utils.loss import compute_rqvae_recon_loss
-from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
+from utils.utils import calculate_metrics, seed_everything
 import torch.nn.functional as F
 
 NUM_WORKS = 0
@@ -32,7 +31,6 @@ def evaluate_test_full(model, test_loader, indices_list, topk=10):
     total_hr = 0.0
     total_ndcg = 0.0
     total_users = 0
-    num_items = indices_list.shape[0]
 
     with torch.no_grad():
         all_item_feat = model.get_all_item_sem_feat(indices_list)
@@ -112,10 +110,31 @@ def train_pmat_sasrec():
     print("\nRecomputing all item semantics after Stage 1...")
     all_item_text = all_item_meta['text_features'].float().to(new_config.device)
     all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
-    _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
+    _, indices_list, raw_feat, _ = ahrq(all_item_text, all_item_vision)
+
+    # 构建dynamic_params以匹配hp_search最佳实验
+    dynamic_params = {
+        "num_heads": new_config.sasrec_num_heads,  # 1
+        "sasrec_num_layers": new_config.sasrec_num_layers,  # 2
+        "dropout": new_config.sasrec_dropout,  # 0.4
+        "dim_feedforward": new_config.sasrec_hidden_dim * 4,  # 256
+    }
+    # 使用raw_fusion (最佳实验配置)
+    raw_feat_tensor = raw_feat.detach().clone()
+
+    # 从semantic_hierarchy计算num_layers和layer_dim
+    num_layers = sum(len(config["layers"]) for config in semantic_hierarchy.values())
+    layer_dim = new_config.ahrq_hidden_dim // num_layers
 
     # 创建PMAT-SASRec模型
-    model = PMATSASRec(ahrq_model=ahrq).to(new_config.device)
+    model = PMATSASRec(
+        num_items=all_item_meta['num_items'].item(),
+        semantic_hierarchy=semantic_hierarchy,
+        num_layers=num_layers,
+        layer_dim=layer_dim,
+        fusion_type="add",
+        fixed_alpha=0.5,
+    ).to(new_config.device)
 
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
@@ -162,16 +181,23 @@ def train_pmat_sasrec():
                 all_item_feat.requires_grad = False  # 标记无梯度，节省显存
 
             for batch in train_bar:
-                user_emb, pos_sem_feat = model(batch)
+                user_emb, pos_sem_feat, pmat_out = model(batch)
 
-                # 计算全量物品得分（logits）
-                logits = torch.matmul(user_emb, all_item_feat.T)  # (B, num_items)
+                # 2) 推荐 CE 损失
+                logits = torch.matmul(user_emb, all_item_feat.T)
+                target_idx = batch["target_item"].to(new_config.device) - 1
+                ce_loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
 
-                # 修正target_idx偏移（1~num_items+1 → 0~num_items）
-                target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
+                # 3) PMAT 动态嵌入一致性损失
+                target_dynamic = pmat_out["target_emb"]
+                target_static = pmat_out["target_static_emb"]
+                pmat_mse_loss = F.mse_loss(target_dynamic, target_static)
 
-                # CE损失（ignore_index=-1 屏蔽原0值）
-                loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
+                # 4) 模态注意力约束
+                modal_weights = pmat_out["modal_weights"]
+                modal_loss = (modal_weights ** 2).mean()
+
+                loss = ce_loss + 0.01 * pmat_mse_loss + 0.001 * modal_loss
 
                 optimizer_rec.zero_grad()
                 loss.backward()
@@ -202,16 +228,26 @@ def train_pmat_sasrec():
             val_metrics = []
             with torch.no_grad():
                 for batch in val_loader:
-                    user_emb, pos_sem_feat = model(batch)
+                    user_emb, pos_sem_feat, pmat_out = model(batch)
 
-                    # 计算全量物品得分（logits）
-                    logits = torch.matmul(user_emb, all_item_feat.T)  # (B, num_items)
+                    # 2) 推荐 CE 损失
+                    logits = torch.matmul(user_emb, all_item_feat.T)
+                    target_idx = batch["target_item"].to(new_config.device) - 1
+                    ce_loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
 
-                    # 修正target_idx偏移（1~num_items+1 → 0~num_items）
-                    target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
+                    # 3) PMAT 动态嵌入一致性损失
+                    target_dynamic = pmat_out["target_emb"]
+                    target_static = pmat_out["target_static_emb"]
+                    pmat_mse_loss = F.mse_loss(target_dynamic, target_static)
 
-                    # CE损失（ignore_index=-1 屏蔽原0值）
-                    loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
+                    # 4) 模态注意力约束
+                    modal_weights = pmat_out["modal_weights"]
+                    modal_loss = (modal_weights ** 2).mean()
+
+                    # ========================
+                    # 最终总损失（完整版）
+                    # ========================
+                    loss = ce_loss + 0.01 * pmat_mse_loss + 0.001 * modal_loss
                     val_losses.append(loss.item())
                     all_scores = torch.matmul(user_emb, all_item_feat.T)
                     rec_metrics = calculate_metrics(all_scores, target_idx)

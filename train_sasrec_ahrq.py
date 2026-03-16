@@ -18,8 +18,7 @@ from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
 from log import Logger
 from our_models.ah_rq import AdaptiveHierarchicalQuantizer
 from our_models.sasrec_ahrq import SASRecAHRQ
-from utils.loss import compute_rqvae_recon_loss
-from utils.utils import calculate_metrics, calculate_id_metrics, seed_everything, EarlyStopping, fast_codebook_reset
+from utils.utils import calculate_metrics, seed_everything
 import torch.nn.functional as F
 
 NUM_WORKS = 0
@@ -130,7 +129,7 @@ def train_sasrec_ahrq():
     # 创建SASRecAHRQ模型，使用最佳实验配置
     model = SASRecAHRQ(
         ahrq_model=ahrq,
-        num_items=new_config.sasrec_ahrq_num_items,
+        num_items=all_item_meta['num_items'].item(),
         fusion_type="add",
         fixed_alpha=0.5,
         dynamic_params=dynamic_params,
