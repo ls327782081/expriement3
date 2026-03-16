@@ -45,6 +45,10 @@ class AblationExperimentConfig:
     use_ema: bool = False
     use_hscl: bool = False
     use_emotion: bool = False
+    # 最佳参数配置（来自超参数搜索）
+    dropout: float = 0.35
+    hidden_dim: int = 64
+    codebook_sizes: List[int] = None  # [256, 512, 512, 512]
 
 
 def evaluate_test_full(model, test_loader, indices_list, topk_list=[5, 10, 20]):
@@ -144,7 +148,12 @@ def train_single_experiment(
     _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
 
     # 3. 创建SASRecAHRQ模型和数据加载器
-    model = SASRecAHRQ(ahrq_model=ahrq).to(device)
+    # 使用最佳参数配置：hidden_dim=64, dropout=0.35
+    model = SASRecAHRQ(
+        ahrq_model=ahrq,
+        hidden_dim=exp_config.hidden_dim,
+        dynamic_params={"dropout": exp_config.dropout}
+    ).to(device)
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category='Video_Games',
@@ -302,6 +311,9 @@ def train_single_experiment(
             "use_ema": exp_config.use_ema,
             "use_hscl": exp_config.use_hscl,
             "use_emotion": exp_config.use_emotion,
+            "dropout": exp_config.dropout,
+            "hidden_dim": exp_config.hidden_dim,
+            "codebook_sizes": exp_config.codebook_sizes,
         },
         "stage1_metrics": {
             "best_val_recon_loss": best_recon_loss
@@ -339,6 +351,9 @@ def save_ablation_summary(all_results: List[Dict], output_dir: str = "./results/
             "Use EMA": result['config']['use_ema'],
             "Use HSCL": result['config']['use_hscl'],
             "Use Emotion": result['config']['use_emotion'],
+            "Dropout": result['config']['dropout'],
+            "Hidden Dim": result['config']['hidden_dim'],
+            "Codebook Sizes": str(result['config']['codebook_sizes']),
             # Stage 1 指标
             "Stage1 Recon Loss": result['stage1_metrics']['best_val_recon_loss'],
             # Stage 2 最佳验证指标
@@ -398,42 +413,57 @@ def main():
     logger = Logger("./logs/train_sasrec_ahrq_ablation.log")
     device = new_config.device
 
-    # 定义实验配置（与Stage 1对应）
+    # 定义实验配置（与Stage 1对应）- 使用最佳参数: dropout=0.35, hidden_dim=64
     experiments = [
         AblationExperimentConfig(
             experiment_name="Baseline-RQ",
             ahrq_model_name="baseline_rq",
             use_ema=False,
             use_hscl=False,
-            use_emotion=False
+            use_emotion=False,
+            dropout=0.35,
+            hidden_dim=64,
+            codebook_sizes=[512, 512, 512, 512, 512, 512, 512, 512]  # 8层等码本
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-HierCodebook",
             ahrq_model_name="ahrq_hiercodebook",
             use_ema=False,
             use_hscl=False,
-            use_emotion=False
+            use_emotion=False,
+            dropout=0.35,
+            hidden_dim=64,
+            codebook_sizes=[256, 512, 512, 512]  # 4层自适应码本
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-EMA",
             ahrq_model_name="ahrq_ema",
             use_ema=True,
             use_hscl=False,
-            use_emotion=False
+            use_emotion=False,
+            dropout=0.35,
+            hidden_dim=64,
+            codebook_sizes=[256, 512, 512, 512]
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-HSCL",
             ahrq_model_name="ahrq_hscl",
             use_ema=True,
             use_hscl=True,
-            use_emotion=False
+            use_emotion=False,
+            dropout=0.35,
+            hidden_dim=64,
+            codebook_sizes=[256, 512, 512, 512]
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-Full",
             ahrq_model_name="ahrq_full",
             use_ema=True,
             use_hscl=True,
-            use_emotion=True
+            use_emotion=True,
+            dropout=0.35,
+            hidden_dim=64,
+            codebook_sizes=[256, 512, 512, 512]
         ),
     ]
 
