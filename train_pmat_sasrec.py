@@ -101,7 +101,7 @@ def train_pmat_sasrec():
         category='Video_Games',
         batch_size=new_config.batch_size,
         shuffle=True,
-        quick_mode=True,
+        quick_mode=False,
         num_workers=NUM_WORKS,
         logger=logger
     )
@@ -143,7 +143,7 @@ def train_pmat_sasrec():
         max_history_len=new_config.sasrec_max_len,
         num_negative_samples=new_config.num_negative_samples,
         shuffle=True,
-        quick_mode=True,
+        quick_mode=False,
         num_workers=NUM_WORKS,
         indices_list=indices_list,
         logger=logger
