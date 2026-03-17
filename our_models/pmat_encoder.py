@@ -72,8 +72,8 @@ class DynamicIDUpdater(nn.Module):
     def update(self, current_id_emb, new_features, drift_score):
         if current_id_emb.dim() == 3:
             batch_size, num_items, dim = current_id_emb.shape
-            current_flat = current_id_emb.view(-1, dim)
-            new_flat = new_features.view(-1, dim)
+            current_flat = current_id_emb.reshape(-1, dim)
+            new_flat = new_features.reshape(-1, dim)
             combined = torch.cat([current_flat, new_flat], dim=-1)
             gate = self.update_gate(combined)
             drift_expanded = drift_score.unsqueeze(1).expand(-1, num_items).reshape(-1)
@@ -157,6 +157,7 @@ class PMATAHRQEncoder(nn.Module):
                 self.semantic_emb[f"{sem_type}_{layer}"] = nn.Embedding(cb_size, layer_dim)
 
         # 核心模块
+        self.max_len = new_config.sasrec_max_len
         self.user_interest_encoder = UserInterestEncoder(
             hidden_dim=self.hidden_dim,
             max_len=new_config.sasrec_max_len,
@@ -199,9 +200,17 @@ class PMATAHRQEncoder(nn.Module):
     def encode_history(self, batch):
         """编码历史序列 → 动态嵌入"""
         # 1. 语义ID → 静态嵌入
-        hist_indices = batch["history_indices"]  # (B, max_len, num_layers) - 使用预计算的语义ID
+        hist_indices = batch["history_indices"]  # (B, actual_len, num_layers) - 使用预计算的语义ID
         indices_list = [hist_indices[:, :, i] for i in range(self.num_layers)]
-        hist_static_emb = self.semantic_id_to_emb(indices_list)  # (B, max_len, hidden_dim)
+        hist_static_emb = self.semantic_id_to_emb(indices_list)  # (B, actual_len, hidden_dim)
+
+        # Pad历史序列到max_len
+        batch_size = hist_static_emb.shape[0]
+        if hist_static_emb.shape[1] < self.max_len:
+            pad_len = self.max_len - hist_static_emb.shape[1]
+            padding = torch.zeros(batch_size, pad_len, hist_static_emb.shape[2],
+                                 device=hist_static_emb.device, dtype=hist_static_emb.dtype)
+            hist_static_emb = torch.cat([hist_static_emb, padding], dim=1)
 
         # 2. 编码用户兴趣
         history_len = batch["history_len"]

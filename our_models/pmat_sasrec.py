@@ -153,3 +153,15 @@ class PMATSASRec(nn.Module):
         with torch.no_grad():
             logits, _, _ = self.forward(batch)
         return logits
+
+    def get_all_item_sem_feat(self, indices_list):
+        """
+        全量物品语义ID转特征
+        Args:
+            indices_list: (num_items, num_layers) 全量物品的多层次语义ID
+        Returns:
+            all_item_feat: (num_items, hidden_dim) 全量物品的语义特征
+        """
+        device = next(self.parameters()).device
+        all_item_feat = self.pmat.encode_all_items(indices_list, device)
+        return all_item_feat

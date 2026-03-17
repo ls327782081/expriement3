@@ -35,7 +35,7 @@ def evaluate_test_full(model, test_loader, indices_list, topk=10):
     with torch.no_grad():
         all_item_feat = model.get_all_item_sem_feat(indices_list)
         for batch in tqdm(test_loader, desc=f'Full Ranking Evaluation on Test Set'):
-            user_emb, _ = model(batch)
+            user_emb, _, _ = model(batch)
 
             # 修正target_idx偏移（1~num_items+1 → 0~num_items）
             target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
@@ -128,7 +128,7 @@ def train_pmat_sasrec():
 
     # 创建PMAT-SASRec模型
     model = PMATSASRec(
-        num_items=all_item_meta['num_items'].item(),
+        num_items=all_item_meta['num_items'],
         semantic_hierarchy=semantic_hierarchy,
         num_layers=num_layers,
         layer_dim=layer_dim,
