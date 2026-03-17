@@ -7,7 +7,6 @@ from tqdm import tqdm
 
 from config import new_config
 
-
 # 命令行参数解析
 parser = argparse.ArgumentParser(description='Train PMAT-SASRec with AHRQ')
 parser.add_argument('--ahrq_model', type=str, default='ahrq_full',
@@ -25,22 +24,35 @@ import torch.nn.functional as F
 NUM_WORKS = 0
 
 
-def evaluate_test_full(model, test_loader, indices_list, topk=10):
-    """测试集全量排序评估"""
+def evaluate_test_full(model, test_loader, indices_list, all_item_meta, topk=10):
+    """测试集全量排序评估（核心修改：用动态+模态融合特征）"""
     model.eval()
     total_hr = 0.0
     total_ndcg = 0.0
     total_users = 0
 
     with torch.no_grad():
-        all_item_feat = model.get_all_item_sem_feat(indices_list)
+        # 1. 预加载全量物品的文本/视觉特征（用于模态加权）
+        all_item_text = all_item_meta['text_features'].float().to(new_config.device)
+        all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
+        # 2. 获取全量物品的动态+模态融合特征（替代原来的纯静态特征）
+        all_item_feat = model.get_all_item_sem_feat(
+            indices_list=indices_list,
+            all_item_text=all_item_text,
+            all_item_vision=all_item_vision
+        )
+
         for batch in tqdm(test_loader, desc=f'Full Ranking Evaluation on Test Set'):
-            user_emb, _, _ = model(batch)
+            user_emb, _, pmat_out = model(batch)
 
             # 修正target_idx偏移（1~num_items+1 → 0~num_items）
             target_idx = batch["target_item"].to(new_config.device) - 1  # 关键：减1偏移
 
-            all_scores = torch.matmul(user_emb, all_item_feat.T)
+            # 直接使用预计算好的 all_item_feat（已经是动态+模态融合特征）
+            batch_final_feat = all_item_feat
+
+            # 用个性化动态特征计算得分
+            all_scores = torch.matmul(user_emb, batch_final_feat.T)
             rec_metrics = calculate_metrics(all_scores, target_idx)
 
             total_hr += rec_metrics[f'HR@{topk}']
@@ -101,7 +113,7 @@ def train_pmat_sasrec():
         category='Video_Games',
         batch_size=new_config.batch_size,
         shuffle=True,
-        quick_mode=False,
+        quick_mode=True,
         num_workers=NUM_WORKS,
         logger=logger
     )
@@ -143,7 +155,7 @@ def train_pmat_sasrec():
         max_history_len=new_config.sasrec_max_len,
         num_negative_samples=new_config.num_negative_samples,
         shuffle=True,
-        quick_mode=False,
+        quick_mode=True,
         num_workers=NUM_WORKS,
         indices_list=indices_list,
         logger=logger
@@ -177,27 +189,42 @@ def train_pmat_sasrec():
             train_metrics = []
 
             with torch.no_grad():
-                all_item_feat = model.get_all_item_sem_feat(indices_list)
+                # 核心修改1：预加载全量物品的动态+模态融合特征
+                all_item_text = all_item_meta['text_features'].float().to(new_config.device)
+                all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
+                all_item_feat = model.get_all_item_sem_feat(
+                    indices_list=indices_list,
+                    all_item_text=all_item_text,
+                    all_item_vision=all_item_vision
+                )
                 all_item_feat.requires_grad = False  # 标记无梯度，节省显存
 
             for batch in train_bar:
                 user_emb, pos_sem_feat, pmat_out = model(batch)
 
-                # 2) 推荐 CE 损失
-                logits = torch.matmul(user_emb, all_item_feat.T)
+                # 直接使用预计算好的 all_item_feat（已经是动态+模态融合特征）
+                # all_item_feat 通过 model.get_all_item_sem_feat() 在 epoch 开始时已经计算好
+                # 使用默认权重 [0.4, 0.6] 对全量物品进行模态加权
+                batch_final_feat = all_item_feat
+
+                # 核心修改3：用个性化动态特征计算logits
+                logits = torch.matmul(user_emb, batch_final_feat.T)
                 target_idx = batch["target_item"].to(new_config.device) - 1
                 ce_loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
 
-                # 3) PMAT 动态嵌入一致性损失
+                # 核心修改4：优化模态损失（用熵损失替代平方损失，让权重更均衡）
                 target_dynamic = pmat_out["target_emb"]
                 target_static = pmat_out["target_static_emb"]
                 pmat_mse_loss = F.mse_loss(target_dynamic, target_static)
 
-                # 4) 模态注意力约束
+                # 从pmat_out获取模态权重用于模态熵损失
                 modal_weights = pmat_out["modal_weights"]
-                modal_loss = (modal_weights ** 2).mean()
+                # 模态熵损失：鼓励权重分散（避免全集中在一个模态）
+                modal_entropy = -torch.sum(modal_weights * torch.log(modal_weights + 1e-8), dim=-1).mean()
+                modal_loss = 1 - modal_entropy  # 熵越小，损失越大 → 鼓励权重均衡
 
-                loss = ce_loss + 0.0001 * pmat_mse_loss + 0.1 * modal_loss
+                # 调整损失权重（让模态损失更有效）
+                loss = ce_loss + 0.001 * pmat_mse_loss + 0.5 * modal_loss
 
                 optimizer_rec.zero_grad()
                 loss.backward()
@@ -206,8 +233,8 @@ def train_pmat_sasrec():
 
                 train_losses.append(loss.item())
                 with torch.no_grad():
-                    # 计算全量物品打分（复用预计算的all_item_feat）
-                    all_scores = torch.matmul(user_emb, all_item_feat.T)
+                    # 计算全量物品打分（复用个性化动态特征）
+                    all_scores = torch.matmul(user_emb, batch_final_feat.T)
                     rec_metrics = calculate_metrics(all_scores, target_idx)
                     batch_metrics = {**rec_metrics}
                     train_metrics.append(batch_metrics)
@@ -227,29 +254,38 @@ def train_pmat_sasrec():
             val_losses = []
             val_metrics = []
             with torch.no_grad():
+                # 验证阶段同样使用个性化动态特征
+                all_item_text = all_item_meta['text_features'].float().to(new_config.device)
+                all_item_vision = all_item_meta['image_features'].float().to(new_config.device)
+                all_item_feat = model.get_all_item_sem_feat(
+                    indices_list=indices_list,
+                    all_item_text=all_item_text,
+                    all_item_vision=all_item_vision
+                )
+
                 for batch in val_loader:
                     user_emb, pos_sem_feat, pmat_out = model(batch)
 
-                    # 2) 推荐 CE 损失
-                    logits = torch.matmul(user_emb, all_item_feat.T)
+                    # 直接使用预计算好的 all_item_feat
+                    batch_final_feat = all_item_feat
+
+                    # 计算损失
+                    logits = torch.matmul(user_emb, batch_final_feat.T)
                     target_idx = batch["target_item"].to(new_config.device) - 1
                     ce_loss = F.cross_entropy(logits, target_idx, ignore_index=-1)
 
-                    # 3) PMAT 动态嵌入一致性损失
                     target_dynamic = pmat_out["target_emb"]
                     target_static = pmat_out["target_static_emb"]
                     pmat_mse_loss = F.mse_loss(target_dynamic, target_static)
 
-                    # 4) 模态注意力约束
                     modal_weights = pmat_out["modal_weights"]
-                    modal_loss = (modal_weights ** 2).mean()
+                    modal_entropy = -torch.sum(modal_weights * torch.log(modal_weights + 1e-8), dim=-1).mean()
+                    modal_loss = 1 - modal_entropy
 
-                    # ========================
-                    # 最终总损失（完整版）
-                    # ========================
-                    loss = ce_loss + 0.01 * pmat_mse_loss + 0.001 * modal_loss
+                    loss = ce_loss + 0.001 * pmat_mse_loss + 0.5 * modal_loss
                     val_losses.append(loss.item())
-                    all_scores = torch.matmul(user_emb, all_item_feat.T)
+
+                    all_scores = torch.matmul(user_emb, batch_final_feat.T)
                     rec_metrics = calculate_metrics(all_scores, target_idx)
                     val_metrics.append({**rec_metrics})
 
@@ -282,10 +318,12 @@ def train_pmat_sasrec():
 
         torch.save({"model_state_dict": model.state_dict()}, f"{OUTPUT_DIR}/final_pmat_sasrec.pth")
 
+    # 核心修改5：传入all_item_meta，用于测试阶段的模态加权
     test_hr_full, test_ndcg_full = evaluate_test_full(
         model=model,
         test_loader=test_loader,
         indices_list=indices_list,
+        all_item_meta=all_item_meta,
         topk=10,
     )
 

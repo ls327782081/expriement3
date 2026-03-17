@@ -171,6 +171,10 @@ class PMATAHRQEncoder(nn.Module):
         )
         self.dynamic_updater = DynamicIDUpdater(hidden_dim=self.hidden_dim)
 
+        self.text_proj = nn.Linear(new_config.text_dim, int(self.hidden_dim * 0.4))
+        self.vision_proj = nn.Linear(new_config.visual_dim, self.hidden_dim - int(self.hidden_dim * 0.4))
+        self.modal_proj = nn.Linear(int(self.hidden_dim * 0.4) + (self.hidden_dim - int(self.hidden_dim * 0.4)),
+                                    self.hidden_dim)
         # 权重初始化
         self.apply(self._init_weights)
 
@@ -257,29 +261,101 @@ class PMATAHRQEncoder(nn.Module):
         return all_static_emb
 
     def forward(self, batch):
-        # 历史动态嵌入
+        # 1. 基础编码：历史/目标的静态+动态嵌入（保留原有逻辑）
         hist_dynamic_emb = self.encode_history(batch)
-        # 目标动态嵌入
         target_dynamic_emb = self.encode_target(batch)
+
         # 历史静态嵌入
         hist_indices = batch["history_indices"]
         indices_list = [hist_indices[:, :, i] for i in range(self.num_layers)]
         hist_static_emb = self.semantic_id_to_emb(indices_list)
+
         # 目标静态嵌入
         target_indices = batch["target_indices"]
         tgt_list = [target_indices[:, i].unsqueeze(1) for i in range(self.num_layers)]
         target_static_emb = self.semantic_id_to_emb(tgt_list).squeeze(1)
 
-        # 用户兴趣 & 模态权重
+        # 2. 编码用户兴趣 + 计算模态权重（保留原有逻辑）
         history_len = batch["history_len"]
         user_interest = self.user_interest_encoder(hist_dynamic_emb, history_len)
-        modal_weights = self.modal_attention(user_interest)
+        modal_weights = self.modal_attention(user_interest)  # (B, 2) 文本/视觉权重
 
+        # ===================== 核心修复：dtype + 维度双对齐 =====================
+        # 定义目标 dtype（和模型权重一致）
+        target_dtype = self.text_proj.weight.dtype
+        # 定义模态维度（文本40%，视觉60%）
+        text_dim = int(self.hidden_dim * 0.4)
+
+        # 3. 历史序列的模态特征处理（拼接+投影方案，彻底解决维度不匹配）
+        # 取出原始特征 + dtype 对齐
+        history_text_feat = batch["history_text_feat"].to(hist_dynamic_emb.device,
+                                                          dtype=target_dtype)  # (B, max_len, text_raw_dim)
+        history_vision_feat = batch["history_vision_feat"].to(hist_dynamic_emb.device,
+                                                              dtype=target_dtype)  # (B, max_len, vision_raw_dim)
+
+        # 第一步：降维到各自的目标维度
+        history_text_feat = self.text_proj(history_text_feat)  # (B, max_len, text_dim) → 25
+        history_vision_feat = self.vision_proj(history_vision_feat)  # (B, max_len, vision_dim) → 39
+
+        # 第二步：扩展模态权重维度（适配序列维度）
+        text_weight = modal_weights[:, 0:1].unsqueeze(1)  # (B, 1, 1)
+        vision_weight = modal_weights[:, 1:2].unsqueeze(1)  # (B, 1, 1)
+
+        # 第三步：加权后拼接 → 投影到 hidden_dim（核心修复！）
+        # 加权各自特征
+        weighted_text = text_weight * history_text_feat  # (B, max_len, 25)
+        weighted_vision = vision_weight * history_vision_feat  # (B, max_len, 39)
+        # 拼接（25+39=64）
+        weighted_concat = torch.cat([weighted_text, weighted_vision], dim=-1)  # (B, max_len, 64)
+        # 投影到 hidden_dim（确保维度完全匹配）
+        hist_modal_emb = self.modal_proj(weighted_concat)  # (B, actual_len, hidden_dim)
+
+        # 如果模态嵌入序列长度小于max_len，则Pad到max_len
+        if hist_modal_emb.shape[1] < self.max_len:
+            pad_len = self.max_len - hist_modal_emb.shape[1]
+            padding = torch.zeros(hist_modal_emb.shape[0], pad_len, self.hidden_dim,
+                                  device=hist_modal_emb.device, dtype=hist_modal_emb.dtype)
+            hist_modal_emb = torch.cat([hist_modal_emb, padding], dim=1)
+
+        # 4. 目标物品的模态特征处理（复用同一套逻辑）
+        if "target_text_feat" in batch and "target_vision_feat" in batch:
+            # 有独立目标特征时 + dtype 对齐
+            target_text_feat = batch["target_text_feat"].to(target_dynamic_emb.device,
+                                                            dtype=target_dtype)  # (B, text_raw_dim)
+            target_vision_feat = batch["target_vision_feat"].to(target_dynamic_emb.device,
+                                                                dtype=target_dtype)  # (B, vision_raw_dim)
+
+            # 降维
+            target_text_feat = self.text_proj(target_text_feat)  # (B, text_dim) →25
+            target_vision_feat = self.vision_proj(target_vision_feat)  # (B, vision_dim) →39
+        else:
+            # 备用方案：从静态嵌入拆分
+            target_text_feat = target_static_emb[:, :text_dim]
+            target_vision_feat = target_static_emb[:, text_dim:]
+
+        # 目标物品：加权+拼接+投影
+        weighted_target_text = modal_weights[:, 0:1] * target_text_feat  # (B, 25)
+        weighted_target_vision = modal_weights[:, 1:2] * target_vision_feat  # (B, 39)
+        weighted_target_concat = torch.cat([weighted_target_text, weighted_target_vision], dim=-1)  # (B, 64)
+        target_modal_emb = self.modal_proj(weighted_target_concat)  # (B, hidden_dim)
+
+        # 5. 动态嵌入 + 模态加权融合（最终的个性化嵌入）
+        hist_final_emb = 0.7 * hist_dynamic_emb + 0.3 * hist_modal_emb  # 维度完全匹配
+        target_final_emb = 0.7 * target_dynamic_emb + 0.3 * target_modal_emb  # 维度完全匹配
+
+        # ===================== 返回值：包含所有核心输出 =====================
         return {
+            # 原有返回值
             "history_emb": hist_dynamic_emb,
             "target_emb": target_dynamic_emb,
             "history_static_emb": hist_static_emb,
             "target_static_emb": target_static_emb,
             "user_interest": user_interest,
-            "modal_weights": modal_weights
+            "modal_weights": modal_weights,
+
+            # 新增返回值
+            "hist_modal_emb": hist_modal_emb,
+            "target_modal_emb": target_modal_emb,
+            "hist_final_emb": hist_final_emb,
+            "target_final_emb": target_final_emb
         }
