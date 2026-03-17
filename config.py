@@ -207,7 +207,7 @@ class Config:
         self.pmat_hidden_dim = 256
         self.pmat_num_modalities = 2  # 文本+视觉
 
-        self.pmat_drift_threshold = 0.3
+        self.pmat_drift_threshold = 0.7
         self.pmat_rec_loss_weight = 1.0
         self.pmat_semantic_loss_weight = 0.1
         self.pmat_consistency_weight = 0.5

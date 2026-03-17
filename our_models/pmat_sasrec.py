@@ -96,6 +96,7 @@ class PMATSASRec(nn.Module):
             return fused[..., :self.hidden_dim]
         return dyn_emb
 
+    # 修改 pmat_sasrec.py 的 get_user_embedding 函数
     def get_user_embedding(self, batch):
         """
         输入：batch 包含 history_indices（预计算语义ID）
@@ -106,22 +107,33 @@ class PMATSASRec(nn.Module):
         # ========== 1) PMAT 编码历史序列 ==========
         history_dyn_emb = self.pmat.encode_history(batch)
         history_dyn_emb = self.dropout_layer(history_dyn_emb)
+        B, max_L, D = history_dyn_emb.shape  # max_L 是Pad后的长度（比如50）
 
-        # ========== 2) 可选融合 ID ==========
+        # ========== 2) 可选融合 ID（修复维度不匹配） ==========
         if self.use_fusion and "history_items" in batch:
-            hist_ids = batch["history_items"].to(device)
-            hist_id_emb = self.item_embedding(hist_ids)
-            history_dyn_emb = self.fuse(hist_id_emb, history_dyn_emb)
+            hist_ids = batch["history_items"].to(device)  # (B, actual_L)
+            actual_L = hist_ids.shape[1]
+
+            # 给hist_ids Pad到max_L（和history_dyn_emb对齐）
+            if actual_L < max_L:
+                pad_len = max_L - actual_L
+                # Pad用0（padding ID）
+                hist_ids = torch.cat([
+                    hist_ids,
+                    torch.zeros(B, pad_len, device=device, dtype=hist_ids.dtype)
+                ], dim=1)
+
+            hist_id_emb = self.item_embedding(hist_ids)  # (B, max_L, D)
+            history_dyn_emb = self.fuse(hist_id_emb, history_dyn_emb)  # 维度匹配
 
         # ========== 3) SASRec 位置编码 + Transformer ==========
-        B, L, D = history_dyn_emb.shape
-        pos = torch.arange(L, device=device).unsqueeze(0).expand(B, -1)
+        pos = torch.arange(max_L, device=device).unsqueeze(0).expand(B, -1)
         history_dyn_emb = history_dyn_emb + self.position_embedding(pos)
 
         # 掩码
         history_len = batch["history_len"].to(device)
-        padding_mask = torch.arange(L, device=device).unsqueeze(0) >= history_len.unsqueeze(1)
-        causal_mask = torch.tril(torch.ones(L, L, device=device)).bool()
+        padding_mask = torch.arange(max_L, device=device).unsqueeze(0) >= history_len.unsqueeze(1)
+        causal_mask = torch.tril(torch.ones(max_L, max_L, device=device)).bool()
         causal_mask = torch.zeros_like(causal_mask, dtype=torch.float32).masked_fill(~causal_mask, -1e9)
 
         enc = self.transformer(
@@ -138,7 +150,7 @@ class PMATSASRec(nn.Module):
 
     def forward(self, batch):
         pmat_out = self.pmat(batch)
-        user_emb = pmat_out["user_interest"]
+        user_emb = self.get_user_embedding(batch)  # 关键：用SASRec的用户表征
         pos_sem_feat = pmat_out["target_emb"]
 
         if self.use_fusion and "target_item" in batch:

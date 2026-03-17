@@ -12,7 +12,7 @@ class UserModalAttention(nn.Module):
             nn.Linear(user_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(0.35),
             nn.Linear(hidden_dim, num_modalities)
         )
         self.temperature = nn.Parameter(torch.ones(1))
@@ -102,7 +102,7 @@ class UserInterestEncoder(nn.Module):
             d_model=hidden_dim,
             nhead=num_heads,
             dim_feedforward=hidden_dim * 4,
-            dropout=0.1,
+            dropout=0.35,
             activation="gelu",
             batch_first=True
         )
@@ -200,27 +200,34 @@ class PMATAHRQEncoder(nn.Module):
     def encode_history(self, batch):
         """编码历史序列 → 动态嵌入"""
         # 1. 语义ID → 静态嵌入
-        hist_indices = batch["history_indices"]  # (B, actual_len, num_layers) - 使用预计算的语义ID
+        hist_indices = batch["history_indices"]  # (B, actual_len, num_layers)
         indices_list = [hist_indices[:, :, i] for i in range(self.num_layers)]
         hist_static_emb = self.semantic_id_to_emb(indices_list)  # (B, actual_len, hidden_dim)
+        batch_size, actual_len, dim = hist_static_emb.shape
 
-        # Pad历史序列到max_len
-        batch_size = hist_static_emb.shape[0]
-        if hist_static_emb.shape[1] < self.max_len:
-            pad_len = self.max_len - hist_static_emb.shape[1]
-            padding = torch.zeros(batch_size, pad_len, hist_static_emb.shape[2],
-                                 device=hist_static_emb.device, dtype=hist_static_emb.dtype)
-            hist_static_emb = torch.cat([hist_static_emb, padding], dim=1)
-
-        # 2. 编码用户兴趣
+        # 2. 编码用户兴趣（先不Pad，用实际长度）
         history_len = batch["history_len"]
-        user_interest = self.user_interest_encoder(hist_static_emb, history_len)
+        # 临时构建一个和actual_len匹配的UserInterestEncoder（避免Pad）
+        temp_encoder = UserInterestEncoder(
+            hidden_dim=self.hidden_dim,
+            max_len=actual_len,  # 用实际长度，不是max_len
+            num_heads=new_config.sasrec_num_heads,
+            num_layers=new_config.sasrec_num_layers
+        ).to(hist_static_emb.device)
+        user_interest = temp_encoder(hist_static_emb, history_len)
 
-        # 3. 动态更新
-        short_hist_emb = hist_static_emb[:, -10:, :] if hist_static_emb.shape[1] >= 10 else hist_static_emb
+        # 3. 动态更新（只更新有效长度，不包含Pad）
+        short_hist_emb = hist_static_emb[:, -10:, :] if actual_len >= 10 else hist_static_emb
         drift_score = self.dynamic_updater.detect_drift(short_hist_emb, hist_static_emb)
-        new_features = user_interest.unsqueeze(1).expand(-1, hist_static_emb.shape[1], -1)
+        new_features = user_interest.unsqueeze(1).expand(-1, actual_len, -1)
         hist_dynamic_emb = self.dynamic_updater.update(hist_static_emb, new_features, drift_score)
+
+        # 4. 最后Pad到max_len（只在最后Pad，避免污染前面的计算）
+        if actual_len < self.max_len:
+            pad_len = self.max_len - actual_len
+            padding = torch.zeros(batch_size, pad_len, dim,
+                                  device=hist_dynamic_emb.device, dtype=hist_dynamic_emb.dtype)
+            hist_dynamic_emb = torch.cat([hist_dynamic_emb, padding], dim=1)
 
         return hist_dynamic_emb
 

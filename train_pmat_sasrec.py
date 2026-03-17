@@ -197,7 +197,7 @@ def train_pmat_sasrec():
                 modal_weights = pmat_out["modal_weights"]
                 modal_loss = (modal_weights ** 2).mean()
 
-                loss = ce_loss + 0.01 * pmat_mse_loss + 0.001 * modal_loss
+                loss = ce_loss + 0.0001 * pmat_mse_loss + 0.1 * modal_loss
 
                 optimizer_rec.zero_grad()
                 loss.backward()
