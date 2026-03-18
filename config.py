@@ -212,6 +212,11 @@ class Config:
         self.pmat_semantic_loss_weight = 0.1
         self.pmat_consistency_weight = 0.5
 
+        # 参数搜索实验用参数（不修改原有默认值）
+        self.lambda_dynamic = 0.001    # 动态一致性损失权重（MSE）
+        self.lambda_modal = 0.5        # 模态熵损失权重
+        self.fusion_alpha = 0.7        # 动态/模态融合权重（默认0.7，与原hardcode一致）
+
         # 数据集配置（替换为你的路径）
         self.data_path = "./data/"
         self.train_path = self.data_path + "train.csv"

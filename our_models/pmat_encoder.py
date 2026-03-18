@@ -148,6 +148,7 @@ class PMATAHRQEncoder(nn.Module):
         self.num_layers = num_layers
         self.layer_dim = layer_dim
         self.hidden_dim = num_layers * layer_dim
+        self.fusion_alpha = getattr(new_config, 'fusion_alpha', 0.7)  # 动态/模态融合权重
 
         # 语义ID → 静态嵌入
         self.semantic_emb = nn.ModuleDict()
@@ -340,8 +341,9 @@ class PMATAHRQEncoder(nn.Module):
         target_modal_emb = self.modal_proj(weighted_target_concat)  # (B, hidden_dim)
 
         # 5. 动态嵌入 + 模态加权融合（最终的个性化嵌入）
-        hist_final_emb = 0.7 * hist_dynamic_emb + 0.3 * hist_modal_emb  # 维度完全匹配
-        target_final_emb = 0.7 * target_dynamic_emb + 0.3 * target_modal_emb  # 维度完全匹配
+        # fusion_alpha: 动态嵌入权重, (1-fusion_alpha): 模态嵌入权重
+        hist_final_emb = self.fusion_alpha * hist_dynamic_emb + (1 - self.fusion_alpha) * hist_modal_emb
+        target_final_emb = self.fusion_alpha * target_dynamic_emb + (1 - self.fusion_alpha) * target_modal_emb
 
         # ===================== 返回值：包含所有核心输出 =====================
         return {
