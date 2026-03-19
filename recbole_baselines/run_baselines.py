@@ -23,6 +23,7 @@ import argparse
 import json
 import logging
 from datetime import datetime
+from recbole.quick_start import run_recbole
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -51,12 +52,6 @@ def run_recbole_model(model_name: str, dataset: str, config_dir: str, dataset_di
     Returns:
         dict: 评估结果
     """
-    try:
-        from recbole.quick_start import run_recbole
-    except ImportError:
-        logger.error("RecBole not installed. Please install with: pip install recbole")
-        logger.error("Or: pip install recbole==1.2.0")
-        return None
     
     logger.info(f"Running {model_name} on {dataset}...")
     
