@@ -255,11 +255,45 @@ class PMATAHRQEncoder(nn.Module):
 
         return target_dynamic_emb
 
-    def encode_all_items(self, indices_list, device):
-        """编码全量物品 → 静态嵌入（推理用）"""
+    def encode_all_items(self, indices_list, user_interest=None, drift_score=None, device=None):
+        """编码全量物品 → 支持动态嵌入（推理用）
+
+        Args:
+            indices_list: (num_items, num_layers) 全量物品的多层次语义ID
+            user_interest: 用户兴趣向量，用于动态更新（可选）
+            drift_score: 兴趣漂移分数（可选）
+            device: 设备
+        """
         indices_list = [indices_list[:, i].unsqueeze(1) for i in range(self.num_layers)]
-        all_static_emb = self.semantic_id_to_emb(indices_list).squeeze(1).to(device)
-        return all_static_emb
+        all_static_emb = self.semantic_id_to_emb(indices_list).squeeze(1)
+
+        # 如果有用户兴趣信息，进行动态更新
+        if user_interest is not None and drift_score is not None:
+            num_items = all_static_emb.shape[0]
+
+            # 扩展用户兴趣到所有物品
+            if user_interest.dim() == 2:
+                user_interest_expanded = user_interest.unsqueeze(0).expand(num_items, -1, -1).squeeze(1)
+            elif user_interest.dim() == 1:
+                # Fix: Properly expand 1D tensor to 2D
+                user_interest_expanded = user_interest.unsqueeze(0).expand(num_items, -1)
+            else:
+                user_interest_expanded = user_interest
+
+            # 扩展漂移分数
+            if drift_score.dim() == 1:
+                drift_score_expanded = drift_score.unsqueeze(0).expand(num_items)
+            else:
+                drift_score_expanded = drift_score
+
+            # 调用 DynamicIDUpdater 进行批量更新
+            all_dynamic_emb = self.dynamic_updater.update(
+                all_static_emb, user_interest_expanded, drift_score_expanded
+            )
+            return all_dynamic_emb.to(device) if device else all_dynamic_emb
+
+        # 没有用户信息时返回静态嵌入（向后兼容）
+        return all_static_emb.to(device) if device else all_static_emb
 
     def forward(self, batch):
         # 1. 基础编码：历史/目标的静态+动态嵌入（保留原有逻辑）

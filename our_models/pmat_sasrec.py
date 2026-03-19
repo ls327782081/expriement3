@@ -23,12 +23,16 @@ class PMATSASRec(nn.Module):
             num_layers: int,
             layer_dim: int,
             fusion_type: str = "none",
-            fixed_alpha: float = None
+            fixed_alpha: float = None,
+            fusion_alpha: float = 0.7,  # 动态/模态融合权重
+            use_dynamic: bool = True  # 是否使用动态嵌入（False表示使用静态嵌入）
     ):
         super().__init__()
         self.num_items = num_items
         self.fusion_type = fusion_type
         self.use_fusion = fusion_type != "none"
+        self.fusion_alpha = fusion_alpha  # 动态/模态融合权重
+        self.use_dynamic = use_dynamic  # 是否使用动态嵌入
 
         # ===================== PMAT 核心模块 =====================
         self.pmat = PMATAHRQEncoder(
@@ -152,10 +156,37 @@ class PMATSASRec(nn.Module):
     def forward(self, batch):
         """核心前向逻辑：返回用户表征、目标物品嵌入、PMAT输出"""
         pmat_out = self.pmat(batch)
-        # 传入预计算的 hist_final_emb，避免重复调用 self.pmat(batch)
-        user_emb = self.get_user_embedding(batch, pmat_out["hist_final_emb"])
+
+        # 根据 use_dynamic 选择使用动态或静态嵌入
+        if self.use_dynamic:
+            # 使用动态嵌入（原始逻辑）
+            hist_emb = pmat_out["hist_final_emb"]
+            target_emb = pmat_out["target_final_emb"]
+        else:
+            # 使用静态嵌入（去掉动态更新）
+            hist_static_emb = pmat_out["history_static_emb"]  # (B, actual_len, hidden_dim)
+            target_static_emb = pmat_out["target_static_emb"]  # (B, hidden_dim)
+
+            # 需要将 hist_static_emb padding 到 max_len
+            B, actual_len, hidden_dim = hist_static_emb.shape
+            if actual_len < self.max_len:
+                pad_len = self.max_len - actual_len
+                padding = torch.zeros(B, pad_len, hidden_dim, device=hist_static_emb.device, dtype=hist_static_emb.dtype)
+                hist_static_emb = torch.cat([hist_static_emb, padding], dim=1)
+
+            # 静态嵌入也需要与模态特征融合（与 target_final_emb 相同的逻辑）
+            # fusion_alpha: 动态嵌入权重, (1-fusion_alpha): 模态嵌入权重
+            # 当使用静态嵌入时，用静态嵌入替代动态嵌入部分
+            hist_modal_emb = pmat_out["hist_modal_emb"]
+            target_modal_emb = pmat_out["target_modal_emb"]
+
+            hist_emb = self.fusion_alpha * hist_static_emb + (1 - self.fusion_alpha) * hist_modal_emb
+            target_emb = self.fusion_alpha * target_static_emb + (1 - self.fusion_alpha) * target_modal_emb
+
+        # 传入预计算的 hist_emb，避免重复调用 self.pmat(batch)
+        user_emb = self.get_user_embedding(batch, hist_emb)
         # 用动态+模态融合的目标嵌入
-        pos_sem_feat = pmat_out["target_final_emb"]
+        pos_sem_feat = target_emb
 
         # 可选融合原始ID嵌入
         if self.use_fusion and "target_item" in batch:
@@ -180,19 +211,52 @@ class PMATSASRec(nn.Module):
             logits = torch.matmul(user_emb, all_item_feat.T)
         return logits
 
-    def get_all_item_sem_feat(self, indices_list, all_item_text=None, all_item_vision=None):
+    def get_all_item_sem_feat(self, indices_list, batch=None, all_item_text=None, all_item_vision=None):
         """
-        修正维度不匹配：确保文本+视觉维度之和 = hidden_dim，且权重扩展方式正确
+        获取全量物品特征，支持动态嵌入更新
         Args:
             indices_list: (num_items, num_layers) 全量物品的多层次语义ID
+            batch: 用户历史batch（用于提取用户兴趣进行动态更新）
             all_item_text: (num_items, text_raw_dim) 全量物品文本特征（可选）
             all_item_vision: (num_items, vision_raw_dim) 全量物品视觉特征（可选）
         Returns:
             all_item_feat: (num_items, hidden_dim) 动态+模态融合特征
         """
         device = next(self.parameters()).device
-        # 1. 获取动态嵌入
-        all_dynamic_emb = self.pmat.encode_all_items(indices_list, device)  # (num_items, hidden_dim)
+
+        # 1. 根据 use_dynamic 和是否有batch选择使用动态或静态嵌入
+        if self.use_dynamic and batch is not None:
+            # 需要用户历史信息进行动态更新
+            pmat_out = self.pmat(batch)
+            user_interest = pmat_out["user_interest"]  # (B, hidden_dim)
+            hist_dynamic_emb = pmat_out["hist_final_emb"]  # (B, max_len, hidden_dim)
+
+            # 计算漂移分数
+            if hist_dynamic_emb.shape[1] >= 10:
+                short_hist_emb = hist_dynamic_emb[:, -10:, :]
+            else:
+                short_hist_emb = hist_dynamic_emb
+            drift_score = self.pmat.dynamic_updater.detect_drift(short_hist_emb, hist_dynamic_emb)  # (B,)
+
+            # 使用第一个用户的特征进行动态更新
+            user_interest_for_update = user_interest[0]  # (hidden_dim,)
+            drift_for_update = drift_score[0]  # scalar
+
+            all_dynamic_emb = self.pmat.encode_all_items(
+                indices_list,
+                user_interest=user_interest_for_update,
+                drift_score=drift_for_update,
+                device=device
+            )  # (num_items, hidden_dim)
+            base_emb = all_dynamic_emb
+        elif self.use_dynamic:
+            # 有use_dynamic但没有batch，使用静态嵌入（向后兼容）
+            all_static_emb = self.pmat.encode_all_items(indices_list, device)
+            base_emb = all_static_emb
+        else:
+            # 使用静态嵌入（去掉动态更新）
+            all_static_emb = self.pmat.encode_all_items(indices_list, device)  # (num_items, hidden_dim)
+            base_emb = all_static_emb
 
         # 2. 模态加权（核心修复：维度对齐）
         if all_item_text is not None and all_item_vision is not None:
@@ -224,10 +288,10 @@ class PMATSASRec(nn.Module):
             # 方案2：如果 text_dim == vision_dim → 直接相加（备用）
             # all_modal_emb = text_weight * all_item_text + vision_weight * all_item_vision
 
-            # 动态+模态融合
-            all_item_feat = 0.7 * all_dynamic_emb + 0.3 * all_modal_emb
+            # 动态/静态 + 模态融合 (fusion_alpha: 基础特征权重, 1-fusion_alpha: 模态特征权重)
+            all_item_feat = self.fusion_alpha * base_emb + (1 - self.fusion_alpha) * all_modal_emb
         else:
-            # 备用：无模态特征时返回动态嵌入
-            all_item_feat = all_dynamic_emb
+            # 备用：无模态特征时返回基础嵌入（动态或静态）
+            all_item_feat = base_emb
 
         return all_item_feat
