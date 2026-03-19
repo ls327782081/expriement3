@@ -65,11 +65,12 @@ def parse_args():
     return parser.parse_args()
 
 
-def evaluate_test_full(model, test_loader, indices_list, all_item_meta, topk=10):
+def evaluate_test_full(model, test_loader, indices_list, all_item_meta, k_list=[5, 10, 20]):
     """测试集全量排序评估（用动态+模态融合特征）"""
     model.eval()
-    total_hr = 0.0
-    total_ndcg = 0.0
+    total_hr = {k: 0.0 for k in k_list}
+    total_ndcg = {k: 0.0 for k in k_list}
+    total_mrr = 0.0
     total_users = 0
 
     with torch.no_grad():
@@ -95,17 +96,22 @@ def evaluate_test_full(model, test_loader, indices_list, all_item_meta, topk=10)
 
             # 用个性化动态特征计算得分
             all_scores = torch.matmul(user_emb, batch_final_feat.T)
-            rec_metrics = calculate_metrics(all_scores, target_idx)
+            rec_metrics = calculate_metrics(all_scores, target_idx, k_list=k_list)
 
-            total_hr += rec_metrics[f'HR@{topk}']
-            total_ndcg += rec_metrics[f'NDCG@{topk}']
+            # 累加所有指标
+            for k in k_list:
+                total_hr[k] += rec_metrics[f'HR@{k}']
+                total_ndcg[k] += rec_metrics[f'NDCG@{k}']
+            total_mrr += rec_metrics.get('MRR', 0.0)
             total_users += 1
 
     if total_users == 0:
-        return 0.0, 0.0
-    avg_hr = total_hr / total_users
-    avg_ndcg = total_ndcg / total_users
-    return avg_hr, avg_ndcg
+        return {k: 0.0 for k in k_list}, {k: 0.0 for k in k_list}, 0.0
+
+    avg_hr = {k: total_hr[k] / total_users for k in k_list}
+    avg_ndcg = {k: total_ndcg[k] / total_users for k in k_list}
+    avg_mrr = total_mrr / total_users
+    return avg_hr, avg_ndcg, avg_mrr
 
 
 def run_single_experiment(args, experiment_name, **params):
@@ -354,28 +360,42 @@ def run_single_experiment(args, experiment_name, **params):
             print(f"Best model saved! NDCG@10: {best_ndcg:.4f}")
 
     # ===== 测试评估 =====
-    test_hr_full, test_ndcg_full = evaluate_test_full(
+    k_list = [5, 10, 20]
+    test_hr_full, test_ndcg_full, test_mrr = evaluate_test_full(
         model=model,
         test_loader=test_loader,
         indices_list=indices_list,
         all_item_meta=all_item_meta,
-        topk=10,
+        k_list=k_list,
     )
 
     elapsed = time.time() - start_time
 
+    # 保存完整的评估结果
     result_info = {
         'experiment_name': experiment_name,
         'params': params,
-        'test_hr10': test_hr_full,
-        'test_ndcg10': test_ndcg_full,
+        # HR 指标
+        'test_hr5': test_hr_full[5],
+        'test_hr10': test_hr_full[10],
+        'test_hr20': test_hr_full[20],
+        # NDCG 指标
+        'test_ndcg5': test_ndcg_full[5],
+        'test_ndcg10': test_ndcg_full[10],
+        'test_ndcg20': test_ndcg_full[20],
+        # MRR 指标
+        'test_mrr': test_mrr,
+        # 验证集指标
         'val_ndcg10': best_ndcg,
+        # 训练信息
+        'epochs': new_config.stage2_epochs,
         'elapsed_time': elapsed
     }
 
     print(f"\n实验完成: {experiment_name}")
-    print(f"  Test HR@10: {test_hr_full:.4f}")
-    print(f"  Test NDCG@10: {test_ndcg_full:.4f}")
+    print(f"  Test HR@5: {test_hr_full[5]:.4f} | HR@10: {test_hr_full[10]:.4f} | HR@20: {test_hr_full[20]:.4f}")
+    print(f"  Test NDCG@5: {test_ndcg_full[5]:.4f} | NDCG@10: {test_ndcg_full[10]:.4f} | NDCG@20: {test_ndcg_full[20]:.4f}")
+    print(f"  Test MRR: {test_mrr:.4f}")
     print(f"  耗时: {elapsed:.1f}秒")
 
     return result_info
@@ -389,6 +409,89 @@ def save_results(results, output_path):
         json.dump(results, f, indent=2, ensure_ascii=False)
 
     print(f"\n结果已保存到: {output_path}")
+
+
+def save_results_csv(results, output_path):
+    """保存为CSV格式表格（用于Excel或数据分析）"""
+    import pandas as pd
+
+    rows = []
+    for r in results:
+        row = {
+            'experiment_name': r.get('experiment_name', ''),
+            # 超参数
+            'lr': r['params'].get('lr', ''),
+            'lambda_dynamic': r['params'].get('lambda_dynamic', ''),
+            'lambda_modal': r['params'].get('lambda_modal', ''),
+            'hidden_dim': r['params'].get('hidden_dim', ''),
+            'dropout': r['params'].get('dropout', ''),
+            'fusion_alpha': r['params'].get('fusion_alpha', ''),
+            # HR 指标
+            'test_hr5': r.get('test_hr5', ''),
+            'test_hr10': r.get('test_hr10', ''),
+            'test_hr20': r.get('test_hr20', ''),
+            # NDCG 指标
+            'test_ndcg5': r.get('test_ndcg5', ''),
+            'test_ndcg10': r.get('test_ndcg10', ''),
+            'test_ndcg20': r.get('test_ndcg20', ''),
+            # MRR 指标
+            'test_mrr': r.get('test_mrr', ''),
+            # 验证集
+            'val_ndcg10': r.get('val_ndcg10', ''),
+            # 训练信息
+            'epochs': r.get('epochs', ''),
+            'elapsed_time': r.get('elapsed_time', '')
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    # 按 test_hr10 降序排序
+    df = df.sort_values('test_hr10', ascending=False)
+    df.to_csv(output_path, index=False)
+    print(f"CSV表格已保存到: {output_path}")
+
+
+def save_results_latex(results, output_path):
+    """保存为LaTeX表格格式（用于论文）"""
+    # 按 test_hr10 降序排序
+    sorted_results = sorted(results, key=lambda x: x.get('test_hr10', 0), reverse=True)
+
+    lines = []
+    lines.append("\\begin{table}[htbp]")
+    lines.append("\\centering")
+    lines.append("\\caption{PMAT-SASRec 超参数搜索结果}")
+    lines.append("\\begin{tabular}{|l|c|c|c|c|c|c|c|c|c|c|c|}")
+    lines.append("\\hline")
+    lines.append("实验名 & lr & $\\lambda_{dyn}$ & $\\lambda_{mod}$ & HR@5 & HR@10 & HR@20 & NDCG@5 & NDCG@10 & NDCG@20 & MRR \\\\")
+    lines.append("\\hline")
+
+    for r in sorted_results:
+        name = r.get('experiment_name', '')
+        lr = r['params'].get('lr', '-')
+        lambda_dyn = r['params'].get('lambda_dynamic', '-')
+        lambda_mod = r['params'].get('lambda_modal', '-')
+
+        # 评估指标
+        hr5 = r.get('test_hr5', 0)
+        hr10 = r.get('test_hr10', 0)
+        hr20 = r.get('test_hr20', 0)
+        ndcg5 = r.get('test_ndcg5', 0)
+        ndcg10 = r.get('test_ndcg10', 0)
+        ndcg20 = r.get('test_ndcg20', 0)
+        mrr = r.get('test_mrr', 0)
+
+        # 格式化数值
+        lr_str = f"{lr:.0e}" if isinstance(lr, float) and lr < 0.01 else str(lr)
+        lines.append(f"{name} & {lr_str} & {lambda_dyn} & {lambda_mod} & {hr5:.4f} & {hr10:.4f} & {hr20:.4f} & {ndcg5:.4f} & {ndcg10:.4f} & {ndcg20:.4f} & {mrr:.4f} \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\label{tab:pmat_sasrec_hp_search}")
+    lines.append("\\end{table}")
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines))
+    print(f"LaTeX表格已保存到: {output_path}")
 
 
 def stage1_experiments(args):
@@ -536,7 +639,16 @@ def main():
 
     # 保存结果
     if results:
+        # 保存JSON格式
         save_results(results, results_file)
+
+        # 生成CSV表格
+        csv_path = results_file.replace('.json', '_table.csv')
+        save_results_csv(results, csv_path)
+
+        # 生成LaTeX表格
+        latex_path = results_file.replace('.json', '_table.tex')
+        save_results_latex(results, latex_path)
 
         # 打印最佳结果
         if len(results) > 0:
