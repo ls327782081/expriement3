@@ -58,7 +58,7 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
     logger.info(f"Min user interactions: {min_user_interactions}")
     logger.info(f"Min item interactions: {min_item_interactions}")
 
-    # 加载原始数据
+    # 加载原始数据（与AHRQ/PMAT使用相同的数据处理流程）
     processor = AmazonBooksProcessor(
         category=category,
         quick_mode=quick_mode,
@@ -90,28 +90,38 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
     logger.info(f"Users: {len(user_mapping_original)}, Items: {len(item_mapping_original)}")
 
     # 过滤冷启动用户和物品（迭代过滤直到稳定）
-    logger.info("Filtering cold-start users and items...")
-    prev_len = 0
-    iteration = 0
-    while len(reviews_df) != prev_len:
-        prev_len = len(reviews_df)
-        iteration += 1
+    # 如果 min_user_interactions=0 或 min_item_interactions=0，则跳过过滤
+    if min_user_interactions > 0 or min_item_interactions > 0:
+        logger.info("Filtering cold-start users and items...")
+        prev_len = 0
+        iteration = 0
+        while len(reviews_df) != prev_len:
+            prev_len = len(reviews_df)
+            iteration += 1
 
-        # 统计用户和物品交互数
-        user_counts = reviews_df['user_id'].value_counts()
-        item_counts = reviews_df['item_id'].value_counts()
+            # 统计用户和物品交互数
+            user_counts = reviews_df['user_id'].value_counts()
+            item_counts = reviews_df['item_id'].value_counts()
 
-        # 过滤
-        valid_users = user_counts[user_counts >= min_user_interactions].index
-        valid_items = item_counts[item_counts >= min_item_interactions].index
+            # 过滤
+            if min_user_interactions > 0:
+                valid_users = user_counts[user_counts >= min_user_interactions].index
+            else:
+                valid_users = user_counts.index
+            if min_item_interactions > 0:
+                valid_items = item_counts[item_counts >= min_item_interactions].index
+            else:
+                valid_items = item_counts.index
 
-        reviews_df = reviews_df[
-            reviews_df['user_id'].isin(valid_users) &
-            reviews_df['item_id'].isin(valid_items)
-        ]
+            reviews_df = reviews_df[
+                reviews_df['user_id'].isin(valid_users) &
+                reviews_df['item_id'].isin(valid_items)
+            ]
 
-        logger.info(f"  Iteration {iteration}: {len(reviews_df)} interactions, "
-                   f"{len(valid_users)} users, {len(valid_items)} items")
+            logger.info(f"  Iteration {iteration}: {len(reviews_df)} interactions, "
+                       f"{len(valid_users)} users, {len(valid_items)} items")
+    else:
+        logger.info("Skipping cold-start filtering (min_interactions=0)...")
 
     # 重新创建映射（过滤后）
     unique_users = reviews_df['user_id'].unique()
@@ -292,10 +302,10 @@ def main():
                         help='Use quick mode (sample data)')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='Output directory')
-    parser.add_argument('--min_user_interactions', type=int, default=5,
-                        help='Minimum interactions per user (default: 5)')
-    parser.add_argument('--min_item_interactions', type=int, default=5,
-                        help='Minimum interactions per item (default: 5)')
+    parser.add_argument('--min_user_interactions', type=int, default=0,
+                        help='Minimum interactions per user (default: 0, meaning no filtering)')
+    parser.add_argument('--min_item_interactions', type=int, default=0,
+                        help='Minimum interactions per item (default: 0, meaning no filtering)')
 
     args = parser.parse_args()
 
