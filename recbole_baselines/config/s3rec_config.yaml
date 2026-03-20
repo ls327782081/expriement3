@@ -1,0 +1,27 @@
+# S3Rec 模型配置
+# Self-Supervised Learning for Sequential Recommendation (CIKM 2020)
+# 对标特性：预训练/自监督 → AHRQ的语义ID
+
+# 模型参数
+hidden_size: 64
+inner_size: 256  # FFN 内部维度
+n_layers: 2
+n_heads: 2
+hidden_dropout_prob: 0.5
+attn_dropout_prob: 0.5
+hidden_act: 'gelu'
+layer_norm_eps: 1e-12
+initializer_range: 0.02
+
+# S3Rec 特定参数
+item_attribute: []  # 物品属性字段（需要数据集有对应列）
+train_stage: 'pretrain'  # pretrain 或 finetune
+pre_model_path: ''  # 预训练模型路径
+mask_ratio: 0.2  # 遮蔽比例
+aap_weight: 0.2  # Attribute Attribute Prediction 权重
+mip_weight: 0.1  # Masked Item Prediction 权重
+map_weight: 0.1  # Masked Attribute Prediction 权重
+sp_weight: 0.1   # Segment Prediction 权重
+
+# 损失函数
+loss_type: 'BPR'  # S3Rec 使用 BPR 损失

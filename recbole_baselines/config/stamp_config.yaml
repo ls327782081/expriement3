@@ -1,0 +1,14 @@
+# STAMP 模型配置
+# Short-Term Attention/Memory Priority Model (KDD 2018)
+# 对标特性：注意力机制 + 短期记忆 → PMAT的用户兴趣编码
+
+# 模型参数
+embedding_size: 64
+
+# 损失函数
+loss_type: 'BPR'  # STAMP 使用 BPR 损失
+
+# 需要负采样（BPR 损失需要）
+train_neg_sample_args:
+    distribution: 'uniform'
+    sample_num: 1

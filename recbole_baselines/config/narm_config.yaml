@@ -1,0 +1,17 @@
+# NARM 模型配置
+# Neural Attentive Session-based Recommendation (CIKM 2017)
+# 对标特性：注意力机制 → PMAT的用户兴趣编码
+
+# 模型参数
+embedding_size: 64
+hidden_size: 128
+n_layers: 1
+dropout_probs: [0.5, 0.5]  # [embedding_dropout, context_dropout]
+
+# 损失函数
+loss_type: 'BPR'  # NARM 使用 BPR 损失
+
+# 需要负采样（BPR 损失需要）
+train_neg_sample_args:
+    distribution: 'uniform'
+    sample_num: 1
