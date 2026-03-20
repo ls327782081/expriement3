@@ -10,6 +10,7 @@ TIME_FIELD: timestamp
 # 加载的列
 load_col:
     inter: [user_id, item_id, timestamp]
+    item: [item_id, category, avg_rating, rating_count, price]
 
 # 序列推荐设置
 ITEM_LIST_LENGTH_FIELD: item_length
@@ -38,7 +39,7 @@ learning_rate: 0.001
 # ==================== 评估配置 ====================
 # 评估指标（与当前框架一致）
 metrics: ['Recall', 'MRR', 'NDCG', 'Hit', 'Precision']
-topk: [5, 10, 20]
+topk: [3, 5, 10]
 valid_metric: NDCG@10
 metric_decimal_place: 4
 

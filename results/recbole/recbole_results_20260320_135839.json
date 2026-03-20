@@ -1,0 +1,107 @@
+[
+  {
+    "model": "SASRec",
+    "best_valid_score": 0.6425,
+    "test_result": {
+      "recall@3": 0.4615,
+      "recall@5": 0.4615,
+      "recall@10": 0.5385,
+      "mrr@3": 0.3718,
+      "mrr@5": 0.3718,
+      "mrr@10": 0.3814,
+      "ndcg@3": 0.3947,
+      "ndcg@5": 0.3947,
+      "ndcg@10": 0.419,
+      "hit@3": 0.4615,
+      "hit@5": 0.4615,
+      "hit@10": 0.5385,
+      "precision@3": 0.1538,
+      "precision@5": 0.0923,
+      "precision@10": 0.0538
+    }
+  },
+  {
+    "model": "BERT4Rec",
+    "best_valid_score": 0.2584,
+    "test_result": {
+      "recall@3": 0.0769,
+      "recall@5": 0.2308,
+      "recall@10": 0.5385,
+      "mrr@3": 0.0385,
+      "mrr@5": 0.0731,
+      "mrr@10": 0.1169,
+      "ndcg@3": 0.0485,
+      "ndcg@5": 0.1114,
+      "ndcg@10": 0.2136,
+      "hit@3": 0.0769,
+      "hit@5": 0.2308,
+      "hit@10": 0.5385,
+      "precision@3": 0.0256,
+      "precision@5": 0.0462,
+      "precision@10": 0.0538
+    }
+  },
+  {
+    "model": "GRU4Rec",
+    "best_valid_score": 0.6994,
+    "test_result": {
+      "recall@3": 0.3846,
+      "recall@5": 0.5385,
+      "recall@10": 0.7692,
+      "mrr@3": 0.3846,
+      "mrr@5": 0.4192,
+      "mrr@10": 0.444,
+      "ndcg@3": 0.3846,
+      "ndcg@5": 0.4475,
+      "ndcg@10": 0.5161,
+      "hit@3": 0.3846,
+      "hit@5": 0.5385,
+      "hit@10": 0.7692,
+      "precision@3": 0.1282,
+      "precision@5": 0.1077,
+      "precision@10": 0.0769
+    }
+  },
+  {
+    "model": "NARM",
+    "best_valid_score": 0.5196,
+    "test_result": {
+      "recall@3": 0.3846,
+      "recall@5": 0.5385,
+      "recall@10": 0.6923,
+      "mrr@3": 0.2564,
+      "mrr@5": 0.2949,
+      "mrr@10": 0.3173,
+      "ndcg@3": 0.2894,
+      "ndcg@5": 0.3556,
+      "ndcg@10": 0.4073,
+      "hit@3": 0.3846,
+      "hit@5": 0.5385,
+      "hit@10": 0.6923,
+      "precision@3": 0.1282,
+      "precision@5": 0.1077,
+      "precision@10": 0.0692
+    }
+  },
+  {
+    "model": "STAMP",
+    "best_valid_score": 0.4967,
+    "test_result": {
+      "recall@3": 0.3077,
+      "recall@5": 0.3846,
+      "recall@10": 0.6154,
+      "mrr@3": 0.2692,
+      "mrr@5": 0.2846,
+      "mrr@10": 0.3124,
+      "ndcg@3": 0.2793,
+      "ndcg@5": 0.3091,
+      "ndcg@10": 0.3807,
+      "hit@3": 0.3077,
+      "hit@5": 0.3846,
+      "hit@10": 0.6154,
+      "precision@3": 0.1026,
+      "precision@5": 0.0769,
+      "precision@10": 0.0615
+    }
+  }
+]

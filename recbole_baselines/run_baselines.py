@@ -7,7 +7,8 @@
 - GRU4Rec: Session-based Recommendations with RNN
 - S3Rec: Self-Supervised Learning for Sequential Recommendation (CIKM 2020)
 - NARM: Neural Attentive Session-based Recommendation (CIKM 2017)
-- SASRecF: SASRec with item Features (多模态特征融合)
+- STAMP: Short-Term Attention/Memory Priority Model (KDD 2018)
+- SASRecF: SASRec with item Features (需要物品特征)
 
 使用方法：
     # 运行所有基线
@@ -103,7 +104,7 @@ def main():
     parser.add_argument('--dataset', type=str, default='Video_Games',
                         help='Dataset name (default: Video_Games)')
     parser.add_argument('--model', type=str, default=None,
-                        choices=['SASRec', 'BERT4Rec', 'GRU4Rec', 'S3Rec', 'NARM', 'SASRecF'],
+                        choices=['SASRec', 'BERT4Rec', 'GRU4Rec', 'S3Rec', 'NARM', 'STAMP', 'SASRecF'],
                         help='Model to run (default: all)')
     parser.add_argument('--quick_mode', action='store_true',
                         help='Use quick mode (for testing)')
@@ -127,7 +128,10 @@ def main():
         return
     
     # 确定要运行的模型
-    models = [args.model] if args.model else ['SASRec', 'BERT4Rec', 'GRU4Rec', 'S3Rec', 'NARM', 'SASRecF']
+    # 注意: S3Rec 和 SASRecF 需要特殊配置，暂时排除
+    # S3Rec 需要预训练/微调多阶段配置
+    # SASRecF 需要完整的物品特征文件
+    models = [args.model] if args.model else ['SASRec', 'BERT4Rec', 'GRU4Rec', 'NARM', 'STAMP']
     
     # 运行模型并收集结果
     results = []

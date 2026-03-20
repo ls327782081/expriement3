@@ -3,6 +3,7 @@
 
 RecBole需要的文件格式：
 - Video_Games.inter: user_id:token  item_id:token  timestamp:float
+- Video_Games.item: item_id:token  category:token  avg_rating:float  rating_count:token
 - 配置文件指定序列推荐设置
 
 使用方法：
@@ -14,6 +15,8 @@ import sys
 import argparse
 import logging
 import pickle
+import json
+import pandas as pd
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -187,7 +190,85 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
         }, f)
     
     logger.info(f"Saved mappings to {mapping_file}")
-    
+
+    # ======================================
+    # 创建物品特征文件 (.item) 用于 SASRecF 等多模态模型
+    # ======================================
+    logger.info("Creating item feature file for SASRecF...")
+
+    # 加载原始ID到内部ID的映射
+    original_to_internal = {}
+    for original_id, internal_id in item_mapping.items():
+        original_to_internal[original_id] = internal_id
+
+    # 从元数据JSONL加载物品特征
+    meta_jsonl_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                                   'data', f'meta_{category}.jsonl')
+
+    item_features = {}
+    if os.path.exists(meta_jsonl_path):
+        with open(meta_jsonl_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    item = json.loads(line.strip())
+                    item_id = item.get('parent_asin', '')
+
+                    # 只保留在过滤后数据集中的物品
+                    if item_id not in original_to_internal:
+                        continue
+
+                    internal_id = original_to_internal[item_id]
+
+                    # 提取类别（取第一个类别）
+                    categories = item.get('categories', [])
+                    category = categories[0] if categories else 'Unknown'
+
+                    # 提取评分信息
+                    avg_rating = float(item.get('average_rating', 0))
+                    rating_number = int(item.get('rating_number', 0))
+
+                    # 提取价格
+                    price = item.get('price')
+                    price_str = str(price) if price else '0.0'
+
+                    item_features[internal_id] = {
+                        'category': category,
+                        'avg_rating': avg_rating,
+                        'rating_number': rating_number,
+                        'price': price_str
+                    }
+
+                except json.JSONDecodeError as e:
+                    continue
+
+        logger.info(f"Loaded features for {len(item_features)} items from metadata")
+
+    # 为没有元数据的物品添加默认值
+    for internal_id in item_mapping.values():
+        if internal_id not in item_features:
+            item_features[internal_id] = {
+                'category': 'Unknown',
+                'avg_rating': 0.0,
+                'rating_number': 0,
+                'price': '0.0'
+            }
+
+    # 写入 .item 文件（RecBole格式）
+    # 格式：item_id:token  category:token  avg_rating:float  rating_count:token  price:token
+    item_file = os.path.join(output_dir, f'{category}.item')
+
+    with open(item_file, 'w', encoding='utf-8') as f:
+        # 写入header
+        f.write('item_id:token\tcategory:token\tavg_rating:float\trating_count:token\tprice:token\n')
+
+        # 按item_id排序写入
+        for internal_id in sorted(item_features.keys()):
+            feat = item_features[internal_id]
+            f.write(f"{internal_id}\t{feat['category']}\t{feat['avg_rating']}\t{feat['rating_number']}\t{feat['price']}\n")
+
+    logger.info(f"Created {item_file}")
+    logger.info(f"  Total items with features: {len(item_features)}")
+
     # 输出统计信息
     logger.info("=" * 60)
     logger.info("Conversion complete!")
@@ -196,9 +277,10 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
     logger.info(f"  Total items: {len(item_mapping)}")
     logger.info(f"  Output files:")
     logger.info(f"    - {inter_file}")
+    logger.info(f"    - {item_file}")
     logger.info(f"    - {mapping_file}")
     logger.info("=" * 60)
-    
+
     return output_dir
 
 
@@ -220,10 +302,7 @@ def main():
     # quick_mode下使用更宽松的过滤阈值
     min_user = args.min_user_interactions
     min_item = args.min_item_interactions
-    if args.quick_mode and min_user == 5 and min_item == 5:
-        # quick_mode默认使用更宽松的阈值
-        min_user = 2
-        min_item = 2
+
 
     convert_to_recbole_format(
         category=args.category,
