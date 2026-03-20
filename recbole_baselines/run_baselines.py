@@ -5,14 +5,17 @@
 - SASRec: Self-Attentive Sequential Recommendation
 - BERT4Rec: Bidirectional Encoder Representations from Transformer
 - GRU4Rec: Session-based Recommendations with RNN
+- S3Rec: Self-Supervised Learning for Sequential Recommendation (CIKM 2020)
+- NARM: Neural Attentive Session-based Recommendation (CIKM 2017)
+- SASRecF: SASRec with item Features (多模态特征融合)
 
 使用方法：
     # 运行所有基线
     python recbole_baselines/run_baselines.py --dataset Video_Games
-    
+
     # 运行单个模型
     python recbole_baselines/run_baselines.py --dataset Video_Games --model SASRec
-    
+
     # 快速模式（用于测试）
     python recbole_baselines/run_baselines.py --dataset Video_Games --quick_mode
 """
@@ -100,7 +103,7 @@ def main():
     parser.add_argument('--dataset', type=str, default='Video_Games',
                         help='Dataset name (default: Video_Games)')
     parser.add_argument('--model', type=str, default=None,
-                        choices=['SASRec', 'BERT4Rec', 'GRU4Rec'],
+                        choices=['SASRec', 'BERT4Rec', 'GRU4Rec', 'S3Rec', 'NARM', 'SASRecF'],
                         help='Model to run (default: all)')
     parser.add_argument('--quick_mode', action='store_true',
                         help='Use quick mode (for testing)')
@@ -124,7 +127,7 @@ def main():
         return
     
     # 确定要运行的模型
-    models = [args.model] if args.model else ['SASRec', 'BERT4Rec', 'GRU4Rec']
+    models = [args.model] if args.model else ['SASRec', 'BERT4Rec', 'GRU4Rec', 'S3Rec', 'NARM', 'SASRecF']
     
     # 运行模型并收集结果
     results = []

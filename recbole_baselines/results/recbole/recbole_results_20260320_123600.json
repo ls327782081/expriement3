@@ -1,0 +1,65 @@
+[
+  {
+    "model": "SASRec",
+    "best_valid_score": 0.0315,
+    "test_result": {
+      "recall@5": 0.0394,
+      "recall@10": 0.0564,
+      "recall@20": 0.0797,
+      "mrr@5": 0.0234,
+      "mrr@10": 0.0256,
+      "mrr@20": 0.0272,
+      "ndcg@5": 0.0274,
+      "ndcg@10": 0.0328,
+      "ndcg@20": 0.0386,
+      "hit@5": 0.0394,
+      "hit@10": 0.0564,
+      "hit@20": 0.0797,
+      "precision@5": 0.0079,
+      "precision@10": 0.0056,
+      "precision@20": 0.004
+    }
+  },
+  {
+    "model": "BERT4Rec",
+    "best_valid_score": 0.0112,
+    "test_result": {
+      "recall@5": 0.0069,
+      "recall@10": 0.0141,
+      "recall@20": 0.0233,
+      "mrr@5": 0.0044,
+      "mrr@10": 0.0054,
+      "mrr@20": 0.0059,
+      "ndcg@5": 0.005,
+      "ndcg@10": 0.0073,
+      "ndcg@20": 0.0096,
+      "hit@5": 0.0069,
+      "hit@10": 0.0141,
+      "hit@20": 0.0233,
+      "precision@5": 0.0014,
+      "precision@10": 0.0014,
+      "precision@20": 0.0012
+    }
+  },
+  {
+    "model": "GRU4Rec",
+    "best_valid_score": 0.0165,
+    "test_result": {
+      "recall@5": 0.0129,
+      "recall@10": 0.0227,
+      "recall@20": 0.0403,
+      "mrr@5": 0.0062,
+      "mrr@10": 0.0075,
+      "mrr@20": 0.0087,
+      "ndcg@5": 0.0079,
+      "ndcg@10": 0.011,
+      "ndcg@20": 0.0154,
+      "hit@5": 0.0129,
+      "hit@10": 0.0227,
+      "hit@20": 0.0403,
+      "precision@5": 0.0026,
+      "precision@10": 0.0023,
+      "precision@20": 0.002
+    }
+  }
+]
