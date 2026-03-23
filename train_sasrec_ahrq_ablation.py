@@ -145,6 +145,7 @@ def train_single_experiment(
     print("Recomputing all item semantics...")
     all_item_text = all_item_meta['text_features'].float().to(device)
     all_item_vision = all_item_meta['image_features'].float().to(device)
+    num_items = all_item_meta['text_features'].shape[0]
     _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
 
     # 3. 创建SASRecAHRQ模型和数据加载器
@@ -152,7 +153,8 @@ def train_single_experiment(
     model = SASRecAHRQ(
         ahrq_model=ahrq,
         hidden_dim=exp_config.hidden_dim,
-        dynamic_params={"dropout": exp_config.dropout}
+        dynamic_params={"dropout": exp_config.dropout},
+        num_items=num_items
     ).to(device)
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
