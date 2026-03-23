@@ -595,8 +595,8 @@ def main():
         AblationConfig(
             experiment_name="AHRQ-HSCL",
             use_ema=True,  # 需要EMA作为基础
-            use_hscl=True,  # 唯一变化
-            use_emotion=False,
+            use_hscl=False,  # 唯一变化
+            use_emotion=True,
             use_hierarchy_weight=True,
         ),
         # 5. AHRQ-Full: 完整配置（所有创新点）
