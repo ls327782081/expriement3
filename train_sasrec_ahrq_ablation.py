@@ -405,25 +405,16 @@ def main():
 
     # 定义实验配置（与Stage 1对应）- 使用最佳参数: dropout=0.35, hidden_dim=64
     experiments = [
-        AblationExperimentConfig(
-            experiment_name="Baseline-RQ",
-            ahrq_model_name="baseline_rq",
-            use_ema=False,
-            use_hscl=False,
-            use_emotion=False,
-            dropout=0.35,
-            hidden_dim=64,
-            codebook_sizes=[512, 512, 512, 512, 512, 512, 512, 512]  # 8层等码本
-        ),
+
         AblationExperimentConfig(
             experiment_name="AHRQ-HierCodebook",
             ahrq_model_name="ahrq_hiercodebook",
             use_ema=False,
             use_hscl=False,
             use_emotion=False,
-            dropout=0.35,
+            dropout=0.5,
             hidden_dim=64,
-            codebook_sizes=[256, 512, 512, 512]  # 4层自适应码本
+            codebook_sizes=[512, 512, 512, 512]  # 4层自适应码本
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-EMA",
@@ -431,7 +422,7 @@ def main():
             use_ema=True,
             use_hscl=False,
             use_emotion=False,
-            dropout=0.35,
+            dropout=0.5,
             hidden_dim=64,
             codebook_sizes=[256, 512, 512, 512]
         ),
@@ -441,7 +432,7 @@ def main():
             use_ema=True,
             use_hscl=True,
             use_emotion=False,
-            dropout=0.35,
+            dropout=0.5,
             hidden_dim=64,
             codebook_sizes=[256, 512, 512, 512]
         ),
@@ -451,7 +442,7 @@ def main():
             use_ema=True,
             use_hscl=True,
             use_emotion=True,
-            dropout=0.35,
+            dropout=0.5,
             hidden_dim=64,
             codebook_sizes=[256, 512, 512, 512]
         ),

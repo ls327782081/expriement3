@@ -63,7 +63,7 @@ class AblationConfig:
     emotion_codebook: int = 512   # emotion层使用标准码本
     baseline_codebook: int = 512
     # 损失权重 - 降低HSCL权重减少对重构的干扰
-    hscl_weight: float = 0.03      # 原0.1→0.03，降低对重建的干扰
+    hscl_weight: float = 0.003      # 原0.1→0.03，降低对重建的干扰
     quant_weight: float = 1.0
 
 
