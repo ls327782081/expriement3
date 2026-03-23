@@ -113,6 +113,7 @@ def train_single_experiment(
     checkpoint = torch.load(ahrq_model_path, map_location=device, weights_only=False)
     saved_config = checkpoint['config']
     semantic_hierarchy = saved_config['semantic_hierarchy']
+    indices_list = checkpoint['indices_list']
 
     ahrq = AdaptiveHierarchicalQuantizer(
         hidden_dim=new_config.ahrq_hidden_dim,
@@ -131,31 +132,6 @@ def train_single_experiment(
     print(f"AHRQ model loaded! Best recon loss: {best_recon_loss:.6f}")
 
     # 2. 获取数据
-    pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
-        cache_dir="./data",
-        category='Video_Games',
-        batch_size=new_config.batch_size,
-        shuffle=True,
-        quick_mode=True,
-        num_workers=NUM_WORKS,
-        logger=logger
-    )
-
-    # 重新计算indices_list
-    print("Recomputing all item semantics...")
-    all_item_text = all_item_meta['text_features'].float().to(device)
-    all_item_vision = all_item_meta['image_features'].float().to(device)
-    num_items = all_item_meta['text_features'].shape[0]
-    _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
-
-    # 3. 创建SASRecAHRQ模型和数据加载器
-    # 使用最佳参数配置：hidden_dim=64, dropout=0.35
-    model = SASRecAHRQ(
-        ahrq_model=ahrq,
-        hidden_dim=exp_config.hidden_dim,
-        dynamic_params={"dropout": exp_config.dropout},
-        num_items=num_items
-    ).to(device)
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
         cache_dir="./data",
         category='Video_Games',
@@ -168,6 +144,18 @@ def train_single_experiment(
         indices_list=indices_list,
         logger=logger
     )
+
+    num_items = all_item_features['num_items']
+
+    # 3. 创建SASRecAHRQ模型和数据加载器
+    # 使用最佳参数配置：hidden_dim=64, dropout=0.35
+    model = SASRecAHRQ(
+        ahrq_model=ahrq,
+        hidden_dim=exp_config.hidden_dim,
+        dynamic_params={"dropout": exp_config.dropout},
+        num_items=num_items
+    ).to(device)
+
 
     # 4. 训练配置
     rec_params = [p for p in model.parameters() if p.requires_grad]

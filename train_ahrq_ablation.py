@@ -88,18 +88,7 @@ def get_semantic_hierarchy(config: AblationConfig) -> dict:
         style_weight = 1.0
         emotion_weight = 1.0
 
-    if config.experiment_name == "Baseline-RQ":
-        # 基线：4层等码本，无EMA
-        num_layers = 4
-        return {
-            "topic": {
-                "layers": list(range(num_layers)),
-                "codebook_size": config.baseline_codebook,
-                "loss_weight": topic_weight,
-                "ema_decay": 0.99
-            }
-        }
-    elif config.experiment_name in ["AHRQ-HierCodebook", "AHRQ-EMA", "AHRQ-HSCL", "AHRQ-Full"]:
+    if config.experiment_name in ["AHRQ-HierCodebook", "AHRQ-EMA", "AHRQ-HSCL", "AHRQ-Full"]:
         # 自适应码本：固定4层结构 [256, 512, 512, 512]
         # 无论是否有emotion，都保持4层结构：
         # - topic: 1层(layers=[0])
@@ -426,8 +415,10 @@ def run_ablation_experiment(
             "semantic_hierarchy": semantic_hierarchy,
             "n_e_list": n_e_list
         },
-        "metrics": results['metrics']
+        "metrics": results['metrics'],
+        "indices_list":indices_list
     }, model_path)
+
     print(f"  AHRQ Model saved to: {model_path}")
 
     return results
@@ -584,15 +575,6 @@ def main():
     # 定义实验配置（严格消融：每个实验只改变一个变量）
     # 控制变量：默认使用ema=True, hierarchy_weight=True作为基础配置
     experiments = [
-        # 1. Baseline-RQ: 固定码本，无EMA，无HSCL（完全基线）
-        AblationConfig(
-            experiment_name="Baseline-RQ",
-            use_ema=False,
-            use_hscl=False,
-            use_emotion=False,
-            use_hierarchy_weight=False,
-            baseline_codebook=512
-        ),
         # 2. AHRQ-HierCodebook: 仅测试层次化码本效果（无EMA，无HSCL）
         AblationConfig(
             experiment_name="AHRQ-HierCodebook",
@@ -607,7 +589,7 @@ def main():
             use_ema=True,  # 唯一变化
             use_hscl=False,
             use_emotion=False,
-            use_hierarchy_weight=False,  # 与基线相同
+            use_hierarchy_weight=True,
         ),
         # 4. AHRQ-HSCL: 仅测试HSCL效果（需要EMA作为基础）
         AblationConfig(
