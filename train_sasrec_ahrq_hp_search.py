@@ -840,19 +840,14 @@ def main():
     device = new_config.device
 
     # ========== 实验 A：量化层数 L 搜索 ==========
-    # 固定：hidden_dim=64, K=512, use_ema=True, use_hscl=True, use_emotion=False
-    # 构建不同层数的 semantic_hierarchy
+    # 固定：K=512, use_ema=True, use_hscl=True, use_emotion=False
+    # 不同层数使用不同的hidden_dim，确保 hidden_dim % num_layers == 0
+    # L=3 -> hidden_dim=96 (96%3=0), L=4 -> hidden_dim=64 (64%4=0), L=5 -> hidden_dim=80 (80%5=0)
     experiment_A_layer_search = [
+        # expA_L3: 3层 (topic[0] + style[1,2]) -> 使用 hidden_dim=96
         HPSearchConfig(
-            experiment_name=f"expA_L{i}",
+            experiment_name="expA_L3",
             semantic_hierarchy={
-                "topic": {
-                    "layers": [0],
-                    "codebook_size": 512,
-                    "loss_weight": 1.0,
-                    "ema_decay": 0.99
-                }
-            } if i == 1 else {
                 "topic": {
                     "layers": [0],
                     "codebook_size": 512,
@@ -860,7 +855,33 @@ def main():
                     "ema_decay": 0.99
                 },
                 "style": {
-                    "layers": list(range(1, i)),
+                    "layers": [1, 2],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            },
+            hidden_dim=96,
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=False,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.5
+        ),
+        # expA_L4: 4层 (topic[0] + style[1,2,3]) -> 使用 hidden_dim=64
+        HPSearchConfig(
+            experiment_name="expA_L4",
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
                     "codebook_size": 512,
                     "loss_weight": 0.8,
                     "ema_decay": 0.99
@@ -874,8 +895,33 @@ def main():
             stage2_epochs=50,
             lr=1e-3,
             dropout=0.5
-        )
-        for i in range(1, 6)  # L ∈ {1,2,3,4,5}
+        ),
+        # expA_L5: 5层 (topic[0] + style[1,2,3,4]) -> 使用 hidden_dim=80
+        HPSearchConfig(
+            experiment_name="expA_L5",
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3, 4],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            },
+            hidden_dim=80,
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=False,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.5
+        ),
     ]
 
     # ========== 实验 B：码本规模 K 搜索 ==========
