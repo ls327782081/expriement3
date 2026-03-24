@@ -873,7 +873,7 @@ def main():
             stage1_epochs=20,
             stage2_epochs=50,
             lr=1e-3,
-            dropout=0.35
+            dropout=0.5
         )
         for i in range(1, 6)  # L ∈ {1,2,3,4,5}
     ]
@@ -904,7 +904,7 @@ def main():
             stage1_epochs=20,
             stage2_epochs=50,
             lr=1e-3,
-            dropout=0.35
+            dropout=0.5
         )
         for K in [64, 128, 256, 512, 1024]  # K ∈ {64,128,256,512,1024}
     ]
@@ -935,7 +935,7 @@ def main():
             stage1_epochs=20,
             stage2_epochs=50,
             lr=1e-3,
-            dropout=0.35
+            dropout=0.5
         )
         for d in [32, 64, 128, 256]  # d ∈ {32,64,128,256}
     ]
