@@ -2,10 +2,8 @@
 SASRec-AHRQ 层级参数搜索脚本
 
 搜索最佳层级配置以提升创新点效果：
-实验A：量化层数
-𝐿
+实验 A：量化层数
 L
-
 目的：验证层次化语义分解深度对推荐性能的影响。
 固定其他参数：
 
@@ -16,20 +14,6 @@ EMA 开启
 SASRec 参数固定
 
 建议取值：
-
-𝐿
-∈
-{
-1
-,
-2
-,
-3
-,
-4
-,
-5
-}
 L∈{1,2,3,4,5}
 
 你论文里要分析的点：
@@ -37,129 +21,38 @@ L∈{1,2,3,4,5}
 层数太少：语义表达能力不足
 层数适中：能够同时捕捉粗粒度与细粒度语义
 层数过多：量化误差累积、训练更难、收益趋于饱和
-实验B：码本规模
-𝐾
-K
-
+实验 B：码本规模𝐾
 目的：验证语义空间容量对离散表示质量的影响。
 固定其他参数：
-
-𝐿
-=
-4
 L=4
 hidden dim = 64
 其他保持默认
 
 建议取值：
-
-𝐾
-∈
-{
-64
-,
-128
-,
-256
-,
-512
-,
-1024
-}
 K∈{64,128,256,512,1024}
 
 这里建议每层使用相同码本规模，这样实验更干净。
 也就是：
-
-[
-64
-,
-64
-,
-64
-,
-64
-]
 [64,64,64,64]
-[
-128
-,
-128
-,
-128
-,
-128
-]
 [128,128,128,128]
-[
-256
-,
-256
-,
-256
-,
-256
-]
 [256,256,256,256]
-[
-512
-,
-512
-,
-512
-,
-512
-]
 [512,512,512,512]
-[
-1024
-,
-1024
-,
-1024
-,
-1024
-]
 [1024,1024,1024,1024]
 
 你论文里要分析的点：
-
-𝐾
 K 太小：语义表达受限，码本容量不足
-𝐾
 K 适中：离散语义空间能够较好覆盖物品特征
-𝐾
 K 过大：参数冗余，码本利用率下降，训练不稳定
-实验C：隐藏维度
-𝑑
+实验 C：隐藏维度
 d
-
 目的：验证表示维度对模型表达能力与泛化能力的影响。
 固定其他参数：
-
-𝐿
-=
-4
 L=4
-𝐾
-=
-512
 K=512
 其他保持默认
 
 建议取值：
 
-𝑑
-∈
-{
-32
-,
-64
-,
-128
-,
-256
-}
 d∈{32,64,128,256}
 
 你论文里要分析的点：
@@ -201,7 +94,7 @@ def analyze_codebook_clusters(model, device, num_clusters=10):
     """
     分析各层码本的聚类质量
 
-    使用K-means对各层码本向量进行聚类，计算Silhouette Score来评估聚类质量。
+    使用 K-means 对各层码本向量进行聚类，计算 Silhouette Score 来评估聚类质量。
 
     Args:
         model: 训练好的模型（AdaptiveHierarchicalQuantizer）
@@ -209,7 +102,7 @@ def analyze_codebook_clusters(model, device, num_clusters=10):
         num_clusters: 聚类数量
 
     Returns:
-        dict: 各层的Silhouette Score
+        dict: 各层的 Silhouette Score
     """
     try:
         from sklearn.cluster import KMeans
@@ -261,14 +154,14 @@ def analyze_codebook_clusters(model, device, num_clusters=10):
 class HPSearchConfig:
     """层级参数搜索配置"""
     experiment_name: str
-    # 层级配置 - 核心搜索参数
-    codebook_sizes: List[int]  # 每层的码本大小，如 [256, 512, 512, 512]
+    # 语义层次结构 - 直接定义
+    semantic_hierarchy: dict  # 语义层次配置字典，如 {"topic": {...}, "style": {...}}
     hidden_dim: int = 512  # 固定隐藏维度
-    # AHRQ创新点配置
-    use_ema: bool = False      # 是否使用EMA更新和死码重置
+    # AHRQ 创新点配置
+    use_ema: bool = False      # 是否使用 EMA 更新和死码重置
     use_hscl: bool = False     # 是否使用层次化语义一致性学习
-    use_emotion: bool = False  # 是否使用情感编码
-    hscl_weight: float = 0.03  # HSCL损失权重
+    use_emotion: bool = False  # 是否使用情感编码层
+    hscl_weight: float = 0.03  # HSCL 损失权重
     # 模型融合参数（固定）
     fusion_type: str = "add"
     alpha: float = 0.5
@@ -277,72 +170,32 @@ class HPSearchConfig:
     use_raw_fusion: bool = False
     use_semantic_id: bool = True
     # 训练参数
-    stage1_epochs: int = 20  # AHRQ预训练轮数
-    stage2_epochs: int = 50  # SASRec训练轮数
+    stage1_epochs: int = 20  # AHRQ 预训练轮数
+    stage2_epochs: int = 50  # SASRec 训练轮数
     patience: int = 5
     dropout: float = 0.0
     lr: float = 1e-4
-    # 动态SASRec参数（由calculate_dynamic_sasrec_params计算）
+    # 动态 SASRec 参数（由 calculate_dynamic_sasrec_params 计算）
     dynamic_sasrec_params: dict = None
 
+    def __post_init__(self):
+        """从 semantic_hierarchy 中提取 codebook_sizes 供其他模块使用"""
+        # 从 semantic_hierarchy 推断 codebook_sizes
+        codebook_sizes = []
+        # 按照层的顺序提取每层的 codebook_size
+        num_layers = 0
+        for key in ["topic", "style", "emotion"]:
+            if key in self.semantic_hierarchy:
+                layer_info = self.semantic_hierarchy[key]
+                if "layers" in layer_info:
+                    for layer_idx in layer_info["layers"]:
+                        # 确保列表有足够的长度
+                        while len(codebook_sizes) <= layer_idx:
+                            codebook_sizes.append(layer_info.get("codebook_size", 512))
+                        codebook_sizes[layer_idx] = layer_info.get("codebook_size", 512)
+                        num_layers = max(num_layers, max(layer_info["layers"]) + 1)
 
-def build_semantic_hierarchy(codebook_sizes: List[int], hidden_dim: int, use_emotion: bool = False) -> dict:
-    """
-    根据码本大小配置构建语义层次结构
-
-    Args:
-        codebook_sizes: 每层的码本大小列表
-        hidden_dim: 隐藏维度
-        use_emotion: 是否使用情感编码层
-
-    Returns:
-        semantic_hierarchy: 语义层次配置字典
-    """
-    num_layers = len(codebook_sizes)
-
-    # 计算每层的维度
-    layer_dim = hidden_dim // num_layers
-    if hidden_dim % num_layers != 0:
-        print(f"Warning: hidden_dim {hidden_dim} not divisible by {num_layers} layers, using {layer_dim}")
-
-    semantic_hierarchy = {}
-
-    # 确定使用的层数（排除emotion层）
-    if use_emotion and num_layers >= 3:
-        # 最后几层用于emotion
-        num_main_layers = num_layers - 1
-        emotion_codebook = codebook_sizes[-1]
-    else:
-        num_main_layers = num_layers
-        emotion_codebook = None
-
-    # 第一层：topic（基础语义）
-    semantic_hierarchy["topic"] = {
-        "layers": [0],
-        "codebook_size": codebook_sizes[0],
-        "loss_weight": 1.0,
-        "ema_decay": 0.99
-    }
-
-    # 后续层：style（风格变体）
-    if num_main_layers > 1:
-        semantic_hierarchy["style"] = {
-            "layers": list(range(1, num_main_layers)),
-            "codebook_size": codebook_sizes[1] if len(codebook_sizes) > 1 else codebook_sizes[0],
-            "loss_weight": 0.8,
-            "ema_decay": 0.99
-        }
-
-    # 情感层（如果启用）
-    if use_emotion and emotion_codebook is not None:
-        semantic_hierarchy["emotion"] = {
-            "layers": [num_layers - 1],  # 最后一层
-            "codebook_size": emotion_codebook,
-            "loss_weight": 0.6,
-            "ema_decay": 0.99
-        }
-
-    return semantic_hierarchy
+        self.codebook_sizes = codebook_sizes if codebook_sizes else [512]
 
 
 def train_ahrq_stage1(
@@ -354,7 +207,7 @@ def train_ahrq_stage1(
     hscl_weight: float = 0.03,
     logger=None
 ) -> Dict:
-    """Stage 1: 训练AHRQ量化器"""
+    """Stage 1: 训练 AHRQ 量化器"""
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=1e-4,
@@ -363,7 +216,7 @@ def train_ahrq_stage1(
     )
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
 
-    # 如果启用HSCL，创建层次一致性模块
+    # 如果启用 HSCL，创建层次一致性模块
     hscl_module = None
     hscl_optimizer = None
     if use_hscl:
@@ -399,7 +252,7 @@ def train_ahrq_stage1(
                 quantized, raw, None, None, new_config, [quant_loss]
             )
 
-            # 如果启用HSCL，计算一致性损失
+            # 如果启用 HSCL，计算一致性损失
             if use_hscl and hscl_module:
                 # 提取各层量化后的特征
                 quantized_layers = []
@@ -483,7 +336,7 @@ def evaluate_test_full(model, test_loader, indices_list, topk_list=[5, 10, 20]):
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc=f'Full Ranking Evaluation'):
-            # 使用新的batch格式
+            # 使用新的 batch 格式
             user_emb = model.get_user_embedding(batch)
             target_idx = batch["target_item"].to(new_config.device) - 1
 
@@ -520,7 +373,7 @@ def train_single_config(
     print(f"Running: {hp_config.experiment_name}")
     print(f"  Codebook sizes: {hp_config.codebook_sizes}")
     print(f"  Hidden dim: {hp_config.hidden_dim}")
-    print(f"  AHRQ创新点配置: use_ema={hp_config.use_ema}, use_hscl={hp_config.use_hscl}, use_emotion={hp_config.use_emotion}")
+    print(f"  AHRQ 创新点配置：use_ema={hp_config.use_ema}, use_hscl={hp_config.use_hscl}, use_emotion={hp_config.use_emotion}")
     if hp_config.use_hscl:
         print(f"  HSCL weight: {hp_config.hscl_weight}")
     print(f"  Stage1 epochs: {hp_config.stage1_epochs}, Stage2 epochs: {hp_config.stage2_epochs}")
@@ -543,19 +396,15 @@ def train_single_config(
         logger=logger
     )
 
-    # ===== Stage 1: 训练AHRQ量化器 =====
+    # ===== Stage 1: 训练 AHRQ 量化器 =====
     print(f"\n{'='*60}")
     print("Stage 1: Training AHRQ Quantizer")
     print(f"{'='*60}")
 
-    # 构建语义层次结构
-    semantic_hierarchy = build_semantic_hierarchy(
-        hp_config.codebook_sizes,
-        hp_config.hidden_dim,
-        use_emotion=hp_config.use_emotion
-    )
+    # 直接使用配置中的 semantic_hierarchy
+    semantic_hierarchy = hp_config.semantic_hierarchy
 
-    # 创建AHRQ模型
+    # 创建 AHRQ 模型
     ahrq = AdaptiveHierarchicalQuantizer(
         hidden_dim=hp_config.hidden_dim,
         semantic_hierarchy=semantic_hierarchy,
@@ -575,7 +424,7 @@ def train_single_config(
         bn=True
     ).to(device)
 
-    # 训练Stage 1
+    # 训练 Stage 1
     stage1_results = train_ahrq_stage1(
         ahrq, pretrain_loader, device,
         epochs=hp_config.stage1_epochs,
@@ -584,7 +433,7 @@ def train_single_config(
         logger=logger
     )
 
-    # 提取所有物品的语义ID
+    # 提取所有物品的语义 ID
     print("\nExtracting all item semantics...")
     ahrq.eval()
     all_item_text = all_item_meta['text_features'].float().to(device)
@@ -606,7 +455,7 @@ def train_single_config(
             else:
                 print(f"  {layer}: {info.get('note', 'N/A')}")
 
-    # 构建完整的语义ID质量评估结果
+    # 构建完整的语义 ID 质量评估结果
     semantic_id_quality = {
         "codebook_usage_rates": usage_rates,
         "avg_usage_rate": float(np.mean(usage_rates)),
@@ -620,7 +469,7 @@ def train_single_config(
         "final_train_loss": stage1_results.get('final_train_loss', 0.0)
     }
 
-    # 保存Stage 1结果
+    # 保存 Stage 1 结果
     stage1_save_path = f"{OUTPUT_DIR}/stage1_model.pth"
     torch.save({
         "model_state_dict": ahrq.state_dict(),
@@ -635,24 +484,24 @@ def train_single_config(
     }, stage1_save_path)
     print(f"Stage 1 model saved to: {stage1_save_path}")
 
-    # ===== Stage 2: 训练SASRec =====
+    # ===== Stage 2: 训练 SASRec =====
     print(f"\n{'='*60}")
     print("Stage 2: Training SASRec with Semantic IDs")
     print(f"{'='*60}")
 
-    # 创建SASRecAHRQ模型
+    # 创建 SASRecAHRQ 模型
     num_items = all_item_meta['text_features'].shape[0]
 
     dynamic_sasrec_params = {
-        # 核心基线参数（对齐Pure SASRec）
-        "sasrec_num_layers": 2,  # 基线2层
-        "dim_feedforward": hp_config.hidden_dim * 4,  # 64*4=256（基线FFN）
-        "num_heads": 1,  # 基线1头（修改为1以对齐基线）
+        # 核心基线参数（对齐 Pure SASRec）
+        "sasrec_num_layers": 2,  # 基线 2 层
+        "dim_feedforward": hp_config.hidden_dim * 4,  # 64*4=256（基线 FFN）
+        "num_heads": 1,  # 基线 1 头（修改为 1 以对齐基线）
         "dropout": hp_config.dropout,  # 从配置读取
         "lr_scale": 1.0,  # 学习率不缩放
-        # 补充缺失的字段（避免KeyError）
+        # 补充缺失的字段（避免 KeyError）
         "total_bits": sum([np.log2(cb) for cb in hp_config.codebook_sizes]),
-        "scale": 1.0,  # 基线scale=1.0
+        "scale": 1.0,  # 基线 scale=1.0
     }
     # 打印动态参数配置
     print(f"\n>>> Dynamic SASRec Parameters (based on codebook {hp_config.codebook_sizes}):")
@@ -660,7 +509,7 @@ def train_single_config(
     print(f"    Dropout: {dynamic_sasrec_params['dropout']:.3f}, Num heads: {dynamic_sasrec_params['num_heads']}")
     print(f"    Learning rate scale: {dynamic_sasrec_params['lr_scale']:.2f}")
 
-    # 准备连续特征 - 确保完全detach，避免梯度图保留导致backward错误
+    # 准备连续特征 - 确保完全 detach，避免梯度图保留导致 backward 错误
     if hp_config.use_quantized_fusion:
         quantized_feat_tensor = quantized_feat.detach().clone() if quantized_feat is not None else None
     else:
@@ -835,7 +684,7 @@ def train_single_config(
         "config": {
             "codebook_sizes": hp_config.codebook_sizes,
             "hidden_dim": hp_config.hidden_dim,
-            # AHRQ创新点配置
+            # AHRQ 创新点配置
             "use_ema": hp_config.use_ema,
             "use_hscl": hp_config.use_hscl,
             "use_emotion": hp_config.use_emotion,
@@ -846,7 +695,7 @@ def train_single_config(
             "stage2_epochs": hp_config.stage2_epochs,
             "lr": hp_config.lr
         },
-        # 动态SASRec参数
+        # 动态 SASRec 参数
         "dynamic_sasrec_params": {
             "total_bits": dynamic_sasrec_params["total_bits"],
             "scale": dynamic_sasrec_params["scale"],
@@ -870,7 +719,7 @@ def train_single_config(
         "val_history": val_history
     }
 
-    # 保存详细结果到JSON
+    # 保存详细结果到 JSON
     result_path = f"./results/sasrec_ahrq_hp_search/{hp_config.experiment_name}_results.json"
     with open(result_path, 'w', encoding='utf-8') as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
@@ -880,75 +729,109 @@ def train_single_config(
 
 
 def save_hp_search_summary(all_results: List[Dict], output_dir: str = "./results/sasrec_ahrq_hp_search"):
-    """保存层级搜索汇总表格"""
+    """保存层级搜索汇总表格 - 按实验分组"""
     os.makedirs(output_dir, exist_ok=True)
 
-    summary_data = []
+    # 按实验分组
+    results_by_experiment = {"A": [], "B": [], "C": []}
+
     for result in all_results:
-        test_metrics = result['test_metrics']
-        stage2_best = result['stage2_best_val']
-        config = result['config']
-        semantic_quality = result.get('stage1', {}).get('semantic_id_quality', {})
+        exp_name = result['experiment_name']
+        if exp_name.startswith("expA_"):
+            results_by_experiment["A"].append(result)
+        elif exp_name.startswith("expB_"):
+            results_by_experiment["B"].append(result)
+        elif exp_name.startswith("expC_"):
+            results_by_experiment["C"].append(result)
 
-        # 获取动态SASRec参数
-        dynamic_params = result.get('dynamic_sasrec_params', {})
+    # 生成分组汇总表
+    for exp_name, experiments in results_by_experiment.items():
+        if not experiments:
+            continue
 
-        row = {
-            "Experiment": result['experiment_name'],
-            "Codebook_Sizes": str(config['codebook_sizes']),
-            "Layers": len(config['codebook_sizes']),
-            # AHRQ创新点配置
-            "Use_EMA": config.get('use_ema', False),
-            "Use_HSCL": config.get('use_hscl', False),
-            "Use_Emotion": config.get('use_emotion', False),
-            # 动态SASRec参数
-            "SASRec_Layers": dynamic_params.get('sasrec_num_layers', 2),
-            "FFN_Dim": dynamic_params.get('dim_feedforward', 2048),
-            "Dropout": f"{dynamic_params.get('dropout', 0.1):.3f}",
-            "Num_Heads": dynamic_params.get('num_heads', 4),
-            # Stage 1指标 - 语义ID质量
-            "Stage1_Recon_Loss": f"{result['stage1']['best_val_recon_loss']:.6f}",
-            "Stage1_Codebook_Usage": f"{np.mean(result['stage1']['codebook_usage']):.4f}",
-            "Total_Bits": f"{semantic_quality.get('total_bits', 0):.2f}",
-            "Effective_Bits": f"{semantic_quality.get('effective_bits', 0):.2f}",
-            # 测试集指标
-            "Test HR@5": f"{test_metrics['HR@5']:.4f}",
-            "Test HR@10": f"{test_metrics['HR@10']:.4f}",
-            "Test HR@20": f"{test_metrics['HR@20']:.4f}",
-            "Test NDCG@5": f"{test_metrics['NDCG@5']:.4f}",
-            "Test NDCG@10": f"{test_metrics['NDCG@10']:.4f}",
-            "Test NDCG@20": f"{test_metrics['NDCG@20']:.4f}",
-            "Test MRR": f"{test_metrics['MRR']:.4f}",
-            "Val NDCG@10": f"{stage2_best['best_ndcg']:.4f}",
-        }
-        summary_data.append(row)
+        summary_data = []
+        for result in experiments:
+            test_metrics = result['test_metrics']
+            stage2_best = result['stage2_best_val']
+            config = result['config']
+            semantic_quality = result.get('stage1', {}).get('semantic_id_quality', {})
+            dynamic_params = result.get('dynamic_sasrec_params', {})
 
-    df = pd.DataFrame(summary_data)
-    summary_path = os.path.join(output_dir, "hp_search_summary.csv")
-    df.to_csv(summary_path, index=False)
-    print(f"\nSaved HP search summary to: {summary_path}")
+            row = {
+                "Experiment": result['experiment_name'],
+                "Group": f"Experiment {exp_name}",
+                "Codebook_Sizes": str(config['codebook_sizes']),
+                "Hidden_Dim": config['hidden_dim'],
+                "Layers": len(config['codebook_sizes']),
+                "Use_EMA": config.get('use_ema', False),
+                "Use_HSCL": config.get('use_hscl', False),
+                "SASRec_Layers": dynamic_params.get('sasrec_num_layers', 2),
+                "FFN_Dim": dynamic_params.get('dim_feedforward', 256),
+                "Dropout": f"{dynamic_params.get('dropout', 0.35):.3f}",
+                "Num_Heads": dynamic_params.get('num_heads', 1),
+                "Stage1_Recon_Loss": f"{result['stage1']['best_val_recon_loss']:.6f}",
+                "Stage1_Codebook_Usage": f"{np.mean(result['stage1']['codebook_usage']):.4f}",
+                "Total_Bits": f"{semantic_quality.get('total_bits', 0):.2f}",
+                "Effective_Bits": f"{semantic_quality.get('effective_bits', 0):.2f}",
+                "Test HR@5": f"{test_metrics['HR@5']:.4f}",
+                "Test HR@10": f"{test_metrics['HR@10']:.4f}",
+                "Test HR@20": f"{test_metrics['HR@20']:.4f}",
+                "Test NDCG@5": f"{test_metrics['NDCG@5']:.4f}",
+                "Test NDCG@10": f"{test_metrics['NDCG@10']:.4f}",
+                "Test NDCG@20": f"{test_metrics['NDCG@20']:.4f}",
+                "Test MRR": f"{test_metrics['MRR']:.4f}",
+                "Val NDCG@10": f"{stage2_best['best_ndcg']:.4f}",
+            }
+            summary_data.append(row)
 
-    # 打印主要指标表格
-    print("\n" + "=" * 120)
-    print("Hierarchy Search Results Summary (语义ID质量 vs 推荐效果)")
-    print("=" * 120)
-    print(f"{'Experiment':<25} {'Codebook':<20} {'EMA':>4} {'HSCL':>5} {'Usage':>8} {'EffBits':>8} {'HR@10':>8} {'NDCG@10':>8} {'MRR':>8}")
-    print("-" * 120)
-    for result in all_results:
-        test = result['test_metrics']
-        config = result['config']
-        codebook_str = str(config['codebook_sizes'])[:18]
-        semantic_quality = result.get('stage1', {}).get('semantic_id_quality', {})
-        usage = np.mean(result['stage1']['codebook_usage'])
-        eff_bits = semantic_quality.get('effective_bits', 0)
-        ema = "Yes" if config.get('use_ema', False) else "No"
-        hscl = "Yes" if config.get('use_hscl', False) else "No"
-        print(f"{result['experiment_name']:<25} {codebook_str:<20} {ema:>4} {hscl:>5} {usage:>8.4f} {eff_bits:>8.2f} {test['HR@10']:>8.4f} {test['NDCG@10']:>8.4f} {test['MRR']:>8.4f}")
-    print("-" * 120)
-    print(f"Pure SASRec Baseline:       HR@10=0.1704, NDCG@10=0.0814")
-    print("=" * 120)
+        df = pd.DataFrame(summary_data)
+        summary_path = os.path.join(output_dir, f"exp_group_{exp_name}_summary.csv")
+        df.to_csv(summary_path, index=False)
+        print(f"Saved Experiment {exp_name} summary to: {summary_path}")
 
-    return df
+    # 生成完整汇总表
+    all_summary_data = []
+    for exp_name, experiments in results_by_experiment.items():
+        for result in experiments:
+            test_metrics = result['test_metrics']
+            stage2_best = result['stage2_best_val']
+            config = result['config']
+            semantic_quality = result.get('stage1', {}).get('semantic_id_quality', {})
+            dynamic_params = result.get('dynamic_sasrec_params', {})
+
+            row = {
+                "Experiment": result['experiment_name'],
+                "Group": f"Experiment {exp_name}",
+                "Codebook_Sizes": str(config['codebook_sizes']),
+                "Hidden_Dim": config['hidden_dim'],
+                "Layers": len(config['codebook_sizes']),
+                "Use_EMA": config.get('use_ema', False),
+                "Use_HSCL": config.get('use_hscl', False),
+                "SASRec_Layers": dynamic_params.get('sasrec_num_layers', 2),
+                "FFN_Dim": dynamic_params.get('dim_feedforward', 256),
+                "Dropout": f"{dynamic_params.get('dropout', 0.35):.3f}",
+                "Num_Heads": dynamic_params.get('num_heads', 1),
+                "Stage1_Recon_Loss": f"{result['stage1']['best_val_recon_loss']:.6f}",
+                "Stage1_Codebook_Usage": f"{np.mean(result['stage1']['codebook_usage']):.4f}",
+                "Total_Bits": f"{semantic_quality.get('total_bits', 0):.2f}",
+                "Effective_Bits": f"{semantic_quality.get('effective_bits', 0):.2f}",
+                "Test HR@5": f"{test_metrics['HR@5']:.4f}",
+                "Test HR@10": f"{test_metrics['HR@10']:.4f}",
+                "Test HR@20": f"{test_metrics['HR@20']:.4f}",
+                "Test NDCG@5": f"{test_metrics['NDCG@5']:.4f}",
+                "Test NDCG@10": f"{test_metrics['NDCG@10']:.4f}",
+                "Test NDCG@20": f"{test_metrics['NDCG@20']:.4f}",
+                "Test MRR": f"{test_metrics['MRR']:.4f}",
+                "Val NDCG@10": f"{stage2_best['best_ndcg']:.4f}",
+            }
+            all_summary_data.append(row)
+
+    df_all = pd.DataFrame(all_summary_data)
+    summary_path = os.path.join(output_dir, "hp_search_all_summary.csv")
+    df_all.to_csv(summary_path, index=False)
+    print(f"Saved all results summary to: {summary_path}")
+
+    return df_all
 
 
 def main():
@@ -956,125 +839,109 @@ def main():
     logger = Logger("./logs/train_sasrec_ahrq_hp_search.log")
     device = new_config.device
 
-    # 定义搜索配置 - 基于金字塔设计理念
-    # 第一层小（捕获基础类别），后续层大（捕获变体）
-    # ========== 第一阶段: 对齐基线参数 ==========
-    # 先验证语义ID本身的效果，不使用连续特征融合
-    search_configs = [
-        # 1. 对齐基线: hidden_dim=64, lr=1e-3, dropout=0.4
+    # ========== 实验 A：量化层数 L 搜索 ==========
+    # 固定：hidden_dim=64, K=512, use_ema=True, use_hscl=True, use_emotion=False
+    # 构建不同层数的 semantic_hierarchy
+    experiment_A_layer_search = [
         HPSearchConfig(
-            experiment_name="align_baseline_d04",
-            codebook_sizes=[256, 512, 512, 512],
+            experiment_name=f"expA_L{i}",
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                }
+            } if i == 1 else {
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": list(range(1, i)),
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            },
             hidden_dim=64,
-            use_ema=True,
-            use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
-            stage1_epochs=20,
-            stage2_epochs=50,
-            lr=1e-3,
-            dropout=0.4
-        ),
-
-        # 2. 2层结构（对齐基线层数）
-        HPSearchConfig(
-            experiment_name="align_baseline_2layer",
-            codebook_sizes=[256, 512],
-            hidden_dim=64,
-            use_ema=True,
-            use_hscl=False,
-            use_emotion=False,
-            stage1_epochs=20,
-            stage2_epochs=50,
-            lr=1e-3,
-            dropout=0.4
-        ),
-        # 3. 3层结构（修复：hidden_dim=69可被3整除）
-        HPSearchConfig(
-            experiment_name="align_baseline_3layer",
-            codebook_sizes=[256, 256, 512],
-            hidden_dim=69,  # 修复：原64%3=1会触发断言错误，改为69可被3整除
             use_ema=True,
             use_hscl=True,
             use_emotion=False,
-            hscl_weight=0.03,
-            stage1_epochs=20,
-            stage2_epochs=50,
-            lr=1e-3,
-            dropout=0.4
-        ),
-        HPSearchConfig(
-            experiment_name="dropout_035",
-            codebook_sizes=[256, 512, 512, 512],
-            hidden_dim=64,
-            use_ema=True,
-            use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
             stage1_epochs=20,
             stage2_epochs=50,
             lr=1e-3,
             dropout=0.35
-        ),
+        )
+        for i in range(1, 6)  # L ∈ {1,2,3,4,5}
     ]
 
-    # ========== 第三阶段: 连续特征融合实验 ==========
-    fusion_configs = [
-        # 9. 使用原始连续特征融合
+    # ========== 实验 B：码本规模 K 搜索 ==========
+    # 固定：L=4, hidden_dim=64, use_ema=True, use_hscl=True, use_emotion=False
+    experiment_B_codebook_search = [
         HPSearchConfig(
-            experiment_name="raw_fusion",
-            codebook_sizes=[256, 512, 512, 512],
+            experiment_name=f"expB_K{K}",
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": K,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
+                    "codebook_size": K,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            },
             hidden_dim=64,
             use_ema=True,
             use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
+            use_emotion=False,
             stage1_epochs=20,
             stage2_epochs=50,
             lr=1e-3,
-            dropout=0.4,
-            use_raw_fusion=True,
-            use_quantized_fusion=False,
-            use_semantic_id=True
-        ),
-        # 10. 使用量化特征融合
+            dropout=0.35
+        )
+        for K in [64, 128, 256, 512, 1024]  # K ∈ {64,128,256,512,1024}
+    ]
+
+    # ========== 实验 C：隐藏维度 d 搜索 ==========
+    # 固定：L=4, K=512, use_ema=True, use_hscl=True, use_emotion=False
+    experiment_C_dim_search = [
         HPSearchConfig(
-            experiment_name="quantized_fusion",
-            codebook_sizes=[256, 512, 512, 512],
-            hidden_dim=64,
+            experiment_name=f"expC_d{d}",
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            },
+            hidden_dim=d,
             use_ema=True,
             use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
+            use_emotion=False,
             stage1_epochs=20,
             stage2_epochs=50,
             lr=1e-3,
-            dropout=0.4,
-            use_raw_fusion=False,
-            use_quantized_fusion=True,
-            use_semantic_id=True
-        ),
-        # 11. 同时使用原始和量化特征融合
-        HPSearchConfig(
-            experiment_name="both_fusion",
-            codebook_sizes=[256, 512, 512, 512],
-            hidden_dim=64,
-            use_ema=True,
-            use_hscl=True,
-            use_emotion=True,
-            hscl_weight=0.03,
-            stage1_epochs=20,
-            stage2_epochs=50,
-            lr=1e-3,
-            dropout=0.4,
-            use_raw_fusion=True,
-            use_quantized_fusion=True,
-            use_semantic_id=True
-        ),
+            dropout=0.35
+        )
+        for d in [32, 64, 128, 256]  # d ∈ {32,64,128,256}
     ]
 
     # 合并所有配置
-    all_configs = search_configs + fusion_configs
+    all_configs = experiment_A_layer_search + experiment_B_codebook_search + experiment_C_dim_search
 
     all_results = []
 
@@ -1092,7 +959,7 @@ def main():
     if all_results:
         save_hp_search_summary(all_results)
         print("\n" + "=" * 60)
-        print("All Hierarchy search experiments completed!")
+        print("All experiments completed!")
         print("=" * 60)
 
 
