@@ -109,7 +109,7 @@ def train_single_experiment(
 
 
     ahrq = AdaptiveHierarchicalQuantizer(
-        hidden_dim=new_config.ahrq_hidden_dim,
+        hidden_dim=exp_config.hidden_dim,
         semantic_hierarchy=exp_config.semantic_hierarchy,
         use_multimodal=True,
         text_dim=new_config.text_dim,
@@ -380,7 +380,7 @@ def train_stage1_quantization(
     hscl_module = None
     if config.use_hscl:
         hscl_module = HierarchicalSemanticConsistency(
-            hidden_dim=new_config.ahrq_hidden_dim,
+            hidden_dim=config.hidden_dim,
             semantic_hierarchy=model.semantic_hierarchy,
             predictor_type="mlp"
         ).to(device)
