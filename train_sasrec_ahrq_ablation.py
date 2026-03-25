@@ -30,6 +30,7 @@ from log import Logger
 from metrics import codebook_usage_rate
 from our_models.ah_rq import AdaptiveHierarchicalQuantizer, HierarchicalSemanticConsistency
 from our_models.sasrec_ahrq import SASRecAHRQ
+from train_ahrq_ablation import analyze_codebook_clusters
 from utils.loss import compute_rqvae_recon_loss
 from utils.utils import (
     calculate_metrics, calculate_id_metrics, seed_everything,
@@ -139,7 +140,24 @@ def train_single_experiment(
         all_item_vision = all_item_meta['image_features'].float().to(device)
         _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
 
-    usage_rates = codebook_usage_rate(indices_list, exp_config.semantic_hierarchy)
+    n_e_list = []
+    layer_to_codebook = {}
+    for semantic_type, cfg in exp_config.semantic_hierarchy.items():
+        for layer_idx in cfg['layers']:
+            layer_to_codebook[layer_idx] = cfg['codebook_size']
+    for layer_idx in sorted(layer_to_codebook.keys()):
+        n_e_list.append(layer_to_codebook[layer_idx])
+
+    usage_rates = codebook_usage_rate(indices_list, n_e_list)
+    cluster_results = analyze_codebook_clusters(ahrq, device, pretrain_loader, num_clusters=10)
+    layer_usage_by_group = {}
+    for semantic_type, cfg in exp_config.semantic_hierarchy.items():
+        layer_indices = cfg['layers']
+        group_rates = [usage_rates[i] for i in layer_indices]
+        layer_usage_by_group[semantic_type] = {
+            'avg': np.mean(group_rates),
+            'layers': group_rates
+        }
 
     # 2. 获取数据
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
@@ -316,7 +334,14 @@ def train_single_experiment(
             "codebook_sizes": exp_config.semantic_hierarchy,
         },
         "stage1_metrics": {
-            "best_val_recon_loss": stage1_results['best_val_recon_loss']
+            "train_loss": stage1_results["final_train_loss"],
+            "val_recon_loss": stage1_results["best_val_recon_loss"],
+            "codebook_usage": {
+                "overall": np.mean(usage_rates),
+                "by_layer": usage_rates,
+                "by_group": layer_usage_by_group
+            },
+            "cluster_analysis": cluster_results
         },
         "stage2_best_val": {
             "best_ndcg": best_ndcg,
@@ -508,6 +533,8 @@ def save_ablation_summary(all_results: List[Dict], output_dir: str = "./results/
             "Codebook Sizes": str(result['config']['codebook_sizes']),
             # Stage 1 指标
             "Stage1 Recon Loss": result['stage1_metrics']['best_val_recon_loss'],
+            "Stage1 Codebook Usage": result['stage1_metrics']['codebook_usage'],
+            "Stage1 Cluster Analysis": result['stage1_metrics']['cluster_analysis'],
             # Stage 2 最佳验证指标
             "Val NDCG@10": stage2_best['best_ndcg'],
             "Best Epoch": stage2_best['best_epoch'],
