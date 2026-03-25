@@ -27,8 +27,10 @@ import pandas as pd
 from config import new_config
 from data_utils import get_pmat_dataloader, get_all_item_pretrain_dataloader
 from log import Logger
-from our_models.ah_rq import AdaptiveHierarchicalQuantizer
+from metrics import codebook_usage_rate
+from our_models.ah_rq import AdaptiveHierarchicalQuantizer, HierarchicalSemanticConsistency
 from our_models.sasrec_ahrq import SASRecAHRQ
+from utils.loss import compute_rqvae_recon_loss
 from utils.utils import (
     calculate_metrics, calculate_id_metrics, seed_everything,
     EarlyStopping, fast_codebook_reset, calculate_mrr_full
@@ -42,13 +44,12 @@ class AblationExperimentConfig:
     """消融实验配置"""
     experiment_name: str
     ahrq_model_name: str  # 对应results/ahrq_ablation/models/中的模型文件名
-    use_ema: bool = False
-    use_hscl: bool = False
-    use_emotion: bool = False
-    # 最佳参数配置（来自超参数搜索）
-    dropout: float = 0.35
-    hidden_dim: int = 64
-    codebook_sizes: List[int] = None  # [256, 512, 512, 512]
+    use_ema: bool
+    use_hscl: bool
+    use_emotion: bool
+    dropout: float
+    hidden_dim: int
+    semantic_hierarchy: dict
 
 
 def evaluate_test_full(model, test_loader, indices_list, topk_list=[5, 10, 20]):
@@ -104,32 +105,41 @@ def train_single_experiment(
     OUTPUT_DIR = f"./results/sasrec_ahrq_ablation/{exp_config.experiment_name}"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # 1. 加载预训练的AHRQ模型
-    ahrq_model_path = f"./results/ahrq_ablation/models/{exp_config.ahrq_model_name}_model.pth"
-    if not os.path.exists(ahrq_model_path):
-        raise FileNotFoundError(f"AHRQ model not found at {ahrq_model_path}. Please run train_ahrq_ablation.py first.")
 
-    print(f"Loading AHRQ model from {ahrq_model_path}...")
-    checkpoint = torch.load(ahrq_model_path, map_location=device, weights_only=False)
-    saved_config = checkpoint['config']
-    semantic_hierarchy = saved_config['semantic_hierarchy']
-    indices_list = checkpoint['indices_list']
 
     ahrq = AdaptiveHierarchicalQuantizer(
         hidden_dim=new_config.ahrq_hidden_dim,
-        semantic_hierarchy=semantic_hierarchy,
+        semantic_hierarchy=exp_config.semantic_hierarchy,
         use_multimodal=True,
         text_dim=new_config.text_dim,
         visual_dim=new_config.visual_dim,
         beta=new_config.ahrq_beta,
-        use_ema=saved_config.get('use_ema', False),
+        use_ema=exp_config.use_ema,
         ema_decay=0.99,
-        reset_unused_codes=saved_config.get('use_ema', False),
+        reset_unused_codes=exp_config.use_ema,
         reset_threshold=new_config.ahrq_reset_threshold
     ).to(device)
-    ahrq.load_state_dict(checkpoint['model_state_dict'])
-    best_recon_loss = checkpoint.get('metrics', {}).get('val_recon_loss', float('inf'))
-    print(f"AHRQ model loaded! Best recon loss: {best_recon_loss:.6f}")
+    pretrain_loader, all_item_meta = get_all_item_pretrain_dataloader(
+        cache_dir="./data",
+        category='Video_Games',
+        batch_size=new_config.batch_size,
+        shuffle=True,
+        quick_mode=True,
+        num_workers=NUM_WORKS,
+        logger=logger
+    )
+    stage1_results = train_stage1_quantization(
+        ahrq, pretrain_loader, exp_config, device, logger
+    )
+
+    # 计算各层码本利用率
+    ahrq.eval()
+    with torch.no_grad():
+        all_item_text = all_item_meta['text_features'].float().to(device)
+        all_item_vision = all_item_meta['image_features'].float().to(device)
+        _, indices_list, _, _ = ahrq(all_item_text, all_item_vision)
+
+    usage_rates = codebook_usage_rate(indices_list, exp_config.semantic_hierarchy)
 
     # 2. 获取数据
     train_loader, val_loader, test_loader, all_item_features = get_pmat_dataloader(
@@ -303,10 +313,10 @@ def train_single_experiment(
             "use_emotion": exp_config.use_emotion,
             "dropout": exp_config.dropout,
             "hidden_dim": exp_config.hidden_dim,
-            "codebook_sizes": exp_config.codebook_sizes,
+            "codebook_sizes": exp_config.semantic_hierarchy,
         },
         "stage1_metrics": {
-            "best_val_recon_loss": best_recon_loss
+            "best_val_recon_loss": stage1_results['best_val_recon_loss']
         },
         "stage2_best_val": {
             "best_ndcg": best_ndcg,
@@ -324,6 +334,158 @@ def train_single_experiment(
     print(f"Results saved to: {result_path}")
 
     return results
+
+def train_stage1_quantization(
+    model,
+    pretrain_loader,
+    config: AblationExperimentConfig,
+    device: torch.device,
+    logger
+):
+    """Stage 1: 量化预训练"""
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=1e-4,
+        weight_decay=1e-5,
+        betas=(0.9, 0.999)
+    )
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.9)
+
+    # 如果启用HSCL，创建层次一致性模块
+    hscl_module = None
+    if config.use_hscl:
+        hscl_module = HierarchicalSemanticConsistency(
+            hidden_dim=new_config.ahrq_hidden_dim,
+            semantic_hierarchy=model.semantic_hierarchy,
+            predictor_type="mlp"
+        ).to(device)
+        hscl_optimizer = torch.optim.AdamW(
+            hscl_module.parameters(),
+            lr=1e-4,
+            weight_decay=1e-5
+        )
+
+    best_recon_loss = float('inf')
+    train_losses = []
+    codebook_usage_history = []
+
+    for epoch in range(new_config.stage1_epochs):
+        model.train()
+        if hscl_module:
+            hscl_module.train()
+        epoch_losses = []
+        epoch_id_metrics = []
+
+        train_bar = tqdm(pretrain_loader, desc=f"Stage1 {config.experiment_name} Epoch {epoch + 1}")
+
+        for batch in train_bar:
+            text_feat = batch['text_feat'].float().to(device)
+            vision_feat = batch['vision_feat'].float().to(device)
+
+            quantized, indices, raw, quant_loss = model(text_feat, vision_feat)
+
+            loss, loss_dict = compute_rqvae_recon_loss(
+                quantized, raw, None, None, new_config, [quant_loss]
+            )
+
+            # 如果启用HSCL，计算一致性损失
+            if config.use_hscl and hscl_module:
+                # 提取各层量化后的特征
+                quantized_layers = []
+                layer_dim = new_config.ahrq_hidden_dim // model.num_layers
+                for layer_idx in range(model.num_layers):
+                    layer_feat = quantized[:, layer_idx * layer_dim:(layer_idx + 1) * layer_dim]
+                    quantized_layers.append(layer_feat)
+
+                # 计算一致性损失
+                consistency_losses = hscl_module.compute_consistency_loss(quantized_layers, indices)
+                total_consistency_loss = consistency_losses['total_consistency_loss']
+
+                # 将一致性损失加入总损失
+                loss = loss + config.hscl_weight * total_consistency_loss
+                loss_dict['consistency_loss'] = total_consistency_loss.item()
+
+            optimizer.zero_grad()
+            if hscl_module and config.use_hscl:
+                hscl_optimizer.zero_grad()
+
+            loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), new_config.grad_clip)
+            if hscl_module and config.use_hscl:
+                torch.nn.utils.clip_grad_norm_(hscl_module.parameters(), new_config.grad_clip)
+
+            optimizer.step()
+            if hscl_module and config.use_hscl:
+                hscl_optimizer.step()
+
+            epoch_losses.append(loss.item())
+
+            if config.use_hscl:
+                train_bar.set_postfix({
+                    "loss": f"{np.mean(epoch_losses):.4f}",
+                    "recon": f"{loss_dict.get('rqvae_recon_loss', 0):.6f}",
+                    "consistency": f"{loss_dict.get('consistency_loss', 0):.6f}",
+                })
+            else:
+                train_bar.set_postfix({
+                    "loss": f"{np.mean(epoch_losses):.4f}",
+                    "recon": f"{loss_dict.get('rqvae_recon_loss', 0):.6f}",
+                })
+
+        scheduler.step()
+        avg_loss = np.mean(epoch_losses)
+
+        # 验证并计算码本利用率
+        model.eval()
+        val_losses = []
+        with torch.no_grad():
+            for batch in pretrain_loader:
+                text_feat = batch['text_feat'].float().to(device)
+                vision_feat = batch['vision_feat'].float().to(device)
+                quantized, indices, raw, quant_loss = model(text_feat, vision_feat)
+                loss, loss_dict = compute_rqvae_recon_loss(
+                    quantized, raw, None, None, new_config, [quant_loss]
+                )
+                val_losses.append(loss_dict['rqvae_recon_loss'])
+
+        avg_val_loss = np.mean(val_losses)
+
+        # 计算码本利用率
+        all_indices = []
+        with torch.no_grad():
+            for batch in pretrain_loader:
+                text_feat = batch['text_feat'].float().to(device)
+                vision_feat = batch['vision_feat'].float().to(device)
+                _, indices, _, _ = model(text_feat, vision_feat)
+                all_indices.append(indices)
+        all_indices = torch.cat(all_indices, dim=0)
+
+        # 获取各层码本大小（按层索引排序，与模型输出顺序一致）
+        layer_to_codebook = {}
+        for semantic_type, cfg in model.semantic_hierarchy.items():
+            for layer_idx in cfg['layers']:
+                layer_to_codebook[layer_idx] = cfg['codebook_size']
+        n_e_list = [layer_to_codebook[i] for i in sorted(layer_to_codebook.keys())]
+
+        usage_rates = codebook_usage_rate(all_indices, n_e_list)
+        avg_usage = np.mean(usage_rates)
+        codebook_usage_history.append(avg_usage)
+
+        print(f"{config.experiment_name} Epoch {epoch + 1}: Loss={avg_loss:.4f}, "
+              f"Val Recon={avg_val_loss:.6f}, Codebook Usage={avg_usage:.4f}")
+
+        if avg_val_loss < best_recon_loss:
+            best_recon_loss = avg_val_loss
+
+        train_losses.append(avg_loss)
+
+    return {
+        "final_train_loss": np.mean(train_losses[-5:]),
+        "best_val_recon_loss": best_recon_loss,
+        "final_codebook_usage": codebook_usage_history[-1] if codebook_usage_history else 0.0,
+        "codebook_usage_history": codebook_usage_history
+    }
 
 
 def save_ablation_summary(all_results: List[Dict], output_dir: str = "./results/sasrec_ahrq_ablation"):
@@ -413,8 +575,21 @@ def main():
             use_hscl=False,
             use_emotion=False,
             dropout=0.5,
-            hidden_dim=64,
-            codebook_sizes=[512, 512, 512, 512]  # 4层自适应码本
+            hidden_dim=128,
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            }
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-EMA",
@@ -422,9 +597,22 @@ def main():
             use_ema=True,
             use_hscl=False,
             use_emotion=False,
-            dropout=0.5,
+            dropout=0.35,
             hidden_dim=64,
-            codebook_sizes=[256, 512, 512, 512]
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            }
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-HSCL",
@@ -432,9 +620,22 @@ def main():
             use_ema=True,
             use_hscl=True,
             use_emotion=False,
-            dropout=0.5,
-            hidden_dim=64,
-            codebook_sizes=[256, 512, 512, 512]
+            dropout=0.3,
+            hidden_dim=128,
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            }
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-Full",
@@ -442,9 +643,22 @@ def main():
             use_ema=True,
             use_hscl=True,
             use_emotion=True,
-            dropout=0.5,
-            hidden_dim=64,
-            codebook_sizes=[256, 512, 512, 512]
+            dropout=0.3,
+            hidden_dim=128,
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 512,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2, 3],
+                    "codebook_size": 512,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            }
         ),
     ]
 
