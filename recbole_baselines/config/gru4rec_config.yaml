@@ -2,8 +2,8 @@
 # Session-based Recommendations with Recurrent Neural Networks (ICLR 2016)
 
 # 模型参数
-embedding_size: 64
-hidden_size: 128
+embedding_size: 128
+hidden_size: 256
 num_layers: 1
 dropout_prob: 0.3
 
