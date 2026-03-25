@@ -417,7 +417,7 @@ def train_stage1_quantization(
             if config.use_hscl and hscl_module:
                 # 提取各层量化后的特征
                 quantized_layers = []
-                layer_dim = new_config.ahrq_hidden_dim // model.num_layers
+                layer_dim = config.hidden_dim // model.num_layers
                 for layer_idx in range(model.num_layers):
                     layer_feat = quantized[:, layer_idx * layer_dim:(layer_idx + 1) * layer_dim]
                     quantized_layers.append(layer_feat)
@@ -532,7 +532,7 @@ def save_ablation_summary(all_results: List[Dict], output_dir: str = "./results/
             "Hidden Dim": result['config']['hidden_dim'],
             "Codebook Sizes": str(result['config']['codebook_sizes']),
             # Stage 1 指标
-            "Stage1 Recon Loss": result['stage1_metrics']['best_val_recon_loss'],
+            "Stage1 Recon Loss": result['stage1_metrics']['val_recon_loss'],
             "Stage1 Codebook Usage": result['stage1_metrics']['codebook_usage'],
             "Stage1 Cluster Analysis": result['stage1_metrics']['cluster_analysis'],
             # Stage 2 最佳验证指标
