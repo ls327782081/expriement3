@@ -743,6 +743,8 @@ def save_hp_search_summary(all_results: List[Dict], output_dir: str = "./results
             results_by_experiment["B"].append(result)
         elif exp_name.startswith("expC_"):
             results_by_experiment["C"].append(result)
+        elif exp_name.startswith("expD_"):
+            results_by_experiment["D"].append(result)
 
     # 生成分组汇总表
     for exp_name, experiments in results_by_experiment.items():
@@ -986,9 +988,46 @@ def main():
         for d in [32, 64, 128, 256]  # d ∈ {32,64,128,256}
     ]
 
-    # 合并所有配置
-    all_configs = experiment_A_layer_search + experiment_B_codebook_search + experiment_C_dim_search
+    experiment_D_combined = [
+        HPSearchConfig(
+            experiment_name="expD_combined",
+            semantic_hierarchy={
+                "topic": {
+                    "layers": [0],
+                    "codebook_size": 1024,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                },
+                "emotion": {
+                    "layers": [3],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
+            },
+            hidden_dim=256,
+            use_ema=True,
+            use_hscl=True,
+            use_emotion=False,
+            stage1_epochs=20,
+            stage2_epochs=50,
+            lr=1e-3,
+            dropout=0.5
+        )
+    ]
 
+    # 合并所有配置
+    all_configs = (experiment_A_layer_search +
+                   experiment_B_codebook_search +
+                   experiment_C_dim_search +
+                   experiment_D_combined)
+    all_configs = experiment_D_combined
     all_results = []
 
     # 运行所有实验
