@@ -1,0 +1,844 @@
+D:\python_workplace\expriement3\.venv\Scripts\python.exe D:\python_workplace\expriement3\recbole_baselines\run_recbole_on_pmat_data.py
+
+
+========== Training SASRec ==========
+✅ 已生成标准 RecBole 文件：D:\python_workplace\expriement3\recbole_baselines\dataset\Video_Games\Video_Games.inter
+30 Mar 16:23    INFO  [Training]: train_batch_size = [256] train_neg_sample_args: [{'distribution': 'none', 'sample_num': 'none', 'alpha': 'none', 'dynamic': False, 'candidate_num': 0}]
+30 Mar 16:23    INFO  [Evaluation]: eval_batch_size = [256] eval_args: [{'split': {'LS': 'valid_and_test'}, 'order': 'TO', 'group_by': 'user', 'mode': {'valid': 'full', 'test': 'full'}}]
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:235: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = amp.GradScaler(enabled=self.enable_scaler)
+30 Mar 16:23    INFO  epoch 0 training [time: 4.70s, train loss: 28.1719]
+30 Mar 16:23    INFO  epoch 0 evaluating [time: 0.26s, valid_score: 0.055900]
+30 Mar 16:23    INFO  valid result:
+hit@5 : 0.0652    hit@10 : 0.0797    hit@20 : 0.1014    ndcg@5 : 0.0566    ndcg@10 : 0.0614    ndcg@20 : 0.0671    mrr@5 : 0.054    mrr@10 : 0.0559    mrr@20 : 0.0577
+30 Mar 16:23    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:23    INFO  epoch 1 training [time: 7.15s, train loss: 27.8932]
+30 Mar 16:23    INFO  epoch 1 evaluating [time: 0.04s, valid_score: 0.059600]
+30 Mar 16:23    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.0797    hit@20 : 0.1123    ndcg@5 : 0.0608    ndcg@10 : 0.0643    ndcg@20 : 0.0726    mrr@5 : 0.0581    mrr@10 : 0.0596    mrr@20 : 0.0618
+30 Mar 16:23    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:23    INFO  epoch 2 training [time: 7.13s, train loss: 27.6033]
+30 Mar 16:23    INFO  epoch 2 evaluating [time: 0.06s, valid_score: 0.061600]
+30 Mar 16:23    INFO  valid result:
+hit@5 : 0.0761    hit@10 : 0.0797    hit@20 : 0.1413    ndcg@5 : 0.0648    ndcg@10 : 0.0661    ndcg@20 : 0.0816    mrr@5 : 0.061    mrr@10 : 0.0616    mrr@20 : 0.0658
+30 Mar 16:23    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 3 training [time: 7.22s, train loss: 27.3477]
+30 Mar 16:24    INFO  epoch 3 evaluating [time: 0.24s, valid_score: 0.066100]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.0761    hit@10 : 0.1087    hit@20 : 0.1558    ndcg@5 : 0.0653    ndcg@10 : 0.076    ndcg@20 : 0.0876    mrr@5 : 0.0616    mrr@10 : 0.0661    mrr@20 : 0.0691
+30 Mar 16:24    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 4 training [time: 7.03s, train loss: 27.0243]
+30 Mar 16:24    INFO  epoch 4 evaluating [time: 0.06s, valid_score: 0.068500]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.0906    hit@10 : 0.1196    hit@20 : 0.1522    ndcg@5 : 0.0712    ndcg@10 : 0.0804    ndcg@20 : 0.0886    mrr@5 : 0.0649    mrr@10 : 0.0685    mrr@20 : 0.0708
+30 Mar 16:24    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 5 training [time: 7.33s, train loss: 26.7297]
+30 Mar 16:24    INFO  epoch 5 evaluating [time: 0.19s, valid_score: 0.071600]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1304    hit@20 : 0.1703    ndcg@5 : 0.0735    ndcg@10 : 0.0852    ndcg@20 : 0.095    mrr@5 : 0.0668    mrr@10 : 0.0716    mrr@20 : 0.0742
+30 Mar 16:24    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 6 training [time: 6.86s, train loss: 26.4664]
+30 Mar 16:24    INFO  epoch 6 evaluating [time: 0.04s, valid_score: 0.074900]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1449    hit@20 : 0.2029    ndcg@5 : 0.0771    ndcg@10 : 0.091    ndcg@20 : 0.1051    mrr@5 : 0.0692    mrr@10 : 0.0749    mrr@20 : 0.0785
+30 Mar 16:24    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 7 training [time: 7.25s, train loss: 26.1305]
+30 Mar 16:24    INFO  epoch 7 evaluating [time: 0.06s, valid_score: 0.077000]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.1087    hit@10 : 0.1558    hit@20 : 0.2029    ndcg@5 : 0.0802    ndcg@10 : 0.0952    ndcg@20 : 0.1071    mrr@5 : 0.071    mrr@10 : 0.077    mrr@20 : 0.0803
+30 Mar 16:24    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 8 training [time: 7.08s, train loss: 25.8425]
+30 Mar 16:24    INFO  epoch 8 evaluating [time: 0.04s, valid_score: 0.081200]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.1196    hit@10 : 0.1667    hit@20 : 0.2101    ndcg@5 : 0.0863    ndcg@10 : 0.1009    ndcg@20 : 0.1118    mrr@5 : 0.0755    mrr@10 : 0.0812    mrr@20 : 0.0841
+30 Mar 16:24    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:24    INFO  epoch 9 training [time: 8.66s, train loss: 25.4914]
+30 Mar 16:24    INFO  epoch 9 evaluating [time: 0.07s, valid_score: 0.080300]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.163    hit@20 : 0.2101    ndcg@5 : 0.0891    ndcg@10 : 0.0997    ndcg@20 : 0.1116    mrr@5 : 0.0758    mrr@10 : 0.0803    mrr@20 : 0.0835
+30 Mar 16:24    INFO  epoch 10 training [time: 7.78s, train loss: 25.1714]
+30 Mar 16:24    INFO  epoch 10 evaluating [time: 0.04s, valid_score: 0.080500]
+30 Mar 16:24    INFO  valid result:
+hit@5 : 0.1268    hit@10 : 0.1667    hit@20 : 0.2319    ndcg@5 : 0.0878    ndcg@10 : 0.1008    ndcg@20 : 0.117    mrr@5 : 0.0749    mrr@10 : 0.0805    mrr@20 : 0.0848
+30 Mar 16:25    INFO  epoch 11 training [time: 7.48s, train loss: 24.8243]
+30 Mar 16:25    INFO  epoch 11 evaluating [time: 0.26s, valid_score: 0.079800]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1268    hit@10 : 0.1594    hit@20 : 0.2391    ndcg@5 : 0.0881    ndcg@10 : 0.0987    ndcg@20 : 0.1188    mrr@5 : 0.0754    mrr@10 : 0.0798    mrr@20 : 0.0853
+30 Mar 16:25    INFO  epoch 12 training [time: 7.40s, train loss: 24.5307]
+30 Mar 16:25    INFO  epoch 12 evaluating [time: 0.06s, valid_score: 0.077600]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1268    hit@10 : 0.1703    hit@20 : 0.25    ndcg@5 : 0.0855    ndcg@10 : 0.0993    ndcg@20 : 0.1193    mrr@5 : 0.0721    mrr@10 : 0.0776    mrr@20 : 0.083
+30 Mar 16:25    INFO  epoch 13 training [time: 7.65s, train loss: 24.2318]
+30 Mar 16:25    INFO  epoch 13 evaluating [time: 0.04s, valid_score: 0.080400]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1159    hit@10 : 0.1775    hit@20 : 0.2536    ndcg@5 : 0.0827    ndcg@10 : 0.103    ndcg@20 : 0.1221    mrr@5 : 0.0717    mrr@10 : 0.0804    mrr@20 : 0.0856
+30 Mar 16:25    INFO  epoch 14 training [time: 7.46s, train loss: 24.0368]
+30 Mar 16:25    INFO  epoch 14 evaluating [time: 0.07s, valid_score: 0.084500]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1232    hit@10 : 0.1812    hit@20 : 0.2536    ndcg@5 : 0.0882    ndcg@10 : 0.107    ndcg@20 : 0.1254    mrr@5 : 0.0767    mrr@10 : 0.0845    mrr@20 : 0.0896
+30 Mar 16:25    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:25    INFO  epoch 15 training [time: 7.23s, train loss: 23.6224]
+30 Mar 16:25    INFO  epoch 15 evaluating [time: 0.05s, valid_score: 0.084900]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1268    hit@10 : 0.1812    hit@20 : 0.2572    ndcg@5 : 0.0898    ndcg@10 : 0.1074    ndcg@20 : 0.127    mrr@5 : 0.0776    mrr@10 : 0.0849    mrr@20 : 0.0905
+30 Mar 16:25    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:25    INFO  epoch 16 training [time: 7.27s, train loss: 23.3129]
+30 Mar 16:25    INFO  epoch 16 evaluating [time: 0.05s, valid_score: 0.083900]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1268    hit@10 : 0.1848    hit@20 : 0.2609    ndcg@5 : 0.0888    ndcg@10 : 0.1075    ndcg@20 : 0.127    mrr@5 : 0.0763    mrr@10 : 0.0839    mrr@20 : 0.0894
+30 Mar 16:25    INFO  epoch 17 training [time: 6.94s, train loss: 23.0139]
+30 Mar 16:25    INFO  epoch 17 evaluating [time: 0.16s, valid_score: 0.084300]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1268    hit@10 : 0.1884    hit@20 : 0.2645    ndcg@5 : 0.0888    ndcg@10 : 0.1086    ndcg@20 : 0.1279    mrr@5 : 0.0763    mrr@10 : 0.0843    mrr@20 : 0.0897
+30 Mar 16:25    INFO  epoch 18 training [time: 7.19s, train loss: 22.6852]
+30 Mar 16:25    INFO  epoch 18 evaluating [time: 0.38s, valid_score: 0.086300]
+30 Mar 16:25    INFO  valid result:
+hit@5 : 0.1341    hit@10 : 0.192    hit@20 : 0.2681    ndcg@5 : 0.0922    ndcg@10 : 0.1109    ndcg@20 : 0.1303    mrr@5 : 0.0786    mrr@10 : 0.0863    mrr@20 : 0.0917
+30 Mar 16:25    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:26    INFO  epoch 19 training [time: 6.65s, train loss: 22.4405]
+30 Mar 16:26    INFO  epoch 19 evaluating [time: 0.17s, valid_score: 0.085200]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.1957    hit@20 : 0.2717    ndcg@5 : 0.0898    ndcg@10 : 0.1107    ndcg@20 : 0.13    mrr@5 : 0.0766    mrr@10 : 0.0852    mrr@20 : 0.0905
+30 Mar 16:26    INFO  epoch 20 training [time: 6.88s, train loss: 22.2059]
+30 Mar 16:26    INFO  epoch 20 evaluating [time: 0.04s, valid_score: 0.085700]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.1993    hit@20 : 0.2681    ndcg@5 : 0.0901    ndcg@10 : 0.1119    ndcg@20 : 0.1294    mrr@5 : 0.077    mrr@10 : 0.0857    mrr@20 : 0.0906
+30 Mar 16:26    INFO  epoch 21 training [time: 7.23s, train loss: 21.8387]
+30 Mar 16:26    INFO  epoch 21 evaluating [time: 0.04s, valid_score: 0.085200]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1341    hit@10 : 0.2065    hit@20 : 0.2717    ndcg@5 : 0.0906    ndcg@10 : 0.1132    ndcg@20 : 0.1296    mrr@5 : 0.0764    mrr@10 : 0.0852    mrr@20 : 0.0897
+30 Mar 16:26    INFO  epoch 22 training [time: 7.32s, train loss: 21.6273]
+30 Mar 16:26    INFO  epoch 22 evaluating [time: 0.06s, valid_score: 0.087100]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2065    hit@20 : 0.2754    ndcg@5 : 0.0933    ndcg@10 : 0.1146    ndcg@20 : 0.1318    mrr@5 : 0.0789    mrr@10 : 0.0871    mrr@20 : 0.0918
+30 Mar 16:26    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:26    INFO  epoch 23 training [time: 8.05s, train loss: 21.4533]
+30 Mar 16:26    INFO  epoch 23 evaluating [time: 0.07s, valid_score: 0.087400]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2138    hit@20 : 0.279    ndcg@5 : 0.0929    ndcg@10 : 0.1164    ndcg@20 : 0.1328    mrr@5 : 0.0784    mrr@10 : 0.0874    mrr@20 : 0.0919
+30 Mar 16:26    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:26    INFO  epoch 24 training [time: 7.37s, train loss: 21.1519]
+30 Mar 16:26    INFO  epoch 24 evaluating [time: 0.05s, valid_score: 0.087500]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1341    hit@10 : 0.2138    hit@20 : 0.2862    ndcg@5 : 0.0914    ndcg@10 : 0.1164    ndcg@20 : 0.1349    mrr@5 : 0.0777    mrr@10 : 0.0875    mrr@20 : 0.0927
+30 Mar 16:26    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:26    INFO  epoch 25 training [time: 7.41s, train loss: 20.9730]
+30 Mar 16:26    INFO  epoch 25 evaluating [time: 0.06s, valid_score: 0.087600]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.2101    hit@20 : 0.2899    ndcg@5 : 0.0904    ndcg@10 : 0.1158    ndcg@20 : 0.1362    mrr@5 : 0.0774    mrr@10 : 0.0876    mrr@20 : 0.0934
+30 Mar 16:26    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:26    INFO  epoch 26 training [time: 7.62s, train loss: 20.8088]
+30 Mar 16:26    INFO  epoch 26 evaluating [time: 0.04s, valid_score: 0.084300]
+30 Mar 16:26    INFO  valid result:
+hit@5 : 0.1159    hit@10 : 0.2174    hit@20 : 0.2862    ndcg@5 : 0.0822    ndcg@10 : 0.1148    ndcg@20 : 0.1325    mrr@5 : 0.071    mrr@10 : 0.0843    mrr@20 : 0.0893
+30 Mar 16:27    INFO  epoch 27 training [time: 6.73s, train loss: 20.4976]
+30 Mar 16:27    INFO  epoch 27 evaluating [time: 0.04s, valid_score: 0.085000]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1232    hit@10 : 0.2138    hit@20 : 0.2826    ndcg@5 : 0.0854    ndcg@10 : 0.1147    ndcg@20 : 0.1328    mrr@5 : 0.0728    mrr@10 : 0.085    mrr@20 : 0.0903
+30 Mar 16:27    INFO  epoch 28 training [time: 6.67s, train loss: 20.3440]
+30 Mar 16:27    INFO  epoch 28 evaluating [time: 0.04s, valid_score: 0.086100]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.221    hit@20 : 0.2826    ndcg@5 : 0.0882    ndcg@10 : 0.1173    ndcg@20 : 0.1335    mrr@5 : 0.0743    mrr@10 : 0.0861    mrr@20 : 0.0909
+30 Mar 16:27    INFO  epoch 29 training [time: 6.80s, train loss: 20.0037]
+30 Mar 16:27    INFO  epoch 29 evaluating [time: 0.06s, valid_score: 0.089700]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2283    hit@20 : 0.2862    ndcg@5 : 0.0929    ndcg@10 : 0.1216    ndcg@20 : 0.1366    mrr@5 : 0.0782    mrr@10 : 0.0897    mrr@20 : 0.094
+30 Mar 16:27    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:27    INFO  epoch 30 training [time: 7.47s, train loss: 19.9130]
+30 Mar 16:27    INFO  epoch 30 evaluating [time: 0.10s, valid_score: 0.091500]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2319    hit@20 : 0.2899    ndcg@5 : 0.0939    ndcg@10 : 0.1236    ndcg@20 : 0.1382    mrr@5 : 0.0796    mrr@10 : 0.0915    mrr@20 : 0.0955
+30 Mar 16:27    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:27    INFO  epoch 31 training [time: 6.63s, train loss: 19.6613]
+30 Mar 16:27    INFO  epoch 31 evaluating [time: 0.29s, valid_score: 0.090800]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.2246    hit@20 : 0.2826    ndcg@5 : 0.0913    ndcg@10 : 0.1215    ndcg@20 : 0.1364    mrr@5 : 0.0785    mrr@10 : 0.0908    mrr@20 : 0.095
+30 Mar 16:27    INFO  epoch 32 training [time: 6.57s, train loss: 19.4446]
+30 Mar 16:27    INFO  epoch 32 evaluating [time: 0.04s, valid_score: 0.087900]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.2283    hit@20 : 0.2826    ndcg@5 : 0.0889    ndcg@10 : 0.12    ndcg@20 : 0.1341    mrr@5 : 0.0753    mrr@10 : 0.0879    mrr@20 : 0.0919
+30 Mar 16:27    INFO  epoch 33 training [time: 6.67s, train loss: 19.3583]
+30 Mar 16:27    INFO  epoch 33 evaluating [time: 0.04s, valid_score: 0.087900]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.2355    hit@20 : 0.2826    ndcg@5 : 0.0883    ndcg@10 : 0.1217    ndcg@20 : 0.1337    mrr@5 : 0.0744    mrr@10 : 0.0879    mrr@20 : 0.0912
+30 Mar 16:27    INFO  epoch 34 training [time: 6.61s, train loss: 19.1286]
+30 Mar 16:27    INFO  epoch 34 evaluating [time: 0.06s, valid_score: 0.087800]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1304    hit@10 : 0.2391    hit@20 : 0.2862    ndcg@5 : 0.0874    ndcg@10 : 0.1224    ndcg@20 : 0.1341    mrr@5 : 0.0734    mrr@10 : 0.0878    mrr@20 : 0.0909
+30 Mar 16:27    INFO  epoch 35 training [time: 7.25s, train loss: 18.8951]
+30 Mar 16:27    INFO  epoch 35 evaluating [time: 0.04s, valid_score: 0.087800]
+30 Mar 16:27    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2319    hit@20 : 0.2826    ndcg@5 : 0.0907    ndcg@10 : 0.121    ndcg@20 : 0.1338    mrr@5 : 0.0754    mrr@10 : 0.0878    mrr@20 : 0.0913
+30 Mar 16:28    INFO  epoch 36 training [time: 7.01s, train loss: 18.7324]
+30 Mar 16:28    INFO  epoch 36 evaluating [time: 0.05s, valid_score: 0.088400]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1413    hit@10 : 0.2319    hit@20 : 0.2862    ndcg@5 : 0.0923    ndcg@10 : 0.1215    ndcg@20 : 0.1353    mrr@5 : 0.0764    mrr@10 : 0.0884    mrr@20 : 0.0922
+30 Mar 16:28    INFO  epoch 37 training [time: 6.55s, train loss: 18.6409]
+30 Mar 16:28    INFO  epoch 37 evaluating [time: 0.04s, valid_score: 0.091100]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1413    hit@10 : 0.2391    hit@20 : 0.2826    ndcg@5 : 0.0938    ndcg@10 : 0.1252    ndcg@20 : 0.1362    mrr@5 : 0.0784    mrr@10 : 0.0911    mrr@20 : 0.0942
+30 Mar 16:28    INFO  epoch 38 training [time: 6.84s, train loss: 18.5268]
+30 Mar 16:28    INFO  epoch 38 evaluating [time: 0.04s, valid_score: 0.091400]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2391    hit@20 : 0.2899    ndcg@5 : 0.0926    ndcg@10 : 0.1254    ndcg@20 : 0.1379    mrr@5 : 0.0778    mrr@10 : 0.0914    mrr@20 : 0.0947
+30 Mar 16:28    INFO  epoch 39 training [time: 6.89s, train loss: 18.3935]
+30 Mar 16:28    INFO  epoch 39 evaluating [time: 0.04s, valid_score: 0.091600]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1413    hit@10 : 0.2391    hit@20 : 0.2935    ndcg@5 : 0.0938    ndcg@10 : 0.1256    ndcg@20 : 0.139    mrr@5 : 0.0783    mrr@10 : 0.0916    mrr@20 : 0.0951
+30 Mar 16:28    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:28    INFO  epoch 40 training [time: 7.23s, train loss: 18.2257]
+30 Mar 16:28    INFO  epoch 40 evaluating [time: 0.05s, valid_score: 0.091400]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1449    hit@10 : 0.2355    hit@20 : 0.2899    ndcg@5 : 0.0951    ndcg@10 : 0.1248    ndcg@20 : 0.1382    mrr@5 : 0.079    mrr@10 : 0.0914    mrr@20 : 0.0949
+30 Mar 16:28    INFO  epoch 41 training [time: 6.60s, train loss: 18.1885]
+30 Mar 16:28    INFO  epoch 41 evaluating [time: 0.04s, valid_score: 0.090700]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2319    hit@20 : 0.2971    ndcg@5 : 0.0922    ndcg@10 : 0.1234    ndcg@20 : 0.1396    mrr@5 : 0.0774    mrr@10 : 0.0907    mrr@20 : 0.095
+30 Mar 16:28    INFO  epoch 42 training [time: 6.96s, train loss: 17.8589]
+30 Mar 16:28    INFO  epoch 42 evaluating [time: 0.04s, valid_score: 0.092900]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2355    hit@20 : 0.3007    ndcg@5 : 0.0936    ndcg@10 : 0.1258    ndcg@20 : 0.1417    mrr@5 : 0.0793    mrr@10 : 0.0929    mrr@20 : 0.097
+30 Mar 16:28    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:28    INFO  epoch 43 training [time: 6.37s, train loss: 17.8587]
+30 Mar 16:28    INFO  epoch 43 evaluating [time: 0.25s, valid_score: 0.092300]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2283    hit@20 : 0.3007    ndcg@5 : 0.0938    ndcg@10 : 0.1238    ndcg@20 : 0.1416    mrr@5 : 0.0795    mrr@10 : 0.0923    mrr@20 : 0.097
+30 Mar 16:28    INFO  epoch 44 training [time: 6.73s, train loss: 17.5079]
+30 Mar 16:28    INFO  epoch 44 evaluating [time: 0.04s, valid_score: 0.091300]
+30 Mar 16:28    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2246    hit@20 : 0.2971    ndcg@5 : 0.0933    ndcg@10 : 0.1222    ndcg@20 : 0.1402    mrr@5 : 0.0789    mrr@10 : 0.0913    mrr@20 : 0.0961
+30 Mar 16:29    INFO  epoch 45 training [time: 7.17s, train loss: 17.5108]
+30 Mar 16:29    INFO  epoch 45 evaluating [time: 0.04s, valid_score: 0.092200]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.1449    hit@10 : 0.2283    hit@20 : 0.2935    ndcg@5 : 0.0965    ndcg@10 : 0.1236    ndcg@20 : 0.1397    mrr@5 : 0.081    mrr@10 : 0.0922    mrr@20 : 0.0965
+30 Mar 16:29    INFO  epoch 46 training [time: 6.67s, train loss: 17.5686]
+30 Mar 16:29    INFO  epoch 46 evaluating [time: 0.05s, valid_score: 0.093500]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.1449    hit@10 : 0.2319    hit@20 : 0.2899    ndcg@5 : 0.0972    ndcg@10 : 0.1254    ndcg@20 : 0.1396    mrr@5 : 0.0818    mrr@10 : 0.0935    mrr@20 : 0.0972
+30 Mar 16:29    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:29    INFO  epoch 47 training [time: 6.97s, train loss: 17.2433]
+30 Mar 16:29    INFO  epoch 47 evaluating [time: 0.04s, valid_score: 0.093700]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.1449    hit@10 : 0.2319    hit@20 : 0.2899    ndcg@5 : 0.0973    ndcg@10 : 0.1255    ndcg@20 : 0.1397    mrr@5 : 0.082    mrr@10 : 0.0937    mrr@20 : 0.0974
+30 Mar 16:29    INFO  Saving current: saved\SASRec-Mar-30-2026_16-23-36.pth
+30 Mar 16:29    INFO  epoch 48 training [time: 6.76s, train loss: 17.0958]
+30 Mar 16:29    INFO  epoch 48 evaluating [time: 0.17s, valid_score: 0.092800]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.1377    hit@10 : 0.2319    hit@20 : 0.2862    ndcg@5 : 0.0939    ndcg@10 : 0.1247    ndcg@20 : 0.1384    mrr@5 : 0.0798    mrr@10 : 0.0928    mrr@20 : 0.0964
+30 Mar 16:29    INFO  epoch 49 training [time: 6.70s, train loss: 17.0840]
+30 Mar 16:29    INFO  epoch 49 evaluating [time: 0.04s, valid_score: 0.091000]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.1413    hit@10 : 0.2246    hit@20 : 0.2899    ndcg@5 : 0.0946    ndcg@10 : 0.1219    ndcg@20 : 0.1383    mrr@5 : 0.0795    mrr@10 : 0.091    mrr@20 : 0.0955
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:583: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(checkpoint_file, map_location=self.device)
+30 Mar 16:29    INFO  Loading model structure and parameters from saved\SASRec-Mar-30-2026_16-23-36.pth
+🎉 SASRec 结果： OrderedDict([('hit@5', 0.0947), ('hit@10', 0.1333), ('hit@20', 0.2456), ('ndcg@5', 0.0711), ('ndcg@10', 0.0836), ('ndcg@20', 0.112), ('mrr@5', 0.0635), ('mrr@10', 0.0686), ('mrr@20', 0.0765)])
+
+
+========== Training BERT4Rec ==========
+✅ 已生成标准 RecBole 文件：D:\python_workplace\expriement3\recbole_baselines\dataset\Video_Games\Video_Games.inter
+30 Mar 16:29    INFO  [Training]: train_batch_size = [256] train_neg_sample_args: [{'distribution': 'none', 'sample_num': 'none', 'alpha': 'none', 'dynamic': False, 'candidate_num': 0}]
+30 Mar 16:29    INFO  [Evaluation]: eval_batch_size = [256] eval_args: [{'split': {'LS': 'valid_and_test'}, 'order': 'TO', 'group_by': 'user', 'mode': {'valid': 'full', 'test': 'full'}}]
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:235: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = amp.GradScaler(enabled=self.enable_scaler)
+30 Mar 16:29    INFO  epoch 0 training [time: 7.39s, train loss: 28.2454]
+30 Mar 16:29    INFO  epoch 0 evaluating [time: 0.07s, valid_score: 0.010000]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0435    hit@20 : 0.0761    ndcg@5 : 0.0095    ndcg@10 : 0.0175    ndcg@20 : 0.0258    mrr@5 : 0.0069    mrr@10 : 0.01    mrr@20 : 0.0123
+30 Mar 16:29    INFO  Saving current: saved\BERT4Rec-Mar-30-2026_16-29-35.pth
+30 Mar 16:29    INFO  epoch 1 training [time: 8.15s, train loss: 27.5589]
+30 Mar 16:29    INFO  epoch 1 evaluating [time: 0.05s, valid_score: 0.011500]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0326    hit@20 : 0.0906    ndcg@5 : 0.0143    ndcg@10 : 0.0165    ndcg@20 : 0.0311    mrr@5 : 0.0107    mrr@10 : 0.0115    mrr@20 : 0.0155
+30 Mar 16:29    INFO  Saving current: saved\BERT4Rec-Mar-30-2026_16-29-35.pth
+30 Mar 16:29    INFO  epoch 2 training [time: 7.43s, train loss: 27.2464]
+30 Mar 16:29    INFO  epoch 2 evaluating [time: 0.04s, valid_score: 0.014400]
+30 Mar 16:29    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0471    hit@20 : 0.1123    ndcg@5 : 0.0148    ndcg@10 : 0.0218    ndcg@20 : 0.0378    mrr@5 : 0.0115    mrr@10 : 0.0144    mrr@20 : 0.0185
+30 Mar 16:29    INFO  Saving current: saved\BERT4Rec-Mar-30-2026_16-29-35.pth
+30 Mar 16:30    INFO  epoch 3 training [time: 7.18s, train loss: 27.1385]
+30 Mar 16:30    INFO  epoch 3 evaluating [time: 0.06s, valid_score: 0.015500]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0507    hit@20 : 0.1087    ndcg@5 : 0.0127    ndcg@10 : 0.0235    ndcg@20 : 0.038    mrr@5 : 0.011    mrr@10 : 0.0155    mrr@20 : 0.0194
+30 Mar 16:30    INFO  Saving current: saved\BERT4Rec-Mar-30-2026_16-29-35.pth
+30 Mar 16:30    INFO  epoch 4 training [time: 7.66s, train loss: 26.7881]
+30 Mar 16:30    INFO  epoch 4 evaluating [time: 0.06s, valid_score: 0.017600]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.029    hit@10 : 0.0543    hit@20 : 0.1232    ndcg@5 : 0.0182    ndcg@10 : 0.0259    ndcg@20 : 0.0434    mrr@5 : 0.0147    mrr@10 : 0.0176    mrr@20 : 0.0224
+30 Mar 16:30    INFO  Saving current: saved\BERT4Rec-Mar-30-2026_16-29-35.pth
+30 Mar 16:30    INFO  epoch 5 training [time: 7.72s, train loss: 26.2148]
+30 Mar 16:30    INFO  epoch 5 evaluating [time: 0.10s, valid_score: 0.014500]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0507    hit@20 : 0.1159    ndcg@5 : 0.0148    ndcg@10 : 0.0228    ndcg@20 : 0.0396    mrr@5 : 0.0113    mrr@10 : 0.0145    mrr@20 : 0.0193
+30 Mar 16:30    INFO  epoch 6 training [time: 7.53s, train loss: 25.5549]
+30 Mar 16:30    INFO  epoch 6 evaluating [time: 0.05s, valid_score: 0.011700]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0471    hit@20 : 0.1268    ndcg@5 : 0.0129    ndcg@10 : 0.0199    ndcg@20 : 0.0399    mrr@5 : 0.0089    mrr@10 : 0.0117    mrr@20 : 0.0171
+30 Mar 16:30    INFO  epoch 7 training [time: 7.42s, train loss: 25.7157]
+30 Mar 16:30    INFO  epoch 7 evaluating [time: 0.22s, valid_score: 0.013400]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0471    hit@20 : 0.1196    ndcg@5 : 0.0119    ndcg@10 : 0.021    ndcg@20 : 0.0391    mrr@5 : 0.0098    mrr@10 : 0.0134    mrr@20 : 0.0182
+30 Mar 16:30    INFO  epoch 8 training [time: 6.96s, train loss: 25.6259]
+30 Mar 16:30    INFO  epoch 8 evaluating [time: 0.05s, valid_score: 0.014000]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0362    hit@20 : 0.1087    ndcg@5 : 0.0132    ndcg@10 : 0.0191    ndcg@20 : 0.0374    mrr@5 : 0.0116    mrr@10 : 0.014    mrr@20 : 0.019
+30 Mar 16:30    INFO  epoch 9 training [time: 7.71s, train loss: 25.6384]
+30 Mar 16:30    INFO  epoch 9 evaluating [time: 0.29s, valid_score: 0.014600]
+30 Mar 16:30    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0399    hit@20 : 0.0978    ndcg@5 : 0.016    ndcg@10 : 0.0203    ndcg@20 : 0.0346    mrr@5 : 0.013    mrr@10 : 0.0146    mrr@20 : 0.0183
+30 Mar 16:30    INFO  epoch 10 training [time: 7.70s, train loss: 25.2729]
+30 Mar 16:31    INFO  epoch 10 evaluating [time: 0.07s, valid_score: 0.014000]
+30 Mar 16:31    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0362    hit@20 : 0.1051    ndcg@5 : 0.016    ndcg@10 : 0.0191    ndcg@20 : 0.036    mrr@5 : 0.0129    mrr@10 : 0.014    mrr@20 : 0.0184
+30 Mar 16:31    INFO  epoch 11 training [time: 8.26s, train loss: 24.7229]
+30 Mar 16:31    INFO  epoch 11 evaluating [time: 0.20s, valid_score: 0.012900]
+30 Mar 16:31    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0399    hit@20 : 0.1196    ndcg@5 : 0.0123    ndcg@10 : 0.019    ndcg@20 : 0.0389    mrr@5 : 0.0103    mrr@10 : 0.0129    mrr@20 : 0.0181
+30 Mar 16:31    INFO  epoch 12 training [time: 7.51s, train loss: 24.7054]
+30 Mar 16:31    INFO  epoch 12 evaluating [time: 0.05s, valid_score: 0.013000]
+30 Mar 16:31    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0254    hit@20 : 0.1123    ndcg@5 : 0.0136    ndcg@10 : 0.0159    ndcg@20 : 0.0381    mrr@5 : 0.0121    mrr@10 : 0.013    mrr@20 : 0.0192
+30 Mar 16:31    INFO  epoch 13 training [time: 8.58s, train loss: 24.2849]
+30 Mar 16:31    INFO  epoch 13 evaluating [time: 0.06s, valid_score: 0.013700]
+30 Mar 16:31    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0507    hit@20 : 0.1087    ndcg@5 : 0.012    ndcg@10 : 0.022    ndcg@20 : 0.0363    mrr@5 : 0.01    mrr@10 : 0.0137    mrr@20 : 0.0175
+30 Mar 16:31    INFO  epoch 14 training [time: 8.04s, train loss: 24.3465]
+30 Mar 16:31    INFO  epoch 14 evaluating [time: 0.07s, valid_score: 0.014800]
+30 Mar 16:31    INFO  valid result:
+hit@5 : 0.0181    hit@10 : 0.0507    hit@20 : 0.1123    ndcg@5 : 0.0129    ndcg@10 : 0.0228    ndcg@20 : 0.0383    mrr@5 : 0.0112    mrr@10 : 0.0148    mrr@20 : 0.0191
+30 Mar 16:31    INFO  epoch 15 training [time: 7.25s, train loss: 23.2751]
+30 Mar 16:31    INFO  epoch 15 evaluating [time: 0.09s, valid_score: 0.011700]
+30 Mar 16:31    INFO  valid result:
+hit@5 : 0.0217    hit@10 : 0.0471    hit@20 : 0.1123    ndcg@5 : 0.0119    ndcg@10 : 0.0197    ndcg@20 : 0.036    mrr@5 : 0.0088    mrr@10 : 0.0117    mrr@20 : 0.0161
+30 Mar 16:31    INFO  Finished training, best eval result in epoch 4
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:583: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(checkpoint_file, map_location=self.device)
+30 Mar 16:31    INFO  Loading model structure and parameters from saved\BERT4Rec-Mar-30-2026_16-29-35.pth
+🎉 BERT4Rec 结果： OrderedDict([('hit@5', 0.0281), ('hit@10', 0.0667), ('hit@20', 0.0947), ('ndcg@5', 0.0175), ('ndcg@10', 0.0301), ('ndcg@20', 0.0375), ('mrr@5', 0.014), ('mrr@10', 0.0193), ('mrr@20', 0.0215)])
+
+
+========== Training GRU4Rec ==========
+✅ 已生成标准 RecBole 文件：D:\python_workplace\expriement3\recbole_baselines\dataset\Video_Games\Video_Games.inter
+30 Mar 16:31    INFO  [Training]: train_batch_size = [256] train_neg_sample_args: [{'distribution': 'none', 'sample_num': 'none', 'alpha': 'none', 'dynamic': False, 'candidate_num': 0}]
+30 Mar 16:31    INFO  [Evaluation]: eval_batch_size = [256] eval_args: [{'split': {'LS': 'valid_and_test'}, 'order': 'TO', 'group_by': 'user', 'mode': {'valid': 'full', 'test': 'full'}}]
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:235: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = amp.GradScaler(enabled=self.enable_scaler)
+30 Mar 16:32    INFO  epoch 0 training [time: 31.38s, train loss: 28.3253]
+30 Mar 16:32    INFO  epoch 0 evaluating [time: 0.12s, valid_score: 0.009800]
+30 Mar 16:32    INFO  valid result:
+hit@5 : 0.0145    hit@10 : 0.0435    hit@20 : 0.0797    ndcg@5 : 0.0082    ndcg@10 : 0.0172    ndcg@20 : 0.0259    mrr@5 : 0.0063    mrr@10 : 0.0098    mrr@20 : 0.0119
+30 Mar 16:32    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:32    INFO  epoch 1 training [time: 38.11s, train loss: 28.2817]
+30 Mar 16:32    INFO  epoch 1 evaluating [time: 0.08s, valid_score: 0.014600]
+30 Mar 16:32    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0471    hit@20 : 0.1087    ndcg@5 : 0.0149    ndcg@10 : 0.0222    ndcg@20 : 0.0374    mrr@5 : 0.0115    mrr@10 : 0.0146    mrr@20 : 0.0186
+30 Mar 16:32    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:33    INFO  epoch 2 training [time: 32.05s, train loss: 28.2454]
+30 Mar 16:33    INFO  epoch 2 evaluating [time: 0.04s, valid_score: 0.023100]
+30 Mar 16:33    INFO  valid result:
+hit@5 : 0.0507    hit@10 : 0.0978    hit@20 : 0.1232    ndcg@5 : 0.0254    ndcg@10 : 0.0401    ndcg@20 : 0.0464    mrr@5 : 0.0173    mrr@10 : 0.0231    mrr@20 : 0.0248
+30 Mar 16:33    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:33    INFO  epoch 3 training [time: 30.04s, train loss: 28.2118]
+30 Mar 16:33    INFO  epoch 3 evaluating [time: 0.04s, valid_score: 0.027300]
+30 Mar 16:33    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.1051    hit@20 : 0.1341    ndcg@5 : 0.0338    ndcg@10 : 0.0453    ndcg@20 : 0.0527    mrr@5 : 0.0226    mrr@10 : 0.0273    mrr@20 : 0.0293
+30 Mar 16:33    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:34    INFO  epoch 4 training [time: 31.56s, train loss: 28.1697]
+30 Mar 16:34    INFO  epoch 4 evaluating [time: 0.05s, valid_score: 0.031700]
+30 Mar 16:34    INFO  valid result:
+hit@5 : 0.0725    hit@10 : 0.1087    hit@20 : 0.1522    ndcg@5 : 0.038    ndcg@10 : 0.0499    ndcg@20 : 0.0606    mrr@5 : 0.0268    mrr@10 : 0.0317    mrr@20 : 0.0345
+30 Mar 16:34    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:34    INFO  epoch 5 training [time: 30.65s, train loss: 28.1264]
+30 Mar 16:34    INFO  epoch 5 evaluating [time: 0.04s, valid_score: 0.033900]
+30 Mar 16:34    INFO  valid result:
+hit@5 : 0.0761    hit@10 : 0.1051    hit@20 : 0.1522    ndcg@5 : 0.0414    ndcg@10 : 0.0509    ndcg@20 : 0.0627    mrr@5 : 0.0298    mrr@10 : 0.0339    mrr@20 : 0.0371
+30 Mar 16:34    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:35    INFO  epoch 6 training [time: 30.02s, train loss: 28.0718]
+30 Mar 16:35    INFO  epoch 6 evaluating [time: 0.27s, valid_score: 0.039500]
+30 Mar 16:35    INFO  valid result:
+hit@5 : 0.0761    hit@10 : 0.1123    hit@20 : 0.163    ndcg@5 : 0.0447    ndcg@10 : 0.0568    ndcg@20 : 0.0692    mrr@5 : 0.0342    mrr@10 : 0.0395    mrr@20 : 0.0427
+30 Mar 16:35    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:35    INFO  epoch 7 training [time: 29.77s, train loss: 28.0004]
+30 Mar 16:35    INFO  epoch 7 evaluating [time: 0.05s, valid_score: 0.040000]
+30 Mar 16:35    INFO  valid result:
+hit@5 : 0.0797    hit@10 : 0.1123    hit@20 : 0.1594    ndcg@5 : 0.0462    ndcg@10 : 0.0572    ndcg@20 : 0.0688    mrr@5 : 0.0351    mrr@10 : 0.04    mrr@20 : 0.0429
+30 Mar 16:35    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:36    INFO  epoch 8 training [time: 32.13s, train loss: 27.9111]
+30 Mar 16:36    INFO  epoch 8 evaluating [time: 0.05s, valid_score: 0.039700]
+30 Mar 16:36    INFO  valid result:
+hit@5 : 0.0833    hit@10 : 0.1123    hit@20 : 0.1594    ndcg@5 : 0.0475    ndcg@10 : 0.057    ndcg@20 : 0.0685    mrr@5 : 0.0357    mrr@10 : 0.0397    mrr@20 : 0.0427
+30 Mar 16:36    INFO  epoch 9 training [time: 30.12s, train loss: 27.7890]
+30 Mar 16:36    INFO  epoch 9 evaluating [time: 0.27s, valid_score: 0.040800]
+30 Mar 16:36    INFO  valid result:
+hit@5 : 0.0906    hit@10 : 0.1087    hit@20 : 0.1775    ndcg@5 : 0.0512    ndcg@10 : 0.0572    ndcg@20 : 0.0746    mrr@5 : 0.0383    mrr@10 : 0.0408    mrr@20 : 0.0457
+30 Mar 16:36    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:37    INFO  epoch 10 training [time: 30.95s, train loss: 27.5945]
+30 Mar 16:37    INFO  epoch 10 evaluating [time: 0.04s, valid_score: 0.044900]
+30 Mar 16:37    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1232    hit@20 : 0.1993    ndcg@5 : 0.0569    ndcg@10 : 0.0636    ndcg@20 : 0.083    mrr@5 : 0.0423    mrr@10 : 0.0449    mrr@20 : 0.0503
+30 Mar 16:37    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:37    INFO  epoch 11 training [time: 29.77s, train loss: 27.3174]
+30 Mar 16:38    INFO  epoch 11 evaluating [time: 0.04s, valid_score: 0.047400]
+30 Mar 16:38    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1304    hit@20 : 0.2101    ndcg@5 : 0.058    ndcg@10 : 0.0671    ndcg@20 : 0.0872    mrr@5 : 0.0437    mrr@10 : 0.0474    mrr@20 : 0.0529
+30 Mar 16:38    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:38    INFO  epoch 12 training [time: 30.66s, train loss: 26.9674]
+30 Mar 16:38    INFO  epoch 12 evaluating [time: 0.04s, valid_score: 0.048600]
+30 Mar 16:38    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1304    hit@20 : 0.2029    ndcg@5 : 0.0564    ndcg@10 : 0.0678    ndcg@20 : 0.0859    mrr@5 : 0.0441    mrr@10 : 0.0486    mrr@20 : 0.0535
+30 Mar 16:38    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:39    INFO  epoch 13 training [time: 31.17s, train loss: 26.4669]
+30 Mar 16:39    INFO  epoch 13 evaluating [time: 0.22s, valid_score: 0.049500]
+30 Mar 16:39    INFO  valid result:
+hit@5 : 0.0833    hit@10 : 0.1268    hit@20 : 0.2174    ndcg@5 : 0.0532    ndcg@10 : 0.0675    ndcg@20 : 0.09    mrr@5 : 0.0435    mrr@10 : 0.0495    mrr@20 : 0.0555
+30 Mar 16:39    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:39    INFO  epoch 14 training [time: 31.79s, train loss: 26.1289]
+30 Mar 16:39    INFO  epoch 14 evaluating [time: 0.05s, valid_score: 0.048600]
+30 Mar 16:39    INFO  valid result:
+hit@5 : 0.0797    hit@10 : 0.1196    hit@20 : 0.2246    ndcg@5 : 0.0522    ndcg@10 : 0.0651    ndcg@20 : 0.0909    mrr@5 : 0.0432    mrr@10 : 0.0486    mrr@20 : 0.0552
+30 Mar 16:40    INFO  epoch 15 training [time: 36.96s, train loss: 25.6946]
+30 Mar 16:40    INFO  epoch 15 evaluating [time: 0.62s, valid_score: 0.048000]
+30 Mar 16:40    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.1304    hit@20 : 0.2101    ndcg@5 : 0.0474    ndcg@10 : 0.0668    ndcg@20 : 0.0863    mrr@5 : 0.0403    mrr@10 : 0.048    mrr@20 : 0.053
+30 Mar 16:41    INFO  epoch 16 training [time: 59.38s, train loss: 25.2614]
+30 Mar 16:41    INFO  epoch 16 evaluating [time: 0.16s, valid_score: 0.045900]
+30 Mar 16:41    INFO  valid result:
+hit@5 : 0.0652    hit@10 : 0.1196    hit@20 : 0.2101    ndcg@5 : 0.0451    ndcg@10 : 0.0627    ndcg@20 : 0.0851    mrr@5 : 0.0386    mrr@10 : 0.0459    mrr@20 : 0.0517
+30 Mar 16:41    INFO  epoch 17 training [time: 34.10s, train loss: 24.7906]
+30 Mar 16:41    INFO  epoch 17 evaluating [time: 0.05s, valid_score: 0.048100]
+30 Mar 16:41    INFO  valid result:
+hit@5 : 0.0616    hit@10 : 0.1159    hit@20 : 0.2138    ndcg@5 : 0.0461    ndcg@10 : 0.0636    ndcg@20 : 0.0881    mrr@5 : 0.0409    mrr@10 : 0.0481    mrr@20 : 0.0547
+30 Mar 16:42    INFO  epoch 18 training [time: 30.24s, train loss: 24.4762]
+30 Mar 16:42    INFO  epoch 18 evaluating [time: 0.04s, valid_score: 0.045700]
+30 Mar 16:42    INFO  valid result:
+hit@5 : 0.0833    hit@10 : 0.1159    hit@20 : 0.2101    ndcg@5 : 0.0518    ndcg@10 : 0.0621    ndcg@20 : 0.0857    mrr@5 : 0.0416    mrr@10 : 0.0457    mrr@20 : 0.0521
+30 Mar 16:42    INFO  epoch 19 training [time: 31.44s, train loss: 24.1783]
+30 Mar 16:42    INFO  epoch 19 evaluating [time: 0.07s, valid_score: 0.047200]
+30 Mar 16:42    INFO  valid result:
+hit@5 : 0.0761    hit@10 : 0.1123    hit@20 : 0.2065    ndcg@5 : 0.0507    ndcg@10 : 0.0622    ndcg@20 : 0.0857    mrr@5 : 0.0426    mrr@10 : 0.0472    mrr@20 : 0.0535
+30 Mar 16:43    INFO  epoch 20 training [time: 30.61s, train loss: 23.8185]
+30 Mar 16:43    INFO  epoch 20 evaluating [time: 0.06s, valid_score: 0.048300]
+30 Mar 16:43    INFO  valid result:
+hit@5 : 0.0761    hit@10 : 0.1159    hit@20 : 0.2029    ndcg@5 : 0.0513    ndcg@10 : 0.0638    ndcg@20 : 0.0855    mrr@5 : 0.0432    mrr@10 : 0.0483    mrr@20 : 0.054
+30 Mar 16:43    INFO  epoch 21 training [time: 30.85s, train loss: 23.3250]
+30 Mar 16:43    INFO  epoch 21 evaluating [time: 0.05s, valid_score: 0.052000]
+30 Mar 16:43    INFO  valid result:
+hit@5 : 0.0797    hit@10 : 0.1159    hit@20 : 0.2029    ndcg@5 : 0.055    ndcg@10 : 0.0668    ndcg@20 : 0.0886    mrr@5 : 0.047    mrr@10 : 0.052    mrr@20 : 0.0578
+30 Mar 16:43    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:44    INFO  epoch 22 training [time: 34.03s, train loss: 23.1325]
+30 Mar 16:44    INFO  epoch 22 evaluating [time: 0.05s, valid_score: 0.055200]
+30 Mar 16:44    INFO  valid result:
+hit@5 : 0.0725    hit@10 : 0.1268    hit@20 : 0.2246    ndcg@5 : 0.0545    ndcg@10 : 0.0716    ndcg@20 : 0.0956    mrr@5 : 0.0484    mrr@10 : 0.0552    mrr@20 : 0.0614
+30 Mar 16:44    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:44    INFO  epoch 23 training [time: 31.02s, train loss: 22.8750]
+30 Mar 16:44    INFO  epoch 23 evaluating [time: 0.05s, valid_score: 0.058200]
+30 Mar 16:44    INFO  valid result:
+hit@5 : 0.0906    hit@10 : 0.1413    hit@20 : 0.2319    ndcg@5 : 0.0612    ndcg@10 : 0.0773    ndcg@20 : 0.0994    mrr@5 : 0.0516    mrr@10 : 0.0582    mrr@20 : 0.0638
+30 Mar 16:44    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:45    INFO  epoch 24 training [time: 30.78s, train loss: 22.5111]
+30 Mar 16:45    INFO  epoch 24 evaluating [time: 0.19s, valid_score: 0.055900]
+30 Mar 16:45    INFO  valid result:
+hit@5 : 0.0978    hit@10 : 0.1449    hit@20 : 0.2319    ndcg@5 : 0.0618    ndcg@10 : 0.0765    ndcg@20 : 0.0979    mrr@5 : 0.0501    mrr@10 : 0.0559    mrr@20 : 0.0614
+30 Mar 16:45    INFO  epoch 25 training [time: 31.81s, train loss: 22.3126]
+30 Mar 16:45    INFO  epoch 25 evaluating [time: 0.05s, valid_score: 0.060300]
+30 Mar 16:45    INFO  valid result:
+hit@5 : 0.1087    hit@10 : 0.1449    hit@20 : 0.2283    ndcg@5 : 0.0684    ndcg@10 : 0.0801    ndcg@20 : 0.1008    mrr@5 : 0.0555    mrr@10 : 0.0603    mrr@20 : 0.0658
+30 Mar 16:45    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:46    INFO  epoch 26 training [time: 35.05s, train loss: 22.0233]
+30 Mar 16:46    INFO  epoch 26 evaluating [time: 0.27s, valid_score: 0.064400]
+30 Mar 16:46    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1486    hit@20 : 0.2283    ndcg@5 : 0.0703    ndcg@10 : 0.0841    ndcg@20 : 0.1041    mrr@5 : 0.0589    mrr@10 : 0.0644    mrr@20 : 0.0699
+30 Mar 16:46    INFO  Saving current: saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+30 Mar 16:47    INFO  epoch 27 training [time: 31.93s, train loss: 21.6272]
+30 Mar 16:47    INFO  epoch 27 evaluating [time: 0.05s, valid_score: 0.059000]
+30 Mar 16:47    INFO  valid result:
+hit@5 : 0.1123    hit@10 : 0.1558    hit@20 : 0.2355    ndcg@5 : 0.0679    ndcg@10 : 0.0817    ndcg@20 : 0.1015    mrr@5 : 0.0534    mrr@10 : 0.059    mrr@20 : 0.0643
+30 Mar 16:47    INFO  epoch 28 training [time: 30.14s, train loss: 21.4931]
+30 Mar 16:47    INFO  epoch 28 evaluating [time: 0.05s, valid_score: 0.062400]
+30 Mar 16:47    INFO  valid result:
+hit@5 : 0.0906    hit@10 : 0.1522    hit@20 : 0.2428    ndcg@5 : 0.063    ndcg@10 : 0.0833    ndcg@20 : 0.1056    mrr@5 : 0.0539    mrr@10 : 0.0624    mrr@20 : 0.0683
+30 Mar 16:48    INFO  epoch 29 training [time: 30.06s, train loss: 21.3154]
+30 Mar 16:48    INFO  epoch 29 evaluating [time: 0.05s, valid_score: 0.062900]
+30 Mar 16:48    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1522    hit@20 : 0.25    ndcg@5 : 0.0647    ndcg@10 : 0.0837    ndcg@20 : 0.1079    mrr@5 : 0.0549    mrr@10 : 0.0629    mrr@20 : 0.0693
+30 Mar 16:48    INFO  epoch 30 training [time: 30.15s, train loss: 21.0482]
+30 Mar 16:48    INFO  epoch 30 evaluating [time: 0.05s, valid_score: 0.063000]
+30 Mar 16:48    INFO  valid result:
+hit@5 : 0.0906    hit@10 : 0.1558    hit@20 : 0.25    ndcg@5 : 0.0631    ndcg@10 : 0.0845    ndcg@20 : 0.1077    mrr@5 : 0.054    mrr@10 : 0.063    mrr@20 : 0.0691
+30 Mar 16:49    INFO  epoch 31 training [time: 30.84s, train loss: 20.6595]
+30 Mar 16:49    INFO  epoch 31 evaluating [time: 0.19s, valid_score: 0.062200]
+30 Mar 16:49    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1558    hit@20 : 0.2428    ndcg@5 : 0.0675    ndcg@10 : 0.084    ndcg@20 : 0.106    mrr@5 : 0.0554    mrr@10 : 0.0622    mrr@20 : 0.0682
+30 Mar 16:49    INFO  epoch 32 training [time: 36.08s, train loss: 20.4881]
+30 Mar 16:49    INFO  epoch 32 evaluating [time: 0.05s, valid_score: 0.062200]
+30 Mar 16:49    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1486    hit@20 : 0.25    ndcg@5 : 0.068    ndcg@10 : 0.0825    ndcg@20 : 0.108    mrr@5 : 0.056    mrr@10 : 0.0622    mrr@20 : 0.0692
+30 Mar 16:50    INFO  epoch 33 training [time: 32.93s, train loss: 20.5254]
+30 Mar 16:50    INFO  epoch 33 evaluating [time: 0.04s, valid_score: 0.063200]
+30 Mar 16:50    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1594    hit@20 : 0.2464    ndcg@5 : 0.0667    ndcg@10 : 0.0855    ndcg@20 : 0.1072    mrr@5 : 0.0554    mrr@10 : 0.0632    mrr@20 : 0.069
+30 Mar 16:50    INFO  epoch 34 training [time: 31.83s, train loss: 20.1024]
+30 Mar 16:50    INFO  epoch 34 evaluating [time: 0.04s, valid_score: 0.063100]
+30 Mar 16:50    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.163    hit@20 : 0.2609    ndcg@5 : 0.064    ndcg@10 : 0.086    ndcg@20 : 0.1102    mrr@5 : 0.0542    mrr@10 : 0.0631    mrr@20 : 0.0695
+30 Mar 16:51    INFO  epoch 35 training [time: 33.28s, train loss: 19.9690]
+30 Mar 16:51    INFO  epoch 35 evaluating [time: 0.05s, valid_score: 0.060500]
+30 Mar 16:51    INFO  valid result:
+hit@5 : 0.0906    hit@10 : 0.1667    hit@20 : 0.2609    ndcg@5 : 0.0603    ndcg@10 : 0.0849    ndcg@20 : 0.1083    mrr@5 : 0.0504    mrr@10 : 0.0605    mrr@20 : 0.0667
+30 Mar 16:51    INFO  epoch 36 training [time: 40.23s, train loss: 19.5361]
+30 Mar 16:52    INFO  epoch 36 evaluating [time: 0.05s, valid_score: 0.061300]
+30 Mar 16:52    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1594    hit@20 : 0.2717    ndcg@5 : 0.0628    ndcg@10 : 0.084    ndcg@20 : 0.1121    mrr@5 : 0.0524    mrr@10 : 0.0613    mrr@20 : 0.0688
+30 Mar 16:52    INFO  epoch 37 training [time: 38.89s, train loss: 19.5926]
+30 Mar 16:52    INFO  epoch 37 evaluating [time: 0.05s, valid_score: 0.060700]
+30 Mar 16:52    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1594    hit@20 : 0.2754    ndcg@5 : 0.0624    ndcg@10 : 0.0836    ndcg@20 : 0.1129    mrr@5 : 0.0519    mrr@10 : 0.0607    mrr@20 : 0.0687
+30 Mar 16:52    INFO  Finished training, best eval result in epoch 26
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:583: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(checkpoint_file, map_location=self.device)
+30 Mar 16:52    INFO  Loading model structure and parameters from saved\GRU4Rec-Mar-30-2026_16-31-42.pth
+🎉 GRU4Rec 结果： OrderedDict([('hit@5', 0.0737), ('hit@10', 0.1263), ('hit@20', 0.2035), ('ndcg@5', 0.0478), ('ndcg@10', 0.0644), ('ndcg@20', 0.0836), ('mrr@5', 0.0394), ('mrr@10', 0.046), ('mrr@20', 0.0511)])
+
+
+========== Training NARM ==========
+✅ 已生成标准 RecBole 文件：D:\python_workplace\expriement3\recbole_baselines\dataset\Video_Games\Video_Games.inter
+30 Mar 16:52    INFO  [Training]: train_batch_size = [256] train_neg_sample_args: [{'distribution': 'none', 'sample_num': 'none', 'alpha': 'none', 'dynamic': False, 'candidate_num': 0}]
+30 Mar 16:52    INFO  [Evaluation]: eval_batch_size = [256] eval_args: [{'split': {'LS': 'valid_and_test'}, 'order': 'TO', 'group_by': 'user', 'mode': {'valid': 'full', 'test': 'full'}}]
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:235: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = amp.GradScaler(enabled=self.enable_scaler)
+30 Mar 16:53    INFO  epoch 0 training [time: 30.14s, train loss: 28.3345]
+30 Mar 16:53    INFO  epoch 0 evaluating [time: 0.06s, valid_score: 0.016100]
+30 Mar 16:53    INFO  valid result:
+hit@5 : 0.0217    hit@10 : 0.058    hit@20 : 0.1123    ndcg@5 : 0.0138    ndcg@10 : 0.0255    ndcg@20 : 0.0384    mrr@5 : 0.0113    mrr@10 : 0.0161    mrr@20 : 0.0192
+30 Mar 16:53    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:53    INFO  epoch 1 training [time: 31.67s, train loss: 28.3100]
+30 Mar 16:53    INFO  epoch 1 evaluating [time: 0.05s, valid_score: 0.016400]
+30 Mar 16:53    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0543    hit@20 : 0.1123    ndcg@5 : 0.0159    ndcg@10 : 0.025    ndcg@20 : 0.0397    mrr@5 : 0.0128    mrr@10 : 0.0164    mrr@20 : 0.0205
+30 Mar 16:53    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:54    INFO  epoch 2 training [time: 30.64s, train loss: 28.2875]
+30 Mar 16:54    INFO  epoch 2 evaluating [time: 0.05s, valid_score: 0.020200]
+30 Mar 16:54    INFO  valid result:
+hit@5 : 0.0254    hit@10 : 0.0616    hit@20 : 0.1304    ndcg@5 : 0.0182    ndcg@10 : 0.0295    ndcg@20 : 0.0465    mrr@5 : 0.0158    mrr@10 : 0.0202    mrr@20 : 0.0247
+30 Mar 16:54    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:54    INFO  epoch 3 training [time: 30.28s, train loss: 28.2350]
+30 Mar 16:54    INFO  epoch 3 evaluating [time: 0.05s, valid_score: 0.027700]
+30 Mar 16:54    INFO  valid result:
+hit@5 : 0.0435    hit@10 : 0.0688    hit@20 : 0.1268    ndcg@5 : 0.0289    ndcg@10 : 0.0372    ndcg@20 : 0.0515    mrr@5 : 0.0241    mrr@10 : 0.0277    mrr@20 : 0.0314
+30 Mar 16:54    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:55    INFO  epoch 4 training [time: 31.00s, train loss: 28.1545]
+30 Mar 16:55    INFO  epoch 4 evaluating [time: 0.05s, valid_score: 0.029000]
+30 Mar 16:55    INFO  valid result:
+hit@5 : 0.0471    hit@10 : 0.0833    hit@20 : 0.1304    ndcg@5 : 0.0298    ndcg@10 : 0.0414    ndcg@20 : 0.053    mrr@5 : 0.0242    mrr@10 : 0.029    mrr@20 : 0.032
+30 Mar 16:55    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:55    INFO  epoch 5 training [time: 30.34s, train loss: 27.9546]
+30 Mar 16:55    INFO  epoch 5 evaluating [time: 0.05s, valid_score: 0.032800]
+30 Mar 16:55    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0833    hit@20 : 0.1558    ndcg@5 : 0.0354    ndcg@10 : 0.0444    ndcg@20 : 0.0624    mrr@5 : 0.0293    mrr@10 : 0.0328    mrr@20 : 0.0376
+30 Mar 16:55    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:56    INFO  epoch 6 training [time: 29.81s, train loss: 27.7394]
+30 Mar 16:56    INFO  epoch 6 evaluating [time: 0.05s, valid_score: 0.034500]
+30 Mar 16:56    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0833    hit@20 : 0.1594    ndcg@5 : 0.0363    ndcg@10 : 0.0457    ndcg@20 : 0.0651    mrr@5 : 0.0306    mrr@10 : 0.0345    mrr@20 : 0.0399
+30 Mar 16:56    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:56    INFO  epoch 7 training [time: 30.52s, train loss: 27.4068]
+30 Mar 16:56    INFO  epoch 7 evaluating [time: 0.04s, valid_score: 0.037400]
+30 Mar 16:56    INFO  valid result:
+hit@5 : 0.0616    hit@10 : 0.1051    hit@20 : 0.1667    ndcg@5 : 0.0393    ndcg@10 : 0.0527    ndcg@20 : 0.0681    mrr@5 : 0.0323    mrr@10 : 0.0374    mrr@20 : 0.0416
+30 Mar 16:56    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:57    INFO  epoch 8 training [time: 30.27s, train loss: 26.9802]
+30 Mar 16:57    INFO  epoch 8 evaluating [time: 0.27s, valid_score: 0.041300]
+30 Mar 16:57    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.1196    hit@20 : 0.1703    ndcg@5 : 0.0375    ndcg@10 : 0.0591    ndcg@20 : 0.0719    mrr@5 : 0.0321    mrr@10 : 0.0413    mrr@20 : 0.0447
+30 Mar 16:57    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:57    INFO  epoch 9 training [time: 30.16s, train loss: 26.4780]
+30 Mar 16:57    INFO  epoch 9 evaluating [time: 0.04s, valid_score: 0.046800]
+30 Mar 16:57    INFO  valid result:
+hit@5 : 0.0797    hit@10 : 0.1232    hit@20 : 0.192    ndcg@5 : 0.0506    ndcg@10 : 0.0645    ndcg@20 : 0.0818    mrr@5 : 0.0411    mrr@10 : 0.0468    mrr@20 : 0.0515
+30 Mar 16:57    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:58    INFO  epoch 10 training [time: 38.35s, train loss: 25.9799]
+30 Mar 16:58    INFO  epoch 10 evaluating [time: 0.15s, valid_score: 0.047000]
+30 Mar 16:58    INFO  valid result:
+hit@5 : 0.0725    hit@10 : 0.1377    hit@20 : 0.1993    ndcg@5 : 0.047    ndcg@10 : 0.0679    ndcg@20 : 0.0835    mrr@5 : 0.0385    mrr@10 : 0.047    mrr@20 : 0.0513
+30 Mar 16:58    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:59    INFO  epoch 11 training [time: 45.00s, train loss: 25.4141]
+30 Mar 16:59    INFO  epoch 11 evaluating [time: 0.11s, valid_score: 0.053800]
+30 Mar 16:59    INFO  valid result:
+hit@5 : 0.0833    hit@10 : 0.1377    hit@20 : 0.2138    ndcg@5 : 0.0559    ndcg@10 : 0.0733    ndcg@20 : 0.0925    mrr@5 : 0.0467    mrr@10 : 0.0538    mrr@20 : 0.0591
+30 Mar 16:59    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 16:59    INFO  epoch 12 training [time: 47.10s, train loss: 25.0126]
+30 Mar 16:59    INFO  epoch 12 evaluating [time: 0.08s, valid_score: 0.058900]
+30 Mar 16:59    INFO  valid result:
+hit@5 : 0.087    hit@10 : 0.1449    hit@20 : 0.2246    ndcg@5 : 0.0604    ndcg@10 : 0.0786    ndcg@20 : 0.0986    mrr@5 : 0.0517    mrr@10 : 0.0589    mrr@20 : 0.0642
+30 Mar 16:59    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:00    INFO  epoch 13 training [time: 40.52s, train loss: 24.4206]
+30 Mar 17:00    INFO  epoch 13 evaluating [time: 0.05s, valid_score: 0.059700]
+30 Mar 17:00    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1449    hit@20 : 0.2246    ndcg@5 : 0.066    ndcg@10 : 0.0796    ndcg@20 : 0.0994    mrr@5 : 0.0543    mrr@10 : 0.0597    mrr@20 : 0.0649
+30 Mar 17:00    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:01    INFO  epoch 14 training [time: 35.26s, train loss: 23.8628]
+30 Mar 17:01    INFO  epoch 14 evaluating [time: 0.24s, valid_score: 0.065100]
+30 Mar 17:01    INFO  valid result:
+hit@5 : 0.0978    hit@10 : 0.1377    hit@20 : 0.2138    ndcg@5 : 0.0691    ndcg@10 : 0.0823    ndcg@20 : 0.1018    mrr@5 : 0.0595    mrr@10 : 0.0651    mrr@20 : 0.0706
+30 Mar 17:01    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:01    INFO  epoch 15 training [time: 41.07s, train loss: 23.5798]
+30 Mar 17:01    INFO  epoch 15 evaluating [time: 0.07s, valid_score: 0.067100]
+30 Mar 17:01    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1413    hit@20 : 0.221    ndcg@5 : 0.0719    ndcg@10 : 0.0844    ndcg@20 : 0.1046    mrr@5 : 0.0621    mrr@10 : 0.0671    mrr@20 : 0.0727
+30 Mar 17:01    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:02    INFO  epoch 16 training [time: 38.67s, train loss: 23.0975]
+30 Mar 17:02    INFO  epoch 16 evaluating [time: 0.08s, valid_score: 0.067300]
+30 Mar 17:02    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1377    hit@20 : 0.2065    ndcg@5 : 0.0734    ndcg@10 : 0.0839    ndcg@20 : 0.1016    mrr@5 : 0.063    mrr@10 : 0.0673    mrr@20 : 0.0723
+30 Mar 17:02    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:03    INFO  epoch 17 training [time: 41.35s, train loss: 22.8515]
+30 Mar 17:03    INFO  epoch 17 evaluating [time: 0.07s, valid_score: 0.062100]
+30 Mar 17:03    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1304    hit@20 : 0.2065    ndcg@5 : 0.0705    ndcg@10 : 0.0785    ndcg@20 : 0.0979    mrr@5 : 0.0589    mrr@10 : 0.0621    mrr@20 : 0.0675
+30 Mar 17:03    INFO  epoch 18 training [time: 43.26s, train loss: 22.2920]
+30 Mar 17:03    INFO  epoch 18 evaluating [time: 0.47s, valid_score: 0.067700]
+30 Mar 17:03    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1341    hit@20 : 0.2174    ndcg@5 : 0.0731    ndcg@10 : 0.0835    ndcg@20 : 0.1044    mrr@5 : 0.0635    mrr@10 : 0.0677    mrr@20 : 0.0734
+30 Mar 17:03    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:04    INFO  epoch 19 training [time: 32.39s, train loss: 22.0498]
+30 Mar 17:04    INFO  epoch 19 evaluating [time: 0.05s, valid_score: 0.068600]
+30 Mar 17:04    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1341    hit@20 : 0.221    ndcg@5 : 0.0737    ndcg@10 : 0.084    ndcg@20 : 0.106    mrr@5 : 0.0644    mrr@10 : 0.0686    mrr@20 : 0.0746
+30 Mar 17:04    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:05    INFO  epoch 20 training [time: 32.16s, train loss: 21.6564]
+30 Mar 17:05    INFO  epoch 20 evaluating [time: 0.06s, valid_score: 0.070700]
+30 Mar 17:05    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1341    hit@20 : 0.2319    ndcg@5 : 0.0764    ndcg@10 : 0.0857    ndcg@20 : 0.1103    mrr@5 : 0.067    mrr@10 : 0.0707    mrr@20 : 0.0775
+30 Mar 17:05    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:05    INFO  epoch 21 training [time: 33.44s, train loss: 21.3206]
+30 Mar 17:05    INFO  epoch 21 evaluating [time: 0.06s, valid_score: 0.076700]
+30 Mar 17:05    INFO  valid result:
+hit@5 : 0.1087    hit@10 : 0.1341    hit@20 : 0.2246    ndcg@5 : 0.0822    ndcg@10 : 0.0901    ndcg@20 : 0.1133    mrr@5 : 0.0736    mrr@10 : 0.0767    mrr@20 : 0.0832
+30 Mar 17:05    INFO  Saving current: saved\NARM-Mar-30-2026_16-52-40.pth
+30 Mar 17:06    INFO  epoch 22 training [time: 32.07s, train loss: 21.2114]
+30 Mar 17:06    INFO  epoch 22 evaluating [time: 0.05s, valid_score: 0.076200]
+30 Mar 17:06    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1377    hit@20 : 0.2246    ndcg@5 : 0.0806    ndcg@10 : 0.0906    ndcg@20 : 0.1129    mrr@5 : 0.0725    mrr@10 : 0.0762    mrr@20 : 0.0826
+30 Mar 17:06    INFO  epoch 23 training [time: 31.36s, train loss: 20.6562]
+30 Mar 17:06    INFO  epoch 23 evaluating [time: 0.06s, valid_score: 0.074600]
+30 Mar 17:06    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1449    hit@20 : 0.2283    ndcg@5 : 0.0787    ndcg@10 : 0.0908    ndcg@20 : 0.1119    mrr@5 : 0.07    mrr@10 : 0.0746    mrr@20 : 0.0804
+30 Mar 17:07    INFO  epoch 24 training [time: 31.90s, train loss: 20.3366]
+30 Mar 17:07    INFO  epoch 24 evaluating [time: 0.06s, valid_score: 0.072300]
+30 Mar 17:07    INFO  valid result:
+hit@5 : 0.1051    hit@10 : 0.1449    hit@20 : 0.2246    ndcg@5 : 0.0768    ndcg@10 : 0.089    ndcg@20 : 0.1093    mrr@5 : 0.0676    mrr@10 : 0.0723    mrr@20 : 0.0779
+30 Mar 17:07    INFO  epoch 25 training [time: 33.54s, train loss: 19.7571]
+30 Mar 17:07    INFO  epoch 25 evaluating [time: 0.07s, valid_score: 0.074100]
+30 Mar 17:07    INFO  valid result:
+hit@5 : 0.0978    hit@10 : 0.1449    hit@20 : 0.2319    ndcg@5 : 0.0757    ndcg@10 : 0.0904    ndcg@20 : 0.1124    mrr@5 : 0.0684    mrr@10 : 0.0741    mrr@20 : 0.0802
+30 Mar 17:08    INFO  epoch 26 training [time: 31.73s, train loss: 20.0356]
+30 Mar 17:08    INFO  epoch 26 evaluating [time: 0.27s, valid_score: 0.071800]
+30 Mar 17:08    INFO  valid result:
+hit@5 : 0.0978    hit@10 : 0.1377    hit@20 : 0.2355    ndcg@5 : 0.0745    ndcg@10 : 0.0871    ndcg@20 : 0.1124    mrr@5 : 0.0668    mrr@10 : 0.0718    mrr@20 : 0.079
+30 Mar 17:08    INFO  epoch 27 training [time: 31.92s, train loss: 19.4290]
+30 Mar 17:08    INFO  epoch 27 evaluating [time: 0.05s, valid_score: 0.071400]
+30 Mar 17:08    INFO  valid result:
+hit@5 : 0.0978    hit@10 : 0.1486    hit@20 : 0.2428    ndcg@5 : 0.073    ndcg@10 : 0.0892    ndcg@20 : 0.1131    mrr@5 : 0.0649    mrr@10 : 0.0714    mrr@20 : 0.078
+30 Mar 17:09    INFO  epoch 28 training [time: 33.62s, train loss: 19.4181]
+30 Mar 17:09    INFO  epoch 28 evaluating [time: 0.25s, valid_score: 0.070800]
+30 Mar 17:09    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1558    hit@20 : 0.2391    ndcg@5 : 0.0707    ndcg@10 : 0.0902    ndcg@20 : 0.1115    mrr@5 : 0.063    mrr@10 : 0.0708    mrr@20 : 0.0768
+30 Mar 17:09    INFO  epoch 29 training [time: 31.23s, train loss: 19.3025]
+30 Mar 17:09    INFO  epoch 29 evaluating [time: 0.19s, valid_score: 0.069700]
+30 Mar 17:09    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1703    hit@20 : 0.2391    ndcg@5 : 0.0688    ndcg@10 : 0.0925    ndcg@20 : 0.1097    mrr@5 : 0.0604    mrr@10 : 0.0697    mrr@20 : 0.0743
+30 Mar 17:10    INFO  epoch 30 training [time: 32.54s, train loss: 19.0081]
+30 Mar 17:10    INFO  epoch 30 evaluating [time: 0.06s, valid_score: 0.068700]
+30 Mar 17:10    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1667    hit@20 : 0.2355    ndcg@5 : 0.0683    ndcg@10 : 0.091    ndcg@20 : 0.1085    mrr@5 : 0.0597    mrr@10 : 0.0687    mrr@20 : 0.0735
+30 Mar 17:11    INFO  epoch 31 training [time: 33.23s, train loss: 18.5881]
+30 Mar 17:11    INFO  epoch 31 evaluating [time: 0.07s, valid_score: 0.067200]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0942    hit@10 : 0.1558    hit@20 : 0.2428    ndcg@5 : 0.0678    ndcg@10 : 0.0876    ndcg@20 : 0.1099    mrr@5 : 0.0591    mrr@10 : 0.0672    mrr@20 : 0.0735
+30 Mar 17:11    INFO  epoch 32 training [time: 33.21s, train loss: 18.3426]
+30 Mar 17:11    INFO  epoch 32 evaluating [time: 0.04s, valid_score: 0.067500]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.1014    hit@10 : 0.1486    hit@20 : 0.2391    ndcg@5 : 0.0713    ndcg@10 : 0.0864    ndcg@20 : 0.1096    mrr@5 : 0.0614    mrr@10 : 0.0675    mrr@20 : 0.0741
+30 Mar 17:11    INFO  Finished training, best eval result in epoch 21
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:583: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(checkpoint_file, map_location=self.device)
+30 Mar 17:11    INFO  Loading model structure and parameters from saved\NARM-Mar-30-2026_16-52-40.pth
+🎉 NARM 结果： OrderedDict([('hit@5', 0.0561), ('hit@10', 0.0947), ('hit@20', 0.1895), ('ndcg@5', 0.0403), ('ndcg@10', 0.0529), ('ndcg@20', 0.0762), ('mrr@5', 0.0351), ('mrr@10', 0.0404), ('mrr@20', 0.0464)])
+
+
+========== Training STAMP ==========
+✅ 已生成标准 RecBole 文件：D:\python_workplace\expriement3\recbole_baselines\dataset\Video_Games\Video_Games.inter
+30 Mar 17:11    INFO  [Training]: train_batch_size = [256] train_neg_sample_args: [{'distribution': 'none', 'sample_num': 'none', 'alpha': 'none', 'dynamic': False, 'candidate_num': 0}]
+30 Mar 17:11    INFO  [Evaluation]: eval_batch_size = [256] eval_args: [{'split': {'LS': 'valid_and_test'}, 'order': 'TO', 'group_by': 'user', 'mode': {'valid': 'full', 'test': 'full'}}]
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:235: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = amp.GradScaler(enabled=self.enable_scaler)
+30 Mar 17:11    INFO  epoch 0 training [time: 1.39s, train loss: 28.3321]
+30 Mar 17:11    INFO  epoch 0 evaluating [time: 0.02s, valid_score: 0.005700]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0145    hit@10 : 0.0217    hit@20 : 0.0725    ndcg@5 : 0.0072    ndcg@10 : 0.0095    ndcg@20 : 0.0222    mrr@5 : 0.0048    mrr@10 : 0.0057    mrr@20 : 0.0091
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:11    INFO  epoch 1 training [time: 1.63s, train loss: 28.3321]
+30 Mar 17:11    INFO  epoch 1 evaluating [time: 0.01s, valid_score: 0.017500]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0362    hit@10 : 0.0725    hit@20 : 0.1014    ndcg@5 : 0.0186    ndcg@10 : 0.03    ndcg@20 : 0.0371    mrr@5 : 0.013    mrr@10 : 0.0175    mrr@20 : 0.0194
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:11    INFO  epoch 2 training [time: 1.89s, train loss: 28.3318]
+30 Mar 17:11    INFO  epoch 2 evaluating [time: 0.02s, valid_score: 0.026700]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0471    hit@10 : 0.0616    hit@20 : 0.1014    ndcg@5 : 0.0302    ndcg@10 : 0.0349    ndcg@20 : 0.045    mrr@5 : 0.0247    mrr@10 : 0.0267    mrr@20 : 0.0294
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:11    INFO  epoch 3 training [time: 1.65s, train loss: 28.3300]
+30 Mar 17:11    INFO  epoch 3 evaluating [time: 0.02s, valid_score: 0.025600]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0435    hit@10 : 0.0543    hit@20 : 0.1051    ndcg@5 : 0.0288    ndcg@10 : 0.0325    ndcg@20 : 0.0456    mrr@5 : 0.024    mrr@10 : 0.0256    mrr@20 : 0.0293
+30 Mar 17:11    INFO  epoch 4 training [time: 1.85s, train loss: 28.3224]
+30 Mar 17:11    INFO  epoch 4 evaluating [time: 0.01s, valid_score: 0.026800]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0399    hit@10 : 0.0652    hit@20 : 0.1087    ndcg@5 : 0.0274    ndcg@10 : 0.0358    ndcg@20 : 0.0466    mrr@5 : 0.0232    mrr@10 : 0.0268    mrr@20 : 0.0297
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:11    INFO  epoch 5 training [time: 1.77s, train loss: 28.3038]
+30 Mar 17:11    INFO  epoch 5 evaluating [time: 0.01s, valid_score: 0.028100]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0399    hit@10 : 0.0688    hit@20 : 0.1268    ndcg@5 : 0.0279    ndcg@10 : 0.0377    ndcg@20 : 0.052    mrr@5 : 0.0239    mrr@10 : 0.0281    mrr@20 : 0.0319
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:11    INFO  epoch 6 training [time: 1.74s, train loss: 28.2744]
+30 Mar 17:11    INFO  epoch 6 evaluating [time: 0.01s, valid_score: 0.029700]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0507    hit@10 : 0.0688    hit@20 : 0.1196    ndcg@5 : 0.033    ndcg@10 : 0.0389    ndcg@20 : 0.0516    mrr@5 : 0.0272    mrr@10 : 0.0297    mrr@20 : 0.033
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:11    INFO  epoch 7 training [time: 1.89s, train loss: 28.2259]
+30 Mar 17:11    INFO  epoch 7 evaluating [time: 0.01s, valid_score: 0.029200]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0652    hit@20 : 0.1232    ndcg@5 : 0.0344    ndcg@10 : 0.0377    ndcg@20 : 0.0524    mrr@5 : 0.028    mrr@10 : 0.0292    mrr@20 : 0.0332
+30 Mar 17:11    INFO  epoch 8 training [time: 1.77s, train loss: 28.1610]
+30 Mar 17:11    INFO  epoch 8 evaluating [time: 0.01s, valid_score: 0.029300]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0652    hit@20 : 0.1449    ndcg@5 : 0.0344    ndcg@10 : 0.0379    ndcg@20 : 0.0574    mrr@5 : 0.028    mrr@10 : 0.0293    mrr@20 : 0.0344
+30 Mar 17:11    INFO  epoch 9 training [time: 1.58s, train loss: 28.0729]
+30 Mar 17:11    INFO  epoch 9 evaluating [time: 0.01s, valid_score: 0.029100]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0652    hit@20 : 0.1594    ndcg@5 : 0.0342    ndcg@10 : 0.0377    ndcg@20 : 0.0606    mrr@5 : 0.0276    mrr@10 : 0.0291    mrr@20 : 0.0349
+30 Mar 17:11    INFO  epoch 10 training [time: 1.69s, train loss: 27.9638]
+30 Mar 17:11    INFO  epoch 10 evaluating [time: 0.01s, valid_score: 0.028800]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0507    hit@10 : 0.0652    hit@20 : 0.1594    ndcg@5 : 0.0326    ndcg@10 : 0.0375    ndcg@20 : 0.0607    mrr@5 : 0.0267    mrr@10 : 0.0288    mrr@20 : 0.0349
+30 Mar 17:11    INFO  epoch 11 training [time: 1.68s, train loss: 27.8100]
+30 Mar 17:11    INFO  epoch 11 evaluating [time: 0.02s, valid_score: 0.029200]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0688    hit@20 : 0.1703    ndcg@5 : 0.0338    ndcg@10 : 0.0386    ndcg@20 : 0.0637    mrr@5 : 0.0271    mrr@10 : 0.0292    mrr@20 : 0.0358
+30 Mar 17:11    INFO  epoch 12 training [time: 1.65s, train loss: 27.6267]
+30 Mar 17:11    INFO  epoch 12 evaluating [time: 0.01s, valid_score: 0.029600]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.058    hit@10 : 0.0688    hit@20 : 0.163    ndcg@5 : 0.0352    ndcg@10 : 0.039    ndcg@20 : 0.0623    mrr@5 : 0.0279    mrr@10 : 0.0296    mrr@20 : 0.0357
+30 Mar 17:11    INFO  epoch 13 training [time: 1.94s, train loss: 27.3885]
+30 Mar 17:11    INFO  epoch 13 evaluating [time: 0.02s, valid_score: 0.030200]
+30 Mar 17:11    INFO  valid result:
+hit@5 : 0.058    hit@10 : 0.0725    hit@20 : 0.1703    ndcg@5 : 0.0354    ndcg@10 : 0.0403    ndcg@20 : 0.0649    mrr@5 : 0.0281    mrr@10 : 0.0302    mrr@20 : 0.0369
+30 Mar 17:11    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 14 training [time: 1.73s, train loss: 27.2175]
+30 Mar 17:12    INFO  epoch 14 evaluating [time: 0.02s, valid_score: 0.034900]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.0761    hit@20 : 0.1848    ndcg@5 : 0.0427    ndcg@10 : 0.0448    ndcg@20 : 0.072    mrr@5 : 0.0342    mrr@10 : 0.0349    mrr@20 : 0.0423
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 15 training [time: 1.76s, train loss: 26.9816]
+30 Mar 17:12    INFO  epoch 15 evaluating [time: 0.01s, valid_score: 0.036700]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.0797    hit@20 : 0.1884    ndcg@5 : 0.0436    ndcg@10 : 0.047    ndcg@20 : 0.0743    mrr@5 : 0.0354    mrr@10 : 0.0367    mrr@20 : 0.0441
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 16 training [time: 1.63s, train loss: 26.7391]
+30 Mar 17:12    INFO  epoch 16 evaluating [time: 0.01s, valid_score: 0.037200]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.087    hit@20 : 0.1884    ndcg@5 : 0.0434    ndcg@10 : 0.0489    ndcg@20 : 0.0745    mrr@5 : 0.0351    mrr@10 : 0.0372    mrr@20 : 0.0442
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 17 training [time: 1.75s, train loss: 26.4954]
+30 Mar 17:12    INFO  epoch 17 evaluating [time: 0.02s, valid_score: 0.040100]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0725    hit@10 : 0.087    hit@20 : 0.1775    ndcg@5 : 0.0469    ndcg@10 : 0.0512    ndcg@20 : 0.0743    mrr@5 : 0.0385    mrr@10 : 0.0401    mrr@20 : 0.0465
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 18 training [time: 1.79s, train loss: 26.4062]
+30 Mar 17:12    INFO  epoch 18 evaluating [time: 0.02s, valid_score: 0.038500]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0652    hit@10 : 0.0942    hit@20 : 0.1884    ndcg@5 : 0.0426    ndcg@10 : 0.0514    ndcg@20 : 0.0752    mrr@5 : 0.0353    mrr@10 : 0.0385    mrr@20 : 0.0451
+30 Mar 17:12    INFO  epoch 19 training [time: 1.56s, train loss: 26.2505]
+30 Mar 17:12    INFO  epoch 19 evaluating [time: 0.02s, valid_score: 0.037500]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.087    hit@20 : 0.1884    ndcg@5 : 0.0436    ndcg@10 : 0.049    ndcg@20 : 0.0751    mrr@5 : 0.0355    mrr@10 : 0.0375    mrr@20 : 0.0449
+30 Mar 17:12    INFO  epoch 20 training [time: 2.00s, train loss: 26.0292]
+30 Mar 17:12    INFO  epoch 20 evaluating [time: 0.02s, valid_score: 0.038700]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.087    hit@20 : 0.192    ndcg@5 : 0.0445    ndcg@10 : 0.05    ndcg@20 : 0.0769    mrr@5 : 0.0366    mrr@10 : 0.0387    mrr@20 : 0.0462
+30 Mar 17:12    INFO  epoch 21 training [time: 1.91s, train loss: 25.8603]
+30 Mar 17:12    INFO  epoch 21 evaluating [time: 0.02s, valid_score: 0.039500]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0688    hit@10 : 0.0942    hit@20 : 0.1848    ndcg@5 : 0.0445    ndcg@10 : 0.0522    ndcg@20 : 0.0752    mrr@5 : 0.0366    mrr@10 : 0.0395    mrr@20 : 0.0458
+30 Mar 17:12    INFO  epoch 22 training [time: 2.16s, train loss: 25.7434]
+30 Mar 17:12    INFO  epoch 22 evaluating [time: 0.01s, valid_score: 0.041100]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0652    hit@10 : 0.0978    hit@20 : 0.1884    ndcg@5 : 0.0438    ndcg@10 : 0.0542    ndcg@20 : 0.077    mrr@5 : 0.0369    mrr@10 : 0.0411    mrr@20 : 0.0473
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 23 training [time: 1.86s, train loss: 25.6064]
+30 Mar 17:12    INFO  epoch 23 evaluating [time: 0.02s, valid_score: 0.041800]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0616    hit@10 : 0.1014    hit@20 : 0.1812    ndcg@5 : 0.0429    ndcg@10 : 0.0554    ndcg@20 : 0.0755    mrr@5 : 0.0369    mrr@10 : 0.0418    mrr@20 : 0.0473
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 24 training [time: 1.48s, train loss: 25.4711]
+30 Mar 17:12    INFO  epoch 24 evaluating [time: 0.01s, valid_score: 0.042300]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.1051    hit@20 : 0.1775    ndcg@5 : 0.0405    ndcg@10 : 0.0565    ndcg@20 : 0.0748    mrr@5 : 0.0359    mrr@10 : 0.0423    mrr@20 : 0.0473
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 25 training [time: 1.78s, train loss: 25.4193]
+30 Mar 17:12    INFO  epoch 25 evaluating [time: 0.02s, valid_score: 0.043000]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.1014    hit@20 : 0.1812    ndcg@5 : 0.0415    ndcg@10 : 0.0561    ndcg@20 : 0.0762    mrr@5 : 0.0374    mrr@10 : 0.043    mrr@20 : 0.0485
+30 Mar 17:12    INFO  Saving current: saved\STAMP-Mar-30-2026_17-11-34.pth
+30 Mar 17:12    INFO  epoch 26 training [time: 1.82s, train loss: 25.3410]
+30 Mar 17:12    INFO  epoch 26 evaluating [time: 0.02s, valid_score: 0.042700]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0507    hit@10 : 0.1014    hit@20 : 0.1884    ndcg@5 : 0.0401    ndcg@10 : 0.0558    ndcg@20 : 0.0775    mrr@5 : 0.0367    mrr@10 : 0.0427    mrr@20 : 0.0485
+30 Mar 17:12    INFO  epoch 27 training [time: 1.72s, train loss: 25.0854]
+30 Mar 17:12    INFO  epoch 27 evaluating [time: 0.01s, valid_score: 0.042600]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0507    hit@10 : 0.1014    hit@20 : 0.1848    ndcg@5 : 0.0401    ndcg@10 : 0.0557    ndcg@20 : 0.0764    mrr@5 : 0.0367    mrr@10 : 0.0426    mrr@20 : 0.048
+30 Mar 17:12    INFO  epoch 28 training [time: 1.84s, train loss: 25.1138]
+30 Mar 17:12    INFO  epoch 28 evaluating [time: 0.02s, valid_score: 0.039900]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0906    hit@20 : 0.1812    ndcg@5 : 0.0402    ndcg@10 : 0.0514    ndcg@20 : 0.0744    mrr@5 : 0.0356    mrr@10 : 0.0399    mrr@20 : 0.0462
+30 Mar 17:12    INFO  epoch 29 training [time: 1.57s, train loss: 24.9803]
+30 Mar 17:12    INFO  epoch 29 evaluating [time: 0.02s, valid_score: 0.036200]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0942    hit@20 : 0.1739    ndcg@5 : 0.0372    ndcg@10 : 0.0495    ndcg@20 : 0.0699    mrr@5 : 0.0315    mrr@10 : 0.0362    mrr@20 : 0.042
+30 Mar 17:12    INFO  epoch 30 training [time: 1.61s, train loss: 24.9891]
+30 Mar 17:12    INFO  epoch 30 evaluating [time: 0.01s, valid_score: 0.034100]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.087    hit@20 : 0.1703    ndcg@5 : 0.0363    ndcg@10 : 0.0462    ndcg@20 : 0.0679    mrr@5 : 0.0303    mrr@10 : 0.0341    mrr@20 : 0.0404
+30 Mar 17:12    INFO  epoch 31 training [time: 1.88s, train loss: 24.8188]
+30 Mar 17:12    INFO  epoch 31 evaluating [time: 0.02s, valid_score: 0.035600]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0543    hit@10 : 0.0978    hit@20 : 0.1667    ndcg@5 : 0.0366    ndcg@10 : 0.0497    ndcg@20 : 0.0674    mrr@5 : 0.0307    mrr@10 : 0.0356    mrr@20 : 0.0406
+30 Mar 17:12    INFO  epoch 32 training [time: 1.89s, train loss: 24.8065]
+30 Mar 17:12    INFO  epoch 32 evaluating [time: 0.02s, valid_score: 0.034400]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0507    hit@10 : 0.0978    hit@20 : 0.1703    ndcg@5 : 0.034    ndcg@10 : 0.0488    ndcg@20 : 0.0675    mrr@5 : 0.0286    mrr@10 : 0.0344    mrr@20 : 0.0397
+30 Mar 17:12    INFO  epoch 33 training [time: 1.67s, train loss: 24.7811]
+30 Mar 17:12    INFO  epoch 33 evaluating [time: 0.02s, valid_score: 0.034000]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0471    hit@10 : 0.1014    hit@20 : 0.1703    ndcg@5 : 0.0321    ndcg@10 : 0.0492    ndcg@20 : 0.067    mrr@5 : 0.0272    mrr@10 : 0.034    mrr@20 : 0.0391
+30 Mar 17:12    INFO  epoch 34 training [time: 1.54s, train loss: 24.7618]
+30 Mar 17:12    INFO  epoch 34 evaluating [time: 0.01s, valid_score: 0.034500]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0435    hit@10 : 0.1014    hit@20 : 0.1703    ndcg@5 : 0.0308    ndcg@10 : 0.0497    ndcg@20 : 0.0674    mrr@5 : 0.0267    mrr@10 : 0.0345    mrr@20 : 0.0396
+30 Mar 17:12    INFO  epoch 35 training [time: 2.11s, train loss: 24.5841]
+30 Mar 17:12    INFO  epoch 35 evaluating [time: 0.01s, valid_score: 0.034200]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0471    hit@10 : 0.0978    hit@20 : 0.1667    ndcg@5 : 0.0322    ndcg@10 : 0.0487    ndcg@20 : 0.0663    mrr@5 : 0.0274    mrr@10 : 0.0342    mrr@20 : 0.0391
+30 Mar 17:12    INFO  epoch 36 training [time: 1.35s, train loss: 24.6240]
+30 Mar 17:12    INFO  epoch 36 evaluating [time: 0.01s, valid_score: 0.034300]
+30 Mar 17:12    INFO  valid result:
+hit@5 : 0.0399    hit@10 : 0.0978    hit@20 : 0.1667    ndcg@5 : 0.0297    ndcg@10 : 0.0487    ndcg@20 : 0.0663    mrr@5 : 0.0263    mrr@10 : 0.0343    mrr@20 : 0.0392
+30 Mar 17:12    INFO  Finished training, best eval result in epoch 25
+D:\python_workplace\expriement3\.venv\lib\site-packages\recbole\trainer\trainer.py:583: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(checkpoint_file, map_location=self.device)
+30 Mar 17:12    INFO  Loading model structure and parameters from saved\STAMP-Mar-30-2026_17-11-34.pth
+🎉 STAMP 结果： OrderedDict([('hit@5', 0.0281), ('hit@10', 0.0632), ('hit@20', 0.1298), ('ndcg@5', 0.018), ('ndcg@10', 0.0294), ('ndcg@20', 0.0462), ('mrr@5', 0.0149), ('mrr@10', 0.0196), ('mrr@20', 0.0242)])
+
+Process finished with exit code 0
