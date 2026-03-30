@@ -33,8 +33,7 @@ def setup_logger():
     return logging.getLogger("RecBoleConverter")
 
 
-def convert_to_recbole_format(category: str, quick_mode: bool = False, output_dir: str = None,
-                              min_user_interactions: int = 5, min_item_interactions: int = 5):
+def convert_to_recbole_format(category: str, quick_mode: bool = False, output_dir: str = None):
     """
     将Amazon数据集转换为RecBole格式
 
@@ -55,8 +54,6 @@ def convert_to_recbole_format(category: str, quick_mode: bool = False, output_di
     logger.info(f"Converting {category} dataset to RecBole format...")
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Quick mode: {quick_mode}")
-    logger.info(f"Min user interactions: {min_user_interactions}")
-    logger.info(f"Min item interactions: {min_item_interactions}")
 
     # 加载原始数据（与AHRQ/PMAT使用相同的数据处理流程）
     processor = AmazonBooksProcessor(
@@ -302,24 +299,17 @@ def main():
                         help='Use quick mode (sample data)')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='Output directory')
-    parser.add_argument('--min_user_interactions', type=int, default=0,
-                        help='Minimum interactions per user (default: 0, meaning no filtering)')
-    parser.add_argument('--min_item_interactions', type=int, default=0,
-                        help='Minimum interactions per item (default: 0, meaning no filtering)')
+
 
     args = parser.parse_args()
 
-    # quick_mode下使用更宽松的过滤阈值
-    min_user = args.min_user_interactions
-    min_item = args.min_item_interactions
+
 
 
     convert_to_recbole_format(
         category=args.category,
         quick_mode=args.quick_mode,
-        output_dir=args.output_dir,
-        min_user_interactions=min_user,
-        min_item_interactions=min_item
+        output_dir=args.output_dir
     )
 
 

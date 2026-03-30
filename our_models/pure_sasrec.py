@@ -67,6 +67,15 @@ class RecBoleSASRec(AbstractTrainableModel):
         # 移到设备
         self.to(self.device)
 
+    def get_all_item_sem_feat(self, indices_list=None):
+        """获取全量物品的embedding特征（用于全量排序评估）"""
+        # indices_list: 物品ID列表 (num_items,)
+        # 返回: (num_items, hidden_dim)
+        if indices_list is None:
+            # 使用全部物品ID（跳过padding，即从1开始）
+            indices_list = torch.arange(1, self.n_items + 1, device=self.device)
+        return self.item_embedding(indices_list)
+
     def _init_weights(self):
         """RecBole官方初始化"""
         nn.init.normal_(self.item_embedding.weight, mean=0.0, std=self.initializer_range)
