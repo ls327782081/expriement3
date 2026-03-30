@@ -1440,14 +1440,18 @@ class PMATDataset(Dataset):
         history = np.array(history) - 1
         history_text_feat = self.text_features[history]
         history_vision_feat = self.image_features[history]
-        history_indices = self.indices_list[history]
+        history_indices = None
+        if self.indices_list:
+            history_indices = self.indices_list[history]
 
         # 获取目标物品的特征
         if target == 0:
             raise Exception("商品id应该从1开始")
         target_text_feat = self.text_features[target - 1]
         target_vision_feat = self.image_features[target - 1]
-        target_indices = self.indices_list[target - 1]
+        target_indices = None
+        if self.indices_list:
+            target_indices = self.indices_list[target - 1]
 
         result = {
             'user_id': torch.tensor(user_id, dtype=torch.long),
@@ -1518,7 +1522,8 @@ def pmat_collate_fn(batch):
         target_items.append(item['target_item'])
         target_text_feat_list.append(item['target_text_feat'])
         target_vision_feat_list.append(item['target_vision_feat'])
-        target_indices.append(item['target_indices'])
+        if 'target_indices' in item and item['target_indices']:
+            target_indices.append(item['target_indices'])
 
         if has_negatives:
             negative_items_list.append(item['negative_items'])
@@ -1532,18 +1537,22 @@ def pmat_collate_fn(batch):
 
         # Padding history items（左对齐：有效内容在前，后面补0）
         history_items = item['history_items']
-        history_indices = item['history_indices']
+        history_indices = None
+        if 'history_indices' in item:
+            history_indices = item['history_indices']
         if pad_len > 0:
             history_items = torch.cat([
                 history_items,  # 有效内容在前
                 torch.zeros(pad_len, dtype=torch.long, device=history_items.device)  # 后面补0（左对齐核心）
             ])
-            history_indices = torch.cat([
-                history_indices,  # 有效内容在前
-                torch.zeros(pad_len, history_indices.shape[1], dtype=torch.long, device=history_indices.device)  # 后面补0（左对齐核心）
-            ])
+            if history_indices:
+                history_indices = torch.cat([
+                    history_indices,  # 有效内容在前
+                    torch.zeros(pad_len, history_indices.shape[1], dtype=torch.long, device=history_indices.device)  # 后面补0（左对齐核心）
+                ])
         history_items_list.append(history_items)
-        history_indices_list.append(history_indices)
+        if history_indices:
+            history_indices_list.append(history_indices)
 
         # Padding history features（左对齐：有效特征在前，后面补0）
         history_text = item['history_text_feat']
@@ -1567,9 +1576,12 @@ def pmat_collate_fn(batch):
         'target_item': torch.stack(target_items),
         'target_text_feat': torch.stack(target_text_feat_list),
         'target_vision_feat': torch.stack(target_vision_feat_list),
-        'target_indices': torch.stack(target_indices),
-        'history_indices': torch.stack(history_indices_list),
     }
+    if len(target_indices) > 0:
+        result["target_indices"] = torch.stack(target_indices)
+    if len(history_indices_list) > 0:
+        result["history_indices"] = torch.stack(history_indices_list)
+
 
     if has_negatives:
         result['negative_items'] = torch.stack(negative_items_list)
