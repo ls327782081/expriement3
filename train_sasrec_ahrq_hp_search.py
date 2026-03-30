@@ -733,7 +733,7 @@ def save_hp_search_summary(all_results: List[Dict], output_dir: str = "./results
     os.makedirs(output_dir, exist_ok=True)
 
     # 按实验分组
-    results_by_experiment = {"A": [], "B": [], "C": []}
+    results_by_experiment = {"A": [], "B": [], "C": [], "D":[]}
 
     for result in all_results:
         exp_name = result['experiment_name']
