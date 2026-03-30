@@ -173,7 +173,7 @@ class Config:
 
         # AH-RQ量化配置（核心）
         # 2024-修改：隐藏维度264→512，每层维度从44→128，减少信息损失
-        self.ahrq_hidden_dim = 64
+        self.ahrq_hidden_dim = 256
         # 层次化配置：Topic(层0-1) + Style(层2-3)，共4层（移除emotion简化结构）
         # 采用方案2：4层码本 + 隐藏维度512 + 融合方案
         self.semantic_hierarchy = {

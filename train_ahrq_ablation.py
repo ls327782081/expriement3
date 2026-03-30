@@ -70,52 +70,32 @@ class AblationConfig:
 def get_semantic_hierarchy(config: AblationConfig) -> dict:
     """根据消融配置生成语义层次
 
-    最佳配置: [256, 512, 512, 512] (4层)
-    分层设计:
-    - topic: 1层 (256)
-    - style: 2层 (512, 512)
-    - emotion: 1层 (512, 仅在use_emotion=True时启用)
-
-    注意：无论use_emotion是否为True，都保持4层结构
     """
-    # 确定损失权重
-    if config.use_hierarchy_weight:
-        topic_weight = 1.0
-        style_weight = 0.8
-        emotion_weight = 0.6
-    else:
-        topic_weight = 1.0
-        style_weight = 1.0
-        emotion_weight = 1.0
+
 
     if config.experiment_name in ["AHRQ-HierCodebook", "AHRQ-EMA", "AHRQ-HSCL", "AHRQ-Full"]:
-        # 自适应码本：固定4层结构 [256, 512, 512, 512]
-        # 无论是否有emotion，都保持4层结构：
-        # - topic: 1层(layers=[0])
-        # - style: 2层(layers=[1,2])
-        # - emotion: 1层(layers=[3])
+
         hierarchy = {
             "topic": {
-                "layers": [0],
-                "codebook_size": config.topic_codebook,  # 256
-                "loss_weight": topic_weight,
-                "ema_decay": 0.99
-            },
-            "style": {
-                "layers": [1, 2],
-                "codebook_size": config.style_codebook,  # [512, 512]
-                "loss_weight": style_weight,
-                "ema_decay": 0.99
-            }
+                    "layers": [0],
+                    "codebook_size": 1024,
+                    "loss_weight": 1.0,
+                    "ema_decay": 0.99
+                },
+                "style": {
+                    "layers": [1, 2],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                },
+                "emotion": {
+                    "layers": [3],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                }
         }
-        # emotion层：始终包含，保持4层结构
-        # 消融emotion时，使用较小的权重
-        hierarchy["emotion"] = {
-            "layers": [3],
-            "codebook_size": config.emotion_codebook,  # 512
-            "loss_weight": emotion_weight if config.use_emotion else 0.0,  # 消融时权重为0
-            "ema_decay": 0.99
-        }
+
         return hierarchy
     else:
         raise ValueError(f"Unknown experiment: {config.experiment_name}")

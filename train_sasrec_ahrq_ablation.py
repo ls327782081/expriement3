@@ -51,6 +51,7 @@ class AblationExperimentConfig:
     dropout: float
     hidden_dim: int
     semantic_hierarchy: dict
+    hscl_weight: float
 
 
 def evaluate_test_full(model, test_loader, indices_list, topk_list=[5, 10, 20]):
@@ -579,7 +580,6 @@ def save_ablation_summary(all_results: List[Dict], output_dir: str = "./results/
             f.write(f"  HR@5: {test['HR@5']:.4f}, HR@10: {test['HR@10']:.4f}, HR@20: {test['HR@20']:.4f}\n")
             f.write(f"  NDCG@5: {test['NDCG@5']:.4f}, NDCG@10: {test['NDCG@10']:.4f}, NDCG@20: {test['NDCG@20']:.4f}\n")
             f.write(f"  MRR: {test['MRR']:.4f}\n")
-            f.write(f"  Stage1 Recon Loss: {result['stage1_metrics']['best_val_recon_loss']:.6f}\n")
             f.write(f"  Val NDCG@10: {result['stage2_best_val']['best_ndcg']:.4f}\n")
 
     print(f"Saved readable summary to: {readable_path}")
@@ -602,21 +602,28 @@ def main():
             use_hscl=False,
             use_emotion=False,
             dropout=0.5,
-            hidden_dim=128,
+            hidden_dim=256,
             semantic_hierarchy={
                 "topic": {
                     "layers": [0],
-                    "codebook_size": 512,
+                    "codebook_size": 1024,
                     "loss_weight": 1.0,
                     "ema_decay": 0.99
                 },
                 "style": {
-                    "layers": [1, 2, 3],
-                    "codebook_size": 512,
+                    "layers": [1, 2],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                },
+                "emotion": {
+                    "layers": [3],
+                    "codebook_size": 1024,
                     "loss_weight": 0.8,
                     "ema_decay": 0.99
                 }
-            }
+            },
+            hscl_weight = 0.03
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-EMA",
@@ -624,22 +631,23 @@ def main():
             use_ema=True,
             use_hscl=False,
             use_emotion=False,
-            dropout=0.35,
-            hidden_dim=64,
+            dropout=0.5,
+            hidden_dim=256,
             semantic_hierarchy={
                 "topic": {
                     "layers": [0],
-                    "codebook_size": 512,
+                    "codebook_size": 1024,
                     "loss_weight": 1.0,
                     "ema_decay": 0.99
                 },
                 "style": {
-                    "layers": [1, 2, 3],
-                    "codebook_size": 512,
+                    "layers": [1, 2],
+                    "codebook_size": 1024,
                     "loss_weight": 0.8,
                     "ema_decay": 0.99
                 }
-            }
+            },
+            hscl_weight=0.03
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-HSCL",
@@ -647,22 +655,29 @@ def main():
             use_ema=True,
             use_hscl=True,
             use_emotion=False,
-            dropout=0.3,
-            hidden_dim=128,
+            dropout=0.5,
+            hidden_dim=256,
             semantic_hierarchy={
                 "topic": {
                     "layers": [0],
-                    "codebook_size": 512,
+                    "codebook_size": 1024,
                     "loss_weight": 1.0,
                     "ema_decay": 0.99
                 },
                 "style": {
-                    "layers": [1, 2, 3],
-                    "codebook_size": 512,
+                    "layers": [1, 2],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                },
+                "emotion": {
+                    "layers": [3],
+                    "codebook_size": 1024,
                     "loss_weight": 0.8,
                     "ema_decay": 0.99
                 }
-            }
+            },
+            hscl_weight=0
         ),
         AblationExperimentConfig(
             experiment_name="AHRQ-Full",
@@ -670,22 +685,29 @@ def main():
             use_ema=True,
             use_hscl=True,
             use_emotion=True,
-            dropout=0.3,
-            hidden_dim=128,
+            dropout=0.5,
+            hidden_dim=256,
             semantic_hierarchy={
                 "topic": {
                     "layers": [0],
-                    "codebook_size": 512,
+                    "codebook_size": 1024,
                     "loss_weight": 1.0,
                     "ema_decay": 0.99
                 },
                 "style": {
-                    "layers": [1, 2, 3],
-                    "codebook_size": 512,
+                    "layers": [1, 2],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                },
+                "emotion": {
+                    "layers": [3],
+                    "codebook_size": 1024,
                     "loss_weight": 0.8,
                     "ema_decay": 0.99
                 }
-            }
+            },
+            hscl_weight=0.03
         ),
     ]
 
