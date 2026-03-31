@@ -852,7 +852,7 @@ class PMATDataset(Dataset):
         history_text_feat = self.text_features[history]
         history_vision_feat = self.image_features[history]
         history_indices = None
-        if self.indices_list:
+        if self.indices_list is not None:
             history_indices = self.indices_list[history]
 
         # 获取目标物品的特征
@@ -861,7 +861,7 @@ class PMATDataset(Dataset):
         target_text_feat = self.text_features[target - 1]
         target_vision_feat = self.image_features[target - 1]
         target_indices = None
-        if self.indices_list:
+        if self.indices_list is not None:
             target_indices = self.indices_list[target - 1]
 
         result = {
@@ -933,7 +933,7 @@ def pmat_collate_fn(batch):
         target_items.append(item['target_item'])
         target_text_feat_list.append(item['target_text_feat'])
         target_vision_feat_list.append(item['target_vision_feat'])
-        if 'target_indices' in item and item['target_indices']:
+        if 'target_indices' in item and item['target_indices'] is not None:
             target_indices.append(item['target_indices'])
 
         if has_negatives:
@@ -956,13 +956,13 @@ def pmat_collate_fn(batch):
                 history_items,  # 有效内容在前
                 torch.zeros(pad_len, dtype=torch.long, device=history_items.device)  # 后面补0（左对齐核心）
             ])
-            if history_indices:
+            if history_indices is not None:
                 history_indices = torch.cat([
                     history_indices,  # 有效内容在前
                     torch.zeros(pad_len, history_indices.shape[1], dtype=torch.long, device=history_indices.device)  # 后面补0（左对齐核心）
                 ])
         history_items_list.append(history_items)
-        if history_indices:
+        if history_indices is not None:
             history_indices_list.append(history_indices)
 
         # Padding history features（左对齐：有效特征在前，后面补0）
