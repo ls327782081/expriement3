@@ -605,23 +605,12 @@ def main():
             hidden_dim=256,
             semantic_hierarchy={
                 "topic": {
-                    "layers": [0],
+                    "layers": [0,1,2,3],
                     "codebook_size": 1024,
                     "loss_weight": 1.0,
                     "ema_decay": 0.99
-                },
-                "style": {
-                    "layers": [1, 2],
-                    "codebook_size": 1024,
-                    "loss_weight": 0.8,
-                    "ema_decay": 0.99
-                },
-                "emotion": {
-                    "layers": [3],
-                    "codebook_size": 1024,
-                    "loss_weight": 0.8,
-                    "ema_decay": 0.99
                 }
+
             },
             hscl_weight = 0.03
         ),
@@ -642,6 +631,12 @@ def main():
                 },
                 "style": {
                     "layers": [1, 2],
+                    "codebook_size": 1024,
+                    "loss_weight": 0.8,
+                    "ema_decay": 0.99
+                },
+                "emotion": {
+                    "layers": [3],
                     "codebook_size": 1024,
                     "loss_weight": 0.8,
                     "ema_decay": 0.99
