@@ -76,27 +76,28 @@ def train_pmat_sasrec():
 
     # 从 results/ahrq_ablation/models/ 加载预训练的AHRQ模型
     ahrq_model_path = f"./results/ahrq_ablation/models/{args.ahrq_model}_model.pth"
+    ahrq_model_path = f"./results/sasrec_ahrq_hp_search/expD_combined/stage1_model.pth"
     if os.path.exists(ahrq_model_path):
         print(f"\n========== Loading AHRQ model from {ahrq_model_path} ==========")
         checkpoint = torch.load(ahrq_model_path, map_location=new_config.device, weights_only=False)
 
         # 从保存的配置重建模型结构
-        saved_config = checkpoint['config']
+        # saved_config = checkpoint['config']
 
         # 重建语义层次配置
-        semantic_hierarchy = saved_config['semantic_hierarchy']
+        semantic_hierarchy = checkpoint['semantic_hierarchy']
 
         # 重新创建AHRQ模型，使用保存的配置
         ahrq = AdaptiveHierarchicalQuantizer(
-            hidden_dim=new_config.ahrq_hidden_dim,
+            hidden_dim=256,
             semantic_hierarchy=semantic_hierarchy,
             use_multimodal=True,
             text_dim=new_config.text_dim,
             visual_dim=new_config.visual_dim,
             beta=new_config.ahrq_beta,
-            use_ema=saved_config.get('use_ema', False),
+            use_ema=True,
             ema_decay=0.99,
-            reset_unused_codes=saved_config.get('use_ema', False),
+            reset_unused_codes=True,
             reset_threshold=new_config.ahrq_reset_threshold
         ).to(new_config.device)
 

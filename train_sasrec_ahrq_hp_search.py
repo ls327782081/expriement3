@@ -496,7 +496,7 @@ def train_single_config(
         # 核心基线参数（对齐 Pure SASRec）
         "sasrec_num_layers": 2,  # 基线 2 层
         "dim_feedforward": hp_config.hidden_dim * 4,  # 64*4=256（基线 FFN）
-        "num_heads": 1,  # 基线 1 头（修改为 1 以对齐基线）
+        "num_heads": 2,  # 基线 1 头（修改为 1 以对齐基线）
         "dropout": hp_config.dropout,  # 从配置读取
         "lr_scale": 1.0,  # 学习率不缩放
         # 补充缺失的字段（避免 KeyError）
