@@ -165,7 +165,7 @@ class Config:
 
         # SASRec配置 (匹配hp_search raw_fusion最佳实验)
         self.sasrec_hidden_dim = 64  # 匹配hp_search使用64维
-        self.sasrec_num_heads = 2    # 最佳: 1头
+        self.sasrec_num_heads = 1    # 最佳: 1头
         self.sasrec_num_layers = 2  # 最佳: 2层
         self.sasrec_max_len = 50
         self.sasrec_dropout = 0.5   # 最佳: 0.35
