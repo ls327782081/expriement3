@@ -173,25 +173,26 @@ def run_ablation_experiment(args, config_name, config):
 
     # ===== 加载预训练的 AHRQ 模型 =====
     ahrq_model_path = f"./results/ahrq_ablation/models/{args.ahrq_model}_model.pth"
+    ahrq_model_path = f"./results/sasrec_ahrq_hp_search/expD_combined/stage1_model.pth"
     if not os.path.exists(ahrq_model_path):
         raise FileNotFoundError(f"AHRQ model not found at {ahrq_model_path}")
 
     print(f"\nLoading AHRQ model from {ahrq_model_path}")
     checkpoint = torch.load(ahrq_model_path, map_location=new_config.device, weights_only=False)
 
-    saved_config = checkpoint['config']
-    semantic_hierarchy = saved_config['semantic_hierarchy']
+    # saved_config = checkpoint['config']
+    semantic_hierarchy = checkpoint['semantic_hierarchy']
 
     ahrq = AdaptiveHierarchicalQuantizer(
-        hidden_dim=new_config.ahrq_hidden_dim,
+        hidden_dim=256,
         semantic_hierarchy=semantic_hierarchy,
         use_multimodal=True,
         text_dim=new_config.text_dim,
         visual_dim=new_config.visual_dim,
         beta=new_config.ahrq_beta,
-        use_ema=saved_config.get('use_ema', False),
+        use_ema=True,
         ema_decay=0.99,
-        reset_unused_codes=saved_config.get('use_ema', False),
+        reset_unused_codes=True,
         reset_threshold=new_config.ahrq_reset_threshold
     ).to(new_config.device)
 
