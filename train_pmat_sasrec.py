@@ -1,9 +1,14 @@
 import os
 import argparse
+import json
+from datetime import datetime
 
 import numpy as np
 import torch
 from tqdm import tqdm
+
+# TensorBoard
+from torch.utils.tensorboard import SummaryWriter
 
 from config import new_config
 
@@ -73,6 +78,24 @@ def train_pmat_sasrec():
     # 输出目录
     OUTPUT_DIR = "./results/pmat_sasrec"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # TensorBoard 日志目录
+    tensorboard_dir = "./log_tensorboard/train_pmat_sasrec"
+    os.makedirs(tensorboard_dir, exist_ok=True)
+    writer = SummaryWriter(tensorboard_dir)
+
+    # 详细训练指标记录
+    training_metrics = {
+        "epochs": [],
+        "train_loss": [],
+        "val_loss": [],
+        "train_hr10": [],
+        "train_ndcg10": [],
+        "val_hr10": [],
+        "val_ndcg10": [],
+        "best_val_ndcg": [],
+        "learning_rate": [],
+    }
 
     # 从 results/ahrq_ablation/models/ 加载预训练的AHRQ模型
     ahrq_model_path = f"./results/ahrq_ablation/models/{args.ahrq_model}_model.pth"
@@ -163,10 +186,14 @@ def train_pmat_sasrec():
     )
 
     pmat_sasrec_model_path = f"{OUTPUT_DIR}/final_pmat_sasrec.pth"
+    best_ndcg = 0.0  # Initialize even when loading existing model
     if os.path.exists(pmat_sasrec_model_path):
         print(f"\n========== Loading existing PMAT-SASRec model from {pmat_sasrec_model_path} ==========")
         checkpoint = torch.load(pmat_sasrec_model_path, map_location=new_config.device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
+        # Try to load best_ndcg from checkpoint if available
+        if 'best_ndcg' in checkpoint:
+            best_ndcg = checkpoint['best_ndcg']
         print(f"PMAT-SASRec model loaded! Skipping training.")
     else:
         print("\n========== Stage 2: Recommendation Training (PMAT-SASRec) ==========")
@@ -183,7 +210,9 @@ def train_pmat_sasrec():
         )
 
         best_ndcg = 0.0
+        best_val_ndcg = 0.0  # 记录历史最佳
         for epoch in range(new_config.stage2_epochs):
+            current_lr = optimizer_rec.param_groups[0]['lr']
             model.train()
             train_bar = tqdm(train_loader, desc=f"Stage2 Epoch {epoch + 1}/{new_config.stage2_epochs}")
             train_losses = []
@@ -306,6 +335,31 @@ def train_pmat_sasrec():
             print(f"Train HR@10: {avg_train_metrics['HR@10']:.4f} | Val HR@10: {avg_val_metrics['HR@10']:.4f}")
             print(f"Train NDCG@10: {avg_train_metrics['NDCG@10']:.4f} | Val NDCG@10: {avg_val_metrics['NDCG@10']:.4f}")
 
+            # 记录当前最佳 val NDCG
+            if avg_val_metrics["NDCG@10"] > best_ndcg:
+                best_val_ndcg = best_ndcg = avg_val_metrics["NDCG@10"]
+
+            # 记录训练指标到列表
+            training_metrics["epochs"].append(epoch + 1)
+            training_metrics["train_loss"].append(round(avg_train_loss, 4))
+            training_metrics["val_loss"].append(round(avg_val_loss, 4))
+            training_metrics["train_hr10"].append(round(avg_train_metrics['HR@10'], 4))
+            training_metrics["train_ndcg10"].append(round(avg_train_metrics['NDCG@10'], 4))
+            training_metrics["val_hr10"].append(round(avg_val_metrics['HR@10'], 4))
+            training_metrics["val_ndcg10"].append(round(avg_val_metrics['NDCG@10'], 4))
+            training_metrics["best_val_ndcg"].append(round(best_val_ndcg, 4))
+            training_metrics["learning_rate"].append(round(current_lr, 6))
+
+            # 写入 TensorBoard
+            writer.add_scalar("Loss/Train", avg_train_loss, epoch + 1)
+            writer.add_scalar("Loss/Val", avg_val_loss, epoch + 1)
+            writer.add_scalar("Metrics/HR@10_Train", avg_train_metrics['HR@10'], epoch + 1)
+            writer.add_scalar("Metrics/HR@10_Val", avg_val_metrics['HR@10'], epoch + 1)
+            writer.add_scalar("Metrics/NDCG@10_Train", avg_train_metrics['NDCG@10'], epoch + 1)
+            writer.add_scalar("Metrics/NDCG@10_Val", avg_val_metrics['NDCG@10'], epoch + 1)
+            writer.add_scalar("Metrics/Best_Val_NDCG", best_val_ndcg, epoch + 1)
+            writer.add_scalar("Learning_Rate", current_lr, epoch + 1)
+
             if avg_val_metrics["NDCG@10"] > best_ndcg:
                 best_ndcg = avg_val_metrics["NDCG@10"]
                 torch.save({
@@ -317,7 +371,7 @@ def train_pmat_sasrec():
                 }, f"{OUTPUT_DIR}/best_pmat_sasrec.pth")
                 print(f"Stage2 Best model saved! NDCG@10: {best_ndcg:.4f}")
 
-        torch.save({"model_state_dict": model.state_dict()}, f"{OUTPUT_DIR}/final_pmat_sasrec.pth")
+        torch.save({"model_state_dict": model.state_dict(), "best_ndcg": best_ndcg}, f"{OUTPUT_DIR}/final_pmat_sasrec.pth")
 
     # 核心修改5：传入all_item_meta，用于测试阶段的模态加权
     test_hr_full, test_ndcg_full = evaluate_test_full(
@@ -335,6 +389,43 @@ def train_pmat_sasrec():
     print("\n========== Two-Stage Training Completed! ==========")
     print(f"Best Quant Recon Loss: {best_recon_loss:.6f} | Best Recommendation NDCG (Val): {best_ndcg:.4f}")
     print(f"Final Test HR@10 (Full): {test_hr_full:.4f} | Final Test NDCG@10 (Full): {test_ndcg_full:.4f}")
+
+    # ==================== 保存运行结果 ====================
+    # 1. 保存详细训练指标到 JSON
+    metrics_file = f"{OUTPUT_DIR}/training_metrics.json"
+    with open(metrics_file, 'w', encoding='utf-8') as f:
+        json.dump(training_metrics, f, indent=2, ensure_ascii=False)
+    print(f"\n[保存] 训练指标已保存到: {metrics_file}")
+
+    # 2. 保存最终结果汇总
+    final_results = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "config": {
+            "ahrq_model": args.ahrq_model,
+            "batch_size": new_config.batch_size,
+            "stage2_epochs": new_config.stage2_epochs,
+            "lr": new_config.lr,
+            "weight_decay": new_config.weight_decay,
+            "num_heads": new_config.sasrec_num_heads,
+            "sasrec_num_layers": new_config.sasrec_num_layers,
+        },
+        "best_recon_loss": round(best_recon_loss, 6),
+        "best_val_ndcg": round(best_ndcg, 4),
+        "test_results": {
+            "HR@10": round(test_hr_full, 4),
+            "NDCG@10": round(test_ndcg_full, 4),
+        },
+        "final_model_path": f"{OUTPUT_DIR}/final_pmat_sasrec.pth",
+        "best_model_path": f"{OUTPUT_DIR}/best_pmat_sasrec.pth",
+    }
+    results_file = f"{OUTPUT_DIR}/final_results.json"
+    with open(results_file, 'w', encoding='utf-8') as f:
+        json.dump(final_results, f, indent=2, ensure_ascii=False)
+    print(f"[保存] 最终结果已保存到: {results_file}")
+
+    # 关闭 TensorBoard writer
+    writer.close()
+    print("[保存] TensorBoard 日志已关闭")
 
 
 if __name__ == "__main__":
