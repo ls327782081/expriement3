@@ -222,7 +222,8 @@ class PMATAHRQEncoder(nn.Module):
         user_interest = temp_encoder(hist_static_emb, history_len)
 
         # 3. 动态更新（只更新有效长度，不包含Pad）
-        short_hist_emb = hist_static_emb[:, -10:, :] if actual_len >= 10 else hist_static_emb
+        short_term_window = new_config.pmat_short_term_window  # 短期兴趣窗口长度
+        short_hist_emb = hist_static_emb[:, -short_term_window:, :] if actual_len >= short_term_window else hist_static_emb
         drift_score = self.dynamic_updater.detect_drift(short_hist_emb, hist_static_emb)
         new_features = user_interest.unsqueeze(1).expand(-1, actual_len, -1)
         hist_dynamic_emb = self.dynamic_updater.update(hist_static_emb, new_features, drift_score)
@@ -249,7 +250,8 @@ class PMATAHRQEncoder(nn.Module):
         user_interest = self.user_interest_encoder(hist_dynamic_emb, history_len)
 
         # 3. 动态更新
-        short_hist_emb = hist_dynamic_emb[:, -10:, :] if hist_dynamic_emb.shape[1] >= 10 else hist_dynamic_emb
+        short_term_window = new_config.pmat_short_term_window  # 短期兴趣窗口长度
+        short_hist_emb = hist_dynamic_emb[:, -short_term_window:, :] if hist_dynamic_emb.shape[1] >= short_term_window else hist_dynamic_emb
         drift_score = self.dynamic_updater.detect_drift(short_hist_emb, hist_dynamic_emb)
         target_dynamic_emb = self.dynamic_updater.update(target_static_emb, user_interest, drift_score)
 
