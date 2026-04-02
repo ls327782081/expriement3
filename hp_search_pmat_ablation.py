@@ -1,25 +1,22 @@
 """
 PMAT 参数消融实验脚本
 
-搜索以下参数对模型性能的影响：
+搜索以下参数对模型性能的影响（每个参数单独测试，不做交叉验证）：
 1. 融合系数 (fusion_alpha): 动态/模态融合权重
 2. 兴趣漂移阈值 (pmat_drift_threshold): 用户兴趣变化超过该阈值则判定为兴趣漂移
-3. 短期兴趣窗口长度 (sasrec_max_len): 最近L个行为作为短期兴趣
+3. 短期兴趣窗口长度 (pmat_short_term_window): PMAT内部用于漂移检测的窗口长度
 
 用法：
-    # 搜索融合系数
+    # 搜索融合系数 (6组实验: 0, 0.2, 0.4, 0.6, 0.8, 1.0)
     python hp_search_pmat_ablation.py --param fusion_alpha
 
-    # 搜索兴趣漂移阈值
+    # 搜索兴趣漂移阈值 (5组实验: 0.1, 0.2, 0.3, 0.4, 0.5)
     python hp_search_pmat_ablation.py --param drift_threshold
 
-    # 搜索短期兴趣窗口长度
+    # 搜索短期兴趣窗口长度 (5组实验: 5, 10, 20, 30, 50)
     python hp_search_pmat_ablation.py --param short_term_window
 
-    # 搜索所有参数 (全网格搜索)
-    python hp_search_pmat_ablation.py --param all
-
-    # 指定基准参数运行单个实验
+    # 指定参数运行单个实验
     python hp_search_pmat_ablation.py --param single --fusion_alpha 0.6 --drift_threshold 0.3 --pmat_short_term_window 10
 """
 
@@ -55,8 +52,7 @@ def parse_args():
     # 参数类型选择
     parser.add_argument('--param', type=str, default='all',
                         choices=['fusion_alpha', 'drift_threshold', 'short_term_window', 'all', 'single'],
-                        help='搜索参数: fusion_alpha, drift_threshold, short_term_window, all, single')
-                        help='要搜索的参数')
+                        help='要搜索的参数: fusion_alpha, drift_threshold, short_term_window, all(全部), single')
 
     # 融合系数
     parser.add_argument('--fusion_alpha', type=float, default=0.7,
@@ -178,14 +174,15 @@ def run_single_experiment(args, experiment_name, **override_params):
 
     # 加载预训练的 AHRQ 模型
     ahrq_model_path = f"./results/ahrq_ablation/models/{args.ahrq_model}_model.pth"
+    ahrq_model_path = f"./results/sasrec_ahrq_hp_search/expD_combined/stage1_model.pth"
     if not os.path.exists(ahrq_model_path):
         raise FileNotFoundError(f"AHRQ model not found at {ahrq_model_path}")
 
     print(f"\n========== Loading AHRQ model from {ahrq_model_path} ==========")
     checkpoint = torch.load(ahrq_model_path, map_location=new_config.device, weights_only=False)
 
-    saved_config = checkpoint['config']
-    semantic_hierarchy = saved_config['semantic_hierarchy']
+    # saved_config = checkpoint['config']
+    semantic_hierarchy = checkpoint['semantic_hierarchy']
 
     ahrq = AdaptiveHierarchicalQuantizer(
         hidden_dim=new_config.ahrq_hidden_dim,
@@ -194,9 +191,9 @@ def run_single_experiment(args, experiment_name, **override_params):
         text_dim=new_config.text_dim,
         visual_dim=new_config.visual_dim,
         beta=new_config.ahrq_beta,
-        use_ema=saved_config.get('use_ema', False),
+        use_ema=True,
         ema_decay=0.99,
-        reset_unused_codes=saved_config.get('use_ema', False),
+        reset_unused_codes=True,
         reset_threshold=new_config.ahrq_reset_threshold
     ).to(new_config.device)
 
@@ -504,10 +501,6 @@ def save_results_latex(results, output_path, param_name):
         caption = "短期兴趣窗口长度 $L$ 对模型性能的影响"
         col_format = "|l|c|c|c|c|c|c|"
         header = "$L$ & HR@5 & HR@10 & HR@20 & NDCG@5 & NDCG@10 & NDCG@20 \\\\"
-    else:
-        caption = "参数搜索结果"
-        col_format = "|l|c|c|c|c|c|c|c|c|c|"
-        header = "Exp & $\\alpha$ & $\\gamma$ & $L$ & HR@5 & HR@10 & NDCG@5 & NDCG@10 & MRR \\\\"
 
     lines = []
     lines.append("\\begin{table}[htbp]")
@@ -519,32 +512,20 @@ def save_results_latex(results, output_path, param_name):
     lines.append("\\hline")
 
     for r in sorted_results:
-        if param_name == 'all':
-            name = r.get('experiment_name', '')
-            alpha = r.get('fusion_alpha', '-')
-            gamma = r.get('drift_threshold', '-')
-            L = r.get('pmat_short_term_window', '-')
-            hr5 = r.get('test_hr5', 0)
-            hr10 = r.get('test_hr10', 0)
-            ndcg5 = r.get('test_ndcg5', 0)
-            ndcg10 = r.get('test_ndcg10', 0)
-            mrr = r.get('test_mrr', 0)
-            lines.append(f"{name} & {alpha} & {gamma} & {L} & {hr5:.4f} & {hr10:.4f} & {ndcg5:.4f} & {ndcg10:.4f} & {mrr:.4f} \\\\")
+        if param_name == 'fusion_alpha':
+            value = r.get('fusion_alpha', 0)
+        elif param_name == 'drift_threshold':
+            value = r.get('drift_threshold', 0)
         else:
-            if param_name == 'fusion_alpha':
-                value = r.get('fusion_alpha', 0)
-            elif param_name == 'drift_threshold':
-                value = r.get('drift_threshold', 0)
-            else:
-                value = r.get('pmat_short_term_window', 0)
+            value = r.get('pmat_short_term_window', 0)
 
-            hr5 = r.get('test_hr5', 0)
-            hr10 = r.get('test_hr10', 0)
-            hr20 = r.get('test_hr20', 0)
-            ndcg5 = r.get('test_ndcg5', 0)
-            ndcg10 = r.get('test_ndcg10', 0)
-            ndcg20 = r.get('test_ndcg20', 0)
-            lines.append(f"{value} & {hr5:.4f} & {hr10:.4f} & {hr20:.4f} & {ndcg5:.4f} & {ndcg10:.4f} & {ndcg20:.4f} \\\\")
+        hr5 = r.get('test_hr5', 0)
+        hr10 = r.get('test_hr10', 0)
+        hr20 = r.get('test_hr20', 0)
+        ndcg5 = r.get('test_ndcg5', 0)
+        ndcg10 = r.get('test_ndcg10', 0)
+        ndcg20 = r.get('test_ndcg20', 0)
+        lines.append(f"{value} & {hr5:.4f} & {hr10:.4f} & {hr20:.4f} & {ndcg5:.4f} & {ndcg10:.4f} & {ndcg20:.4f} \\\\")
 
     lines.append("\\hline")
     lines.append("\\end{tabular}")
@@ -640,46 +621,6 @@ def search_short_term_window(args):
     return results, 'short_term_window'
 
 
-def search_all(args):
-    """全网格搜索所有参数"""
-    print("\n" + "="*60)
-    print("全网格搜索 (所有参数组合)")
-    print("="*60)
-
-    fusion_alpha_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    drift_threshold_values = [0.1, 0.2, 0.3, 0.4, 0.5]
-    pmat_short_term_window_values = [5, 10, 20, 30, 50]
-
-    results = []
-    experiment_id = 1
-
-    total_experiments = len(fusion_alpha_values) * len(drift_threshold_values) * len(pmat_short_term_window_values)
-    print(f"总共需要运行 {total_experiments} 组实验")
-
-    for fusion_alpha in fusion_alpha_values:
-        for drift_threshold in drift_threshold_values:
-            for pmat_short_term_window in pmat_short_term_window_values:
-                experiment_name = f"exp_{experiment_id:03d}"
-                params = {
-                    'fusion_alpha': fusion_alpha,
-                    'drift_threshold': drift_threshold,
-                    'pmat_short_term_window': pmat_short_term_window,
-                    'max_history_len': args.base_max_history_len,
-                    'lr': args.lr,
-                    'lambda_dynamic': args.lambda_dynamic,
-                    'lambda_modal': args.lambda_modal
-                }
-
-                print(f"\n[{experiment_id}/{total_experiments}] 运行实验: {experiment_name}")
-                result = run_single_experiment(args, experiment_name, **params)
-                if result:
-                    results.append(result)
-
-                experiment_id += 1
-
-    return results, 'all'
-
-
 def main():
     args = parse_args()
 
@@ -701,7 +642,15 @@ def main():
     elif args.param == 'short_term_window':
         results, param_name = search_short_term_window(args)
     elif args.param == 'all':
-        results, param_name = search_all(args)
+        # 依次运行三个参数的搜索
+        print("\n" + "="*60)
+        print("运行全部参数搜索实验")
+        print("="*60)
+        results_fusion, _ = search_fusion_alpha(args)
+        results_drift, _ = search_drift_threshold(args)
+        results_window, _ = search_short_term_window(args)
+        results = results_fusion + results_drift + results_window
+        param_name = 'all'
     elif args.param == 'single':
         # 单次运行
         experiment_name = f"single_run"
