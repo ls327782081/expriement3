@@ -548,7 +548,7 @@ def search_fusion_alpha(args):
     print("搜索融合系数 fusion_alpha")
     print("="*60)
 
-    fusion_alpha_values = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    fusion_alpha_values = [ 0.2, 0.4, 0.6, 0.8, 1.0]
     results = []
 
     for i, fusion_alpha in enumerate(fusion_alpha_values):
