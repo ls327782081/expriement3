@@ -497,10 +497,15 @@ def save_results_latex(results, output_path, param_name):
         caption = "兴趣漂移阈值 $\\gamma$ 对模型性能的影响"
         col_format = "|l|c|c|c|c|c|c|"
         header = "$\\gamma$ & HR@5 & HR@10 & HR@20 & NDCG@5 & NDCG@10 & NDCG@20 \\\\"
-    elif param_name == 'short_term_window':
+    elif param_name == 'short_term_window' or param_name == 'pmat_short_term_window':
         caption = "短期兴趣窗口长度 $L$ 对模型性能的影响"
         col_format = "|l|c|c|c|c|c|c|"
         header = "$L$ & HR@5 & HR@10 & HR@20 & NDCG@5 & NDCG@10 & NDCG@20 \\\\"
+    else:
+        # Default fallback for unknown param_name
+        caption = f"参数 {param_name} 对模型性能的影响"
+        col_format = "|l|c|c|c|c|c|c|"
+        header = "Value & HR@5 & HR@10 & HR@20 & NDCG@5 & NDCG@10 & NDCG@20 \\\\"
 
     lines = []
     lines.append("\\begin{table}[htbp]")
